@@ -272,3 +272,22 @@ printed a terminal line. Fix what the run finds, in the unit the defect belongs 
 
 `pr_terminal` (still refused), new backends, any change to Cratekit, lifting the Claude only
 restriction, the GitHub Project board.
+
+## Amendments made while executing, 2026-09-07
+
+- U2 to U5 landed on one branch with one commit per unit, because contracts, brief, classifier,
+  closeout, and manifest are one coupled change and no intermediate state was green on its own.
+  The merge was gated on the full suite once.
+- The brief still renders for `codex` and `grok`, with a self review fallback in place of the
+  review step, even though `validate` refuses both. That keeps the launch seams, the unenforced
+  restriction insert, and the commit message constraint under test until the refusal lifts. No
+  real process reads the fallback, because the CLI validates before it launches.
+- U1 found more personal content than the request listed: the captured fixtures carried the
+  operator's whole skill catalogue as a `skill_listing` attachment, the git identity on author
+  lines, `ls` owner columns, and Grok's `available_commands` array. The scrubber gained a generic
+  rule for each shape and takes its private word list from `RELAY_SCRUB_TERMS`.
+- The live run (U7) landed in 83 seconds on `sonnet`: plan as a message, build, `/code-review`
+  through the Skill tool (it found a real clamping bug and the task fixed it), both of the
+  target's own verification commands, a changelog line recorded, a four key envelope, gate,
+  merge, closeout closing the tracker line and ending on `Documentation skipped`. No
+  `review_skipped` finding. Suite after U6: see the merge commit.
