@@ -1,0 +1,89 @@
+# Relay manifest: a GitHub Projects board, local merge mode. The task process plans, builds
+# and reviews on its own branch; the runner runs the gate, merges, and pushes.
+#
+# pr_terminal mode, where each task ends at an open pull request whose checks have decided, is
+# named in the schema and refused by `relay validate`. The run loop has no PR sequence, so a run
+# under it would halt on its first task. See docs/ideation/2026-08-25-relay-review-residuals.md.
+
+[project]
+repo = "~/code/example-service"
+default_branch = "main"
+mirror = []
+# Optional. Task branches are this prefix plus the Task id. Default is "relay/" when the key is
+# absent. Set it when the repo's convention is not relay/<id>.
+# branch_prefix = "feat/"
+
+[tracker]
+adapter = "github"
+owner = "example-org"
+project_number = 7
+# An issue is terminal when it is CLOSED, or when its item on the board reads this status.
+status_field = "Done"
+# KTD6 routes a task whose process printed no return envelope by asking whether the card reached
+# this status. Required in local merge mode.
+in_review_status = "In review"
+
+[shipping]
+mode = "local_merge"
+
+[permissions]
+allowed = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "Agent", "TodoWrite"]
+disallowed = []
+# Required because Task 413 names codex, which cannot refuse tools at launch. The sentence
+# below is a fixture, not an operator's words. Replace it before a real run.
+unenforced_acceptance = "example fixture: this mixed manifest accepts that Codex cannot refuse tools at launch"
+task_allowed_paths = ["src/", "docs/"]
+
+[timeouts]
+task_minutes = 150
+closeout_minutes = 20
+# Unused in local merge mode, where the gate runs locally before the merge. Kept because the
+# schema requires it.
+ci_poll_minutes = 45
+
+[closeout]
+model = "sonnet"
+effort = "medium"
+allowed_tools = []
+allowed_paths = []
+
+[gate]
+command = ["make", "check"]
+description = "make check locally before the merge, and a pre push hook that runs it again"
+
+[qualifying]
+gate = "A pre push hook runs make check and refuses the push on failure; CI runs it again on main."
+durable_state = "Merge commits on main and the board's issues are the only state carried between tasks."
+independence = "The listed issues touch separate services and can ship in any order."
+editors = "Only the repository's own maintainers can edit these issues or comment on them."
+
+[on_blocked]
+merge_partial = false
+open_followup = true
+
+[on_halt]
+# Off, the first halt of any class stops the run. On, a halt contained to one task
+# pauses that task and the later independent tasks keep running (issue #15).
+continue_past_task_halt = false
+
+# A mixed manifest. The default below puts every task on claude; 413 names codex instead, so this
+# one file carries both shapes. A task's backend decides which CLI runs its task process and its
+# closeout, and nothing else about the run changes.
+[defaults]
+backend = "claude"
+
+[[tasks]]
+id = "412"
+model = "opus"
+effort = "high"
+
+[[tasks]]
+id = "413"
+# A codex model, because the backend below is codex. Validate refuses a task whose model is a
+# name another backend is known to accept, so the model moves with the backend (issue #58).
+model = "gpt-5-codex"
+effort = "medium"
+backend = "codex"
+# Required because this Task leaves the default backend. The sentence below is a fixture, not
+# an operator's words. Replace it before a real run.
+reason = "example fixture: this Task spends Codex budget on mechanical work"

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Stub `claude` for Relay's tests. Never calls a model.
+
+It accepts the flag set the runner passes, finds --session-id, and replays a queued transcript
+fixture into the place the real CLI would write it: ~/.claude/projects/<slug>/<id>.jsonl under
+os.path.expanduser("~"), so a test that sets HOME redirects it. The slug rule must match the
+runner's (relay.contracts.slug_for) exactly; the test suite checks that they agree.
+
+Queue protocol, sleep, orphan-child, and git.sh hook: see _stub.py, alongside this binary and
+shared with the `codex` and `grok` stubs.
+
+Other knobs:
+  RELAY_STUB_CLI_VERSION=<text>    overrides the fake `--version` output (default matches
+                                    contracts.CLI_VERSION_TESTED; bump both together on a
+                                    real version pin change or every test that doesn't set this
+                                    starts observing harmless-but-misleading drift)
+"""
+import os
+import re
+import shutil
+import sys
+
+import _stub
+
+
+def slug_for(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def parse_args(argv):
+    """The runner's flags, as a dict. `-p <prompt>` is positional; every other flag takes one
+    value except --verbose."""
+    flags = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "-p":
+            flags["prompt"] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        elif arg == "--verbose":
+            flags["verbose"] = True
+            i += 1
+        elif arg.startswith("--"):
+            flags[arg[2:]] = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        else:
+            i += 1
+    return flags
+
+
+def main(argv):
+    if argv == ["plugin", "list"]:
+        print("  ❯ compound-engineering@compound-engineering-plugin\n"
+              "    Version: 3.23.4\n"
+              "    Scope: user\n"
+              "    Status: ✔ enabled")
+        return 0
+
+    if argv[:1] == ["--version"]:
+        print(os.environ.get("RELAY_STUB_CLI_VERSION", "2.1.250 (Claude Code)"))
+        return 0
+
+    flags = parse_args(argv)
+    session_id = flags.get("session-id", "")
+
+    def write_evidence(entry, queue):
+        fixture = entry.get("fixture")
+        if not (fixture and session_id):
+            return
+        fixture = _stub.resolve(queue, fixture)
+        slug = slug_for(os.path.realpath(os.getcwd()))
+        target_dir = os.path.join(os.path.expanduser("~"), ".claude", "projects", slug)
+        os.makedirs(target_dir, exist_ok=True)
+        target = os.path.join(target_dir, session_id + ".jsonl")
+        shutil.copyfile(fixture, target)
+        _stub.emit({"type": "system", "subtype": "stub_transcript", "path": target})
+
+    return _stub.main(session_id, write_evidence)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
