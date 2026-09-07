@@ -18,9 +18,10 @@ parse_version = _parse_after_name_token
 _ARGUMENT_KEYS = ("command", "file_path", "target_file", "pattern", "skill", "description")
 
 # Grok's structured deny mechanism (demonstrated in denial-refusal.jsonl) is detectable; its
-# skill invocation is a plain slash-command string with no distinguishing tool call, so
-# substitution cannot be (Backends U6, R4).
-_UNDETECTABLE = frozenset((contracts.HALT_SKILL_SUBSTITUTION,))
+# skill invocation is a plain slash-command string with no distinguishing tool call, so a
+# review step that never ran cannot be (Backends U6, R4), and there is no verified review step
+# here anyway (`review_skill` is None).
+_UNDETECTABLE = frozenset((contracts.REVIEW_SKIPPED,))
 
 # The marker Grok's own `--deny` rule denial carries. A `tool_call_update` failing for another
 # reason (a missing file, or Grok's own `auto`-mode judgment call, "Auto mode blocked this
@@ -184,6 +185,3 @@ def evidence_sources(home, cwd, session_id, log_path=None, **_kwargs):
     encoded = _quote(cwd, safe="")
     return (os.path.join(home, ".grok", "sessions", encoded, session_id, "updates.jsonl"),)
 
-
-def qualify_skill(name):
-    return CAPABILITY.skill_form % name

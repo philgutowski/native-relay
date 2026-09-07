@@ -134,9 +134,9 @@ FINDING_ROWS = {
          "tool_use_line": 88},
         "classify.classify, a denial matching a tracker write pattern",
     ),
-    contracts.HALT_SKILL_SUBSTITUTION: (
-        {"name": "code-review", "required": "compound-engineering:ce-code-review", "line": 44},
-        "classify.classify, the Skill call scan",
+    contracts.REVIEW_SKIPPED: (
+        {"review": "/code-review"},
+        "classify.classify, a complete envelope with no review call in the transcript",
     ),
     contracts.HALT_NO_ENVELOPE: (
         {"last_message": "I have stopped rather than working around the denial."},

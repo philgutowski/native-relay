@@ -80,6 +80,3 @@ def build_args(manifest, task, brief_text, session_id, allowed=None, disallowed=
 def evidence_sources(home, cwd, session_id, log_path=None, **_kwargs):
     return (contracts.transcript_path(home, cwd, session_id),)
 
-
-def qualify_skill(name):
-    return CAPABILITY.skill_form % name
