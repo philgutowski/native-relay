@@ -24,19 +24,19 @@ line, Verify-landed); use those words.
 
 ## Project tracking
 
-Relay Native has no GitHub Project board yet. Project 4 (**Relay Compound**) belongs to
-`relay-compound` and must not receive this repo's issues. Until a board exists, the issue list on
-`philgutowski/relay-native` is the canonical source of truth for what is open, in progress, and
+Native Relay has no GitHub Project board yet. Project 4 (**Compound Relay**) belongs to
+`compound-relay` and must not receive this repo's issues. Until a board exists, the issue list on
+`philgutowski/native-relay` is the canonical source of truth for what is open, in progress, and
 done. It supersedes `docs/backlog.md` as the working list; that file overrides Phillip's global
 backlog convention for this repo. Concretely:
 
-- Every open work item is a GitHub issue on `philgutowski/relay-native`, labeled or titled so its
-  Status (Todo, In Progress, Done) is clear. `gh issue list --repo philgutowski/relay-native
+- Every open work item is a GitHub issue on `philgutowski/native-relay`, labeled or titled so its
+  Status (Todo, In Progress, Done) is clear. `gh issue list --repo philgutowski/native-relay
   --state open` is the way to check current PM state, not a doc in this repo. When a board is
   created for this repo, update this section to name it.
 - `docs/backlog.md` stays for fast raw capture mid-session only, one line per idea per the
   global convention. It is a holding pen, not a list: promote each line to a GitHub issue (`gh
-  issue create --repo philgutowski/relay-native`) as soon as it is triaged, quote
+  issue create --repo philgutowski/native-relay`) as soon as it is triaged, quote
   the backlog line in the issue body under a `Source:` note, then delete the line from
   `docs/backlog.md`. A line still sitting in the file means it has not been promoted yet, not
   that it is tracked.

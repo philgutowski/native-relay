@@ -1,8 +1,8 @@
-# Relay Native
+# Native Relay
 
-Hard fork of `relay-compound` (formerly `relay`), started fresh on 2026-09-07 from its commit
+Hard fork of `compound-relay` (formerly `relay`), started fresh on 2026-09-07 from its commit
 `7f53afa` with no shared git history. This repository is where the new line of development
-happens; `relay-compound` stays as the working original. Plugin name: `relay-native`.
+happens; `compound-relay` stays as the working original. Plugin name: `native-relay`.
 
 Run a list of pre-defined tasks through a full engineering pipeline, one fresh
 headless process per task, serially and unattended. `/relay` itself runs in Claude Code. Each

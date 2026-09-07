@@ -1,11 +1,11 @@
 {
-  "name": "relay-native",
+  "name": "native-relay",
   "version": "0.2.0",
   "description": "Run a manifest of independent tasks through the compound-engineering pipeline, one fresh headless Claude Code process per task, serially and unattended.",
   "author": {
     "name": "Phillip Gutowski"
   },
-  "repository": "https://github.com/philgutowski/relay-native",
+  "repository": "https://github.com/philgutowski/native-relay",
   "license": "MIT",
   "keywords": [
     "compound-engineering",
