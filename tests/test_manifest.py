@@ -1,7 +1,6 @@
 """U2: the manifest loads into typed values and every validation rule names its field."""
 import os
 import re
-import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -18,6 +17,15 @@ FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 # R9 refuses a backend paired with a model another backend claims, so a fixture that reassigns
 # a Task's backend has to reassign its model in the same edit.
 BACKEND_MODELS = {"claude": "opus", "codex": "gpt-5-codex", "grok": "grok-4"}
+
+
+NATIVE_REFUSAL = "no verified native review step"
+
+
+def other_errors(result):
+    """Every error except the native mode refusal of a non claude backend, so a rule about
+    codex or grok manifests can still be asserted on its own."""
+    return [error for error in result.errors if NATIVE_REFUSAL not in error]
 
 
 def drop_table(text, name):
@@ -258,12 +266,24 @@ class NegativeManifests(ManifestCase):
 
 
 class AllowedPaths(ManifestCase):
-    def test_docs_root_from_target_config_yaml(self):
-        os.makedirs(os.path.join(self.repo, ".compound-engineering"))
-        with open(os.path.join(self.repo, ".compound-engineering", "config.yaml"), "w") as handle:
-            handle.write("# checkout config\ncross_model_review_mode: off\ndocs_root: notes\n")
-        result = mf.validate(self.load())
+    def test_docs_root_from_the_manifest_key(self):
+        text = self.edit(r"^allowed_paths = \[\]", 'allowed_paths = []\ndocs_root = "notes"')
+        result = mf.validate(mf.load(self.write(text)))
+        self.assertTrue(result.ok, result.errors)
         self.assertEqual(result.allowed_paths, ["notes/", "CONCEPTS.md", "tracker.md"])
+
+    def test_the_docs_root_default_is_named_rather_than_silent(self):
+        result = mf.validate(self.load())
+        self.assertIn("closeout.docs_root = 'docs'", result.defaults_applied)
+        self.assertEqual(result.allowed_paths, ["docs/", "CONCEPTS.md", "tracker.md"])
+
+    def test_an_absolute_or_escaping_docs_root_is_refused(self):
+        for value in ("/etc/docs", "../docs", ""):
+            with self.subTest(value=value):
+                text = self.edit(r"^allowed_paths = \[\]", 'allowed_paths = []\ndocs_root = "%s"' % value)
+                result = mf.validate(mf.load(self.write(text)))
+                self.assertTrue(any("closeout.docs_root" in error for error in result.errors),
+                                result.errors)
 
     def test_manifest_extras_are_appended(self):
         text = self.edit(r"^allowed_paths = \[\]", 'allowed_paths = ["CHANGELOG.md"]')
@@ -312,7 +332,7 @@ class Backends(ManifestCase):
         for task in m.tasks:
             self.assertEqual(task.backend, "codex")
         result = mf.validate(m)
-        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(other_errors(result), [])
         # The operator wrote this one, so it is not a default Relay applied.
         self.assertNotIn("defaults.backend = 'codex'", result.defaults_applied)
 
@@ -324,14 +344,42 @@ class Backends(ManifestCase):
         m = self.load(text)
         self.assertEqual(m.tasks[0].backend, "grok")
         self.assertEqual(m.tasks[1].backend, "codex")
-        self.assertTrue(mf.validate(m).ok)
+        self.assertEqual(other_errors(mf.validate(m)), [])
 
     def test_a_mixed_manifest_validates(self):
         text = self._with_unenforced_gate(
             self.retarget(self.base, "T-1", "codex", '\nreason = "fixture: mixed Codex Task"'))
         m = self.load(text)
         self.assertEqual([t.backend for t in m.tasks], ["codex", "claude"])
-        self.assertTrue(mf.validate(m).ok)
+        self.assertEqual(other_errors(mf.validate(m)), [])
+
+    def test_native_mode_refuses_a_task_on_a_backend_with_no_review_skill(self):
+        """Decided 2026-09-07 (docs/plans/2026-09-07-native-mode-plan.md). The refusal names
+        the task, the backend, and the missing step, and fires on an excluded task and on an
+        inherited [defaults] backend too, so nothing can launch there later."""
+        mixed = self._with_unenforced_gate(
+            self.retarget(self.base, "T-1", "codex", '\nreason = "fixture: mixed Codex Task"'))
+        result = mf.validate(self.load(mixed))
+        self.assertFalse(result.ok)
+        refusals = [error for error in result.errors if NATIVE_REFUSAL in error]
+        self.assertEqual(len(refusals), 1, result.errors)
+        self.assertIn("T-1", refusals[0])
+        self.assertIn("codex", refusals[0])
+        self.assertIn("claude only", refusals[0])
+
+        excluded = self.retarget(self.base, "T-2", "grok")
+        self.assertTrue(self.load(excluded).tasks[1].excluded, "the fixture's T-2 is the excluded one")
+        result = mf.validate(self.load(excluded))
+        self.assertTrue(any(NATIVE_REFUSAL in error and "T-2" in error for error in result.errors),
+                        result.errors)
+
+        inherited = self.base.replace("[[tasks]]", '[defaults]\nbackend = "grok"\n\n[[tasks]]', 1)
+        for task_id in ("T-1", "T-2"):
+            inherited = self.remodel(inherited, task_id, BACKEND_MODELS["grok"])
+        result = mf.validate(self.load(inherited))
+        self.assertEqual(sum(NATIVE_REFUSAL in error for error in result.errors), 2, result.errors)
+
+        self.assertTrue(mf.validate(self.load()).ok)
 
     def test_an_unrecognized_backend_is_refused_and_names_the_valid_set(self):
         text = self.base.replace('id = "T-1"', 'id = "T-1"\nbackend = "gpt5"', 1)
@@ -378,7 +426,7 @@ class BackendReason(ManifestCase):
 
     def test_a_non_empty_reason_lets_a_differing_backend_validate(self):
         text = self._mixed_codex('\nreason = "fixture: spend Codex budget on mechanical work"')
-        self.assertTrue(mf.validate(self.load(text)).ok)
+        self.assertEqual(other_errors(mf.validate(self.load(text))), [])
 
     def test_a_task_that_inherits_the_default_needs_no_reason(self):
         self.assertTrue(mf.validate(self.load()).ok)
@@ -399,7 +447,7 @@ class BackendReason(ManifestCase):
                             'unenforced_acceptance = "fixture: operator accepts unenforced Codex"\n'
                             'task_allowed_paths = ["src/"]',
                             1)
-        self.assertTrue(mf.validate(self.load(text)).ok, mf.validate(self.load(text)).errors)
+        self.assertEqual(other_errors(mf.validate(self.load(text))), [])
 
     def test_a_task_that_leaves_a_non_claude_default_without_a_reason_is_refused(self):
         text = self.base.replace("[[tasks]]", '[defaults]\nbackend = "codex"\n\n[[tasks]]', 1)
@@ -451,7 +499,7 @@ class BackendReason(ManifestCase):
                             'unenforced_acceptance = "fixture: operator accepts unenforced Codex"\n'
                             'task_allowed_paths = ["src/"]',
                             1)
-        self.assertTrue(mf.validate(self.load(text)).ok)
+        self.assertEqual(other_errors(mf.validate(self.load(text))), [])
         text_missing = text.replace('reason = "brief says stop and ask on the schema question"',
                                     'reason = ""')
         result = mf.validate(self.load(text_missing))
@@ -492,14 +540,14 @@ class BackendModelCoherence(ManifestCase):
         # KTD11: the check is negative, so a model name Relay has never heard of is not refused.
         # A positive allowlist would refuse this the day a provider ships a new model.
         result = mf.validate(self.load(self._all_on("grok", "mercury-2")))
-        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(other_errors(result), [])
 
     def test_a_backend_paired_with_its_own_model_validates(self):
         for backend, model in BACKEND_MODELS.items():
             with self.subTest(backend=backend):
                 permissions = self.CODEX_PERMISSIONS if backend == "codex" else ""
                 result = mf.validate(self.load(self._all_on(backend, model, permissions)))
-                self.assertTrue(result.ok, result.errors)
+                self.assertEqual(other_errors(result), [])
 
     def test_an_invalid_defaults_backend_does_not_skip_the_mismatch_check(self):
         # An invalid reference value must not switch off an unrelated per Task rule, the trap
@@ -538,100 +586,46 @@ class BackendModelCoherence(ManifestCase):
                          known_models=grok.CAPABILITY.known_models + ("opus",))
         with mock.patch.object(grok, "CAPABILITY", shared):
             result = mf.validate(self.load(self._all_on("grok", "opus")))
-        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(other_errors(result), [])
         self.assertTrue(mf.validate(self.load(self._all_on("claude", "opus"))).ok)
 
 
 class BackendReadiness(ManifestCase):
-    """U3: capability-record preflight runs for CLI validation, not schema reads."""
+    """U3: capability-record preflight runs for CLI validation, not schema reads. Native mode
+    needs nothing installed beside the backend's own binary, so that is the one probe."""
 
     def environment(self):
         return dict(os.environ, PATH="/test-bin")
 
-    def plugin_result(self, output, code=0):
-        return SimpleNamespace(returncode=code, stdout=output, stderr="")
-
-    def claude_plugin_output(self, version="3.23.4", status="enabled"):
-        symbol = "✔" if status == "enabled" else "✘"
-        return ("  ❯ compound-engineering@compound-engineering-plugin\n"
-                "    Version: %s\n"
-                "    Scope: user\n"
-                "    Status: %s %s" % (version, symbol, status))
-
     def test_missing_binary_names_the_backend_before_launch(self):
-        with mock.patch.object(mf.shutil, "which", return_value=None) as which, \
-                mock.patch.object(mf, "_run_plugin_query") as run:
+        with mock.patch.object(mf.shutil, "which", return_value=None) as which:
             result = mf.validate(self.load(), check_repo=False, check_environment=True, env=self.environment())
         self.assertFalse(result.ok)
         self.assertTrue(any("claude" in error and "binary" in error for error in result.errors))
         which.assert_called_once_with("claude", path="/test-bin")
-        run.assert_not_called()
 
-    def test_missing_plugin_is_distinct_from_missing_binary(self):
-        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude"), \
-                mock.patch.object(mf, "_run_plugin_query", return_value=self.plugin_result("other-plugin 9.0.0")):
+    def test_a_present_binary_is_ready_with_no_further_probe(self):
+        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude") as which, \
+                mock.patch.object(mf, "subprocess", create=True) as sub:
             result = mf.validate(self.load(), check_repo=False, check_environment=True, env=self.environment())
-        self.assertFalse(result.ok)
-        self.assertTrue(any("claude" in error and "plugin" in error for error in result.errors))
-        self.assertFalse(any("binary" in error for error in result.errors))
-
-    def test_disabled_plugin_is_refused_even_at_a_qualifying_version(self):
-        # skills-relay-contracts-129-disabled-plugin-ready: a listed, version-qualifying plugin
-        # that is disabled cannot provide the skills a Task process needs.
-        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude"), \
-                mock.patch.object(mf, "_run_plugin_query",
-                                  return_value=self.plugin_result(self.claude_plugin_output(status="disabled"))):
-            result = mf.validate(self.load(), check_repo=False, check_environment=True, env=self.environment())
-        self.assertFalse(result.ok)
-        self.assertTrue(any("claude" in error and "plugin" in error for error in result.errors))
-
-    def test_the_stub_binary_produces_output_the_real_pattern_accepts(self):
-        # End-to-end, no mocking of _run_plugin_query: runs the actual stub `claude` subprocess
-        # and feeds its real stdout through the real extraction regex, so the stub's plugin-list
-        # shape and the pattern it stands in for cannot silently drift apart the way every other
-        # test in this class (which mocks _run_plugin_query) would never catch.
-        capability = backends.build("claude").CAPABILITY
-        env = dict(os.environ, PATH=_paths.STUB_DIR + os.pathsep + os.environ.get("PATH", ""))
-        completed = mf._run_plugin_query(capability, env)
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(mf._plugin_version(capability, completed.stdout), "3.23.4")
-
-    def test_below_floor_plugin_is_refused(self):
-        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude"), \
-                mock.patch.object(mf, "_run_plugin_query", return_value=self.plugin_result(self.claude_plugin_output("3.0.0"))):
-            result = mf.validate(self.load(), check_repo=False, check_environment=True, env=self.environment())
-        self.assertFalse(result.ok)
-        self.assertTrue(any("3.23.4" in error for error in result.errors))
+        self.assertTrue(result.ok, result.errors)
+        which.assert_called_once()
+        sub.run.assert_not_called()
 
     def test_each_distinct_backend_is_probed_once(self):
         text = self.base.replace('id = "T-2"', 'id = "T-2"\nbackend = "claude"', 1)
-        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude") as which, \
-                mock.patch.object(mf, "_run_plugin_query", return_value=self.plugin_result(self.claude_plugin_output())) as run:
+        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude") as which:
             result = mf.validate(self.load(text), check_repo=False, check_environment=True, env=self.environment())
         self.assertTrue(result.ok, result.errors)
         which.assert_called_once()
-        run.assert_called_once()
 
     def test_schema_validation_skips_backend_environment_probes(self):
         def boom(*_args, **_kwargs):
             raise AssertionError("schema validation must not probe backends")
 
-        with mock.patch.object(mf.shutil, "which", boom), mock.patch.object(mf, "_run_plugin_query", boom):
+        with mock.patch.object(mf.shutil, "which", boom):
             result = mf.validate(self.load())
         self.assertTrue(result.ok, result.errors)
-
-    def test_a_probe_exception_is_reported_as_a_validation_error(self):
-        exceptions = (
-            subprocess.TimeoutExpired(cmd=["claude"], timeout=15),
-            OSError("no such file or directory"),
-        )
-        for exc in exceptions:
-            with self.subTest(exc=type(exc).__name__), \
-                    mock.patch.object(mf.shutil, "which", return_value="/test-bin/claude"), \
-                    mock.patch.object(mf, "_run_plugin_query", side_effect=exc):
-                result = mf.validate(self.load(), check_repo=False, check_environment=True, env=self.environment())
-                self.assertFalse(result.ok)
-                self.assertTrue(any("claude" in error and "probe failed" in error for error in result.errors))
 
     def test_jira_codex_pair_is_refused_without_environment_probes(self):
         text = self.base.replace('adapter = "markdown"\nfile = "tracker.md"',
@@ -715,7 +709,7 @@ class UnenforcedAcceptance(ManifestCase):
         text = self._codex_task(
             'unenforced_acceptance = "fixture: operator accepts unenforced Codex"\n'
             'task_allowed_paths = ["src/"]')
-        self.assertTrue(mf.validate(self.load(text)).ok)
+        self.assertEqual(other_errors(mf.validate(self.load(text))), [])
 
     def test_a_claude_only_manifest_needs_neither_field(self):
         self.assertTrue(mf.validate(self.load()).ok)

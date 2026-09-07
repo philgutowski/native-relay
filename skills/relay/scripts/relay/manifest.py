@@ -9,22 +9,23 @@ Two entry points. `load(path)` parses and shapes; it raises ManifestError only w
 cannot be read or a required table is missing. `validate(manifest)` applies every rule from the
 plan and returns a ValidationResult with errors, warnings, the defaults applied, and the
 completed closeout allowed paths. `validate` reads the target repo through gitread for the
-remote, identity, and CE artifact root checks; pass `check_repo=False` to skip those.
+remote and identity checks; pass `check_repo=False` to skip those.
 """
 import os
 import re
 import shutil
-import subprocess
 import tomllib
 from dataclasses import dataclass, field
 
 from . import backends, contracts, gitread
 
 ADAPTERS = ("jira", "github", "markdown")
-# The CLI a Task process runs on (R1). Every backend runs the identical pipeline through the
-# compound-engineering plugin installed natively on it; what differs is the launch seam, which
-# contracts.BACKEND_PINS records. A manifest naming none of these puts every Task on claude, so a
-# manifest written before backends existed loads and runs exactly as it did.
+# The CLI a Task process runs on (R1). The closed set stays three wide so a manifest written for
+# another backend is refused with a sentence naming why rather than as an unknown name: native
+# mode runs a Task only on a backend whose capability record names a verified built in review
+# step (`review_skill`), which today is claude alone. What differs per backend otherwise is the
+# launch seam, which contracts.BACKEND_PINS records. A manifest naming none of these puts every
+# Task on claude.
 BACKENDS = ("claude", "codex", "grok")
 DEFAULT_BACKEND = "claude"
 SHIPPING_MODES = ("local_merge", "pr_terminal")
@@ -98,6 +99,9 @@ class Closeout:
     effort: str
     allowed_tools: tuple
     allowed_paths: tuple
+    # The directory under the target repository where the Closeout may write a learning. Absent
+    # is contracts.DEFAULT_DOCS_ROOT, recorded in defaults_applied. Repository relative.
+    docs_root: str = contracts.DEFAULT_DOCS_ROOT
 
 
 @dataclass(frozen=True)
@@ -252,6 +256,7 @@ def load(path):
         effort=pick(closeout, "closeout", "effort", contracts.DEFAULT_CLOSEOUT_EFFORT),
         allowed_tools=_tuple(closeout.get("allowed_tools", [])),
         allowed_paths=_tuple(closeout.get("allowed_paths", [])),
+        docs_root=str(pick(closeout, "closeout", "docs_root", contracts.DEFAULT_DOCS_ROOT)),
     )
     gate_obj = Gate(command=_tuple(gate.get("command")), description=str(gate.get("description", "")))
     qualifying = Qualifying(**{key: str(q.get(key, "")).strip() for key in QUALIFYING_KEYS})
@@ -304,25 +309,10 @@ def _is_string_list(value):
     return isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value)
 
 
-def docs_root_for(repo):
-    """The CE artifact root from the target's .compound-engineering/config.yaml, else `docs`.
-    Read with a regex rather than a YAML parser because the runner has no YAML library."""
-    for name in ("config.local.yaml", "config.yaml"):
-        path = os.path.join(repo, ".compound-engineering", name)
-        if not os.path.exists(path):
-            continue
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                match = re.match(r"^\s*docs_root\s*:\s*['\"]?([^'\"#\n]+?)['\"]?\s*(#.*)?$", line)
-                if match:
-                    return match.group(1).strip().rstrip("/")
-    return contracts.DEFAULT_DOCS_ROOT
-
-
-def completed_allowed_paths(manifest, docs_root):
-    """R53: the closeout may only touch the CE artifact root, CONCEPTS.md, the markdown tracker
-    file, and whatever the manifest adds."""
-    paths = [docs_root.rstrip("/") + "/", contracts.CONCEPTS_FILE]
+def completed_allowed_paths(manifest):
+    """R53: the closeout may only touch the manifest's docs root, CONCEPTS.md, the markdown
+    tracker file, and whatever the manifest adds."""
+    paths = [manifest.closeout.docs_root.strip().rstrip("/") + "/", contracts.CONCEPTS_FILE]
     if manifest.tracker.adapter == "markdown" and manifest.tracker.file:
         paths.append(manifest.tracker.file)
     for extra in manifest.closeout.allowed_paths:
@@ -345,50 +335,16 @@ def task_allowed_paths(manifest):
     return tuple(manifest.permissions.task_allowed_paths) or None
 
 
-def _version_parts(value):
-    """A comparable version tuple, or None when a plugin did not report one."""
-    match = re.fullmatch(r"\d+(?:\.\d+)+", str(value or "").strip())
-    return tuple(int(part) for part in match.group(0).split(".")) if match else None
-
-
-def _plugin_version(capability, output):
-    """Extract this backend's compound-engineering version from its recorded list output."""
-    try:
-        match = re.search(capability.plugin_version_pattern, output or "")
-    except re.error:
-        return None
-    return match.group("version") if match else None
-
-
-def _run_plugin_query(capability, env):
-    """Run the capability-recorded query behind one seam for deterministic validation tests."""
-    return subprocess.run(capability.plugin_query, capture_output=True, text=True,
-                          stdin=subprocess.DEVNULL, env=env, timeout=15)
-
-
 def _backend_readiness_errors(manifest, env):
-    """Return environment failures for each distinct backend without raising from validation."""
+    """Environment failures for each distinct backend, without raising from validation. The one
+    check is that the backend's binary is on PATH: native mode needs nothing installed beside
+    the CLI itself, which is the point of the mode."""
     errors = []
     path = env.get("PATH")
     for name in sorted({task.backend for task in manifest.tasks if task.backend in BACKENDS}):
         capability = backends.build(name).CAPABILITY
         if not shutil.which(capability.binary, path=path):
             errors.append("backend %s binary %r is missing from PATH" % (name, capability.binary))
-            continue
-        try:
-            completed = _run_plugin_query(capability, env)
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append("backend %s plugin probe failed: %s" % (name, exc))
-            continue
-        version = _plugin_version(capability, completed.stdout) if completed.returncode == 0 else None
-        floor = _version_parts(contracts.PLUGIN_MIN_VERSION)
-        observed = _version_parts(version)
-        if observed is None:
-            errors.append("backend %s has no readable %s plugin at or above %s"
-                          % (name, contracts.PLUGIN_NAME, contracts.PLUGIN_MIN_VERSION))
-        elif observed < floor:
-            errors.append("backend %s has %s plugin %s, below required %s"
-                          % (name, contracts.PLUGIN_NAME, version, contracts.PLUGIN_MIN_VERSION))
     return errors
 
 
@@ -444,6 +400,13 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
             elif entry.startswith("/") or ".." in entry.split("/"):
                 err("permissions.task_allowed_paths entries are relative to the repository root "
                     "and must not start with / or contain ..: %r" % entry)
+
+    docs_root = manifest.closeout.docs_root
+    if not isinstance(docs_root, str) or not docs_root.strip():
+        err("closeout.docs_root must be a non-empty repository-relative directory")
+    elif docs_root.startswith("/") or ".." in docs_root.split("/"):
+        err("closeout.docs_root is relative to the repository root and must not start with / "
+            "or contain ..: %r" % docs_root)
 
     # R3, R56: four qualifying sentences, each non-empty.
     for key in QUALIFYING_KEYS:
@@ -512,6 +475,12 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         if task.backend not in BACKENDS:
             err("%s.backend must be one of %s, not %r"
                 % (label, ", ".join(BACKENDS), task.backend))
+        elif backends.build(task.backend).CAPABILITY.review_skill is None:
+            # Native mode, decided 2026-09-07. The review step is a built in skill, and only a
+            # backend with a verified one can run the brief. Checked on excluded Tasks too, so
+            # un-excluding one later cannot launch it somewhere the brief cannot be followed.
+            err("%s (%s) names backend %s, which has no verified native review step; native mode "
+                "runs on claude only, see README" % (label, task.id or "?", task.backend))
         if task.id in seen:
             err("%s.id %r is listed twice" % (label, task.id))
         seen.add(task.id)
@@ -563,7 +532,6 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
     if not repo or not os.path.isdir(os.path.join(repo, ".git")):
         err("project.repo is not a git repository: %r" % repo)
         check_repo = False
-    docs_root = contracts.DEFAULT_DOCS_ROOT
     if check_repo:
         remotes = gitread.remotes(repo)
         if manifest.shipping_mode == "local_merge" and "origin" not in remotes:
@@ -573,11 +541,10 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
                 err("git config %s does not resolve in %s; the runner's merge authors a commit" % (key, repo))
         if manifest.project.default_branch is None and gitread.default_branch(repo) is None:
             err("project.default_branch is unset and refs/remotes/origin/HEAD is not set in the repo")
-        docs_root = docs_root_for(repo)
     if check_environment:
         err_list = _backend_readiness_errors(manifest, os.environ if env is None else env)
         result.errors.extend(err_list)
-    result.allowed_paths = completed_allowed_paths(manifest, docs_root)
+    result.allowed_paths = completed_allowed_paths(manifest)
     return result
 
 

@@ -1150,7 +1150,7 @@ class NoteHalt(RunCase):
 
     def ctx(self, branch="relay/T-1"):
         env = launch.child_env(self.manifest, self.base_env(), self.home)
-        allowed = tuple(mf.completed_allowed_paths(self.manifest, mf.docs_root_for(self.repo)))
+        allowed = tuple(mf.completed_allowed_paths(self.manifest))
         store = self.store()
         store.acquire()
         task = self.manifest.tasks[0]
@@ -1571,7 +1571,7 @@ class ContinuePastGuards(RunCase):
 
     def cfg(self, store=None):
         env = launch.child_env(self.manifest, self.base_env(), self.home)
-        allowed = tuple(mf.completed_allowed_paths(self.manifest, mf.docs_root_for(self.repo)))
+        allowed = tuple(mf.completed_allowed_paths(self.manifest))
         return runner._Run(self.manifest, None, store or self.store(), self.repo, "main", env,
                            self.base_env(), self.home, None, False, {}, {}, time.time, allowed)
 

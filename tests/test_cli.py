@@ -150,23 +150,22 @@ class Validate(CliCase):
         self.assertIn("claude", out)
         self.assertIn("binary", out)
 
-    def test_a_missing_backend_plugin_exits_config_and_names_the_backend(self):
-        plugin_result = SimpleNamespace(returncode=0, stdout="other-plugin 9.0.0", stderr="")
-        with mock.patch.object(manifest_module.shutil, "which", return_value="/test-bin/claude"), \
-                mock.patch.object(manifest_module, "_run_plugin_query", return_value=plugin_result):
+    def test_a_codex_task_exits_config_naming_the_missing_review_step(self):
+        """Native mode runs on claude only; the CLI says so before anything launches."""
+        with open(self.manifest_path) as handle:
+            text = handle.read()
+        text = re.sub(r'id = "T-1"\nmodel = "[^"]*"',
+                      'id = "T-1"\nmodel = "gpt-5-codex"\nbackend = "codex"\nreason = "fixture"',
+                      text, count=1)
+        text = text.replace("[permissions]", '[permissions]\nunenforced_acceptance = "fixture"\n'
+                            'task_allowed_paths = ["src/"]', 1)
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text)
+        with mock.patch.object(manifest_module.shutil, "which", return_value="/test-bin/x"):
             code, out = self.call("validate", self.manifest_path)
         self.assertEqual(code, cli.EXIT_CONFIG)
-        self.assertIn("claude", out)
-        self.assertIn("plugin", out)
-        self.assertNotIn("binary", out)
-
-    def test_a_probe_exception_exits_config_and_names_the_backend(self):
-        with mock.patch.object(manifest_module.shutil, "which", return_value="/test-bin/claude"), \
-                mock.patch.object(manifest_module, "_run_plugin_query",
-                                  side_effect=OSError("no such file or directory")):
-            code, out = self.call("validate", self.manifest_path)
-        self.assertEqual(code, cli.EXIT_CONFIG)
-        self.assertIn("claude", out)
+        self.assertIn("codex", out)
+        self.assertIn("native", out)
 
 
 class RunVerb(CliCase):
@@ -411,9 +410,9 @@ class WhoNotifies(CliCase):
     def detach_argv(self, *extra):
         """The runner child's argv, captured as `_detach` launches it.
 
-        `cli` spawns more than one process on this path: the backend readiness probe shells out
+        `cli` spawns more than one process on this path: the manifest's own git reads shell out
         too. Select on the entry point rather than taking the last call, or the assertion lands
-        on `claude plugin list` and passes or fails for the wrong reason.
+        on a git read and passes or fails for the wrong reason.
         """
         calls = []
         original = cli.subprocess.Popen

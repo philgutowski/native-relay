@@ -29,9 +29,7 @@ mode = "local_merge"
 [permissions]
 allowed = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "Agent", "TodoWrite"]
 disallowed = []
-# Required because Task 413 names codex, which cannot refuse tools at launch. The sentence
-# below is a fixture, not an operator's words. Replace it before a real run.
-unenforced_acceptance = "example fixture: this mixed manifest accepts that Codex cannot refuse tools at launch"
+# Optional. The paths a task's own commit may touch; unset means the whole repository.
 task_allowed_paths = ["src/", "docs/"]
 
 [timeouts]
@@ -66,9 +64,11 @@ open_followup = true
 # pauses that task and the later independent tasks keep running (issue #15).
 continue_past_task_halt = false
 
-# A mixed manifest. The default below puts every task on claude; 413 names codex instead, so this
-# one file carries both shapes. A task's backend decides which CLI runs its task process and its
-# closeout, and nothing else about the run changes.
+# Every task here runs on claude, which is the one backend native mode runs today: the review
+# step is Claude Code's built in `/code-review`, and `validate` refuses a task naming `codex` or
+# `grok` until each has a verified equivalent. The `[defaults]` table is where a future default
+# would go; a task that then differed from it would carry a `reason` string in the operator's
+# own words, the same field an excluded task carries.
 [defaults]
 backend = "claude"
 
@@ -79,11 +79,13 @@ effort = "high"
 
 [[tasks]]
 id = "413"
-# A codex model, because the backend below is codex. Validate refuses a task whose model is a
-# name another backend is known to accept, so the model moves with the backend (issue #58).
-model = "gpt-5-codex"
+model = "sonnet"
 effort = "medium"
-backend = "codex"
-# Required because this Task leaves the default backend. The sentence below is a fixture, not
-# an operator's words. Replace it before a real run.
-reason = "example fixture: this Task spends Codex budget on mechanical work"
+
+[[tasks]]
+id = "414"
+model = "sonnet"
+effort = "medium"
+excluded = true
+# Required on an excluded task. The sentence below is a fixture, not an operator's words.
+reason = "example fixture: this card needs a design answer nobody can give unattended"
