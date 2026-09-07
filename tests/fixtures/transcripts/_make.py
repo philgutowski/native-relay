@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Regenerates the transcript fixtures from real line shapes.
 
-Every line shape below is copied from the ABC-83 session transcript (CLI 2.1.245, plugin
-3.23.4): the same keys in the same places, with the long values trimmed. The denial text, the
-tool_use and tool_result join by id, the Skill call shape, the stop_reason values, and the
-last-prompt line are all verbatim shapes. Run this file to rewrite the fixtures; commit both.
+Every line shape below is copied from a real session transcript (CLI 2.1.245): the same keys in
+the same places, with the long values trimmed. The denial text, the tool_use and tool_result join
+by id, the Skill call shape, the stop_reason values, and the last-prompt line are all verbatim
+shapes. Run this file to rewrite the fixtures; commit both.
 """
 import json
 import os
@@ -94,13 +94,12 @@ def last_prompt(leaf, prompt):
     return {"type": "last-prompt", "lastPrompt": prompt[:200], "leafUuid": leaf, "sessionId": SESSION}
 
 
-PROMPT = "Handle one task only: T-1. Create and stay on relay/T-1. Run compound-engineering:ce-plan then compound-engineering:ce-work mode:return-to-caller."
+PROMPT = "Handle one task only: T-1. Create and stay on relay/T-1. Plan in a message, build, run /code-review, verify, record."
 
 ENVELOPE_COMPLETE = (
     "Task T-1 is built and reviewed on relay/T-1, nine commits ahead of main, tree clean.\n\n"
     "```relay-envelope\n"
     "status: complete\n"
-    "plan_path: docs/plans/2026-08-25-1400-feat-t1-plan.md\n"
     "changed_files:\n"
     "- core/thing.py\n"
     "- tests/test_thing.py\n"
@@ -111,7 +110,6 @@ ENVELOPE_BLOCKED = (
     "Stopped before the merge step because the card's acceptance criterion cannot be met without a design answer.\n\n"
     "```relay-envelope\n"
     "status: blocked\n"
-    "plan_path: docs/plans/2026-08-25-1400-feat-t1-plan.md\n"
     "changed_files:\n"
     "- core/thing.py\n"
     "blockers:\n"
@@ -168,21 +166,30 @@ QUOTED_CARD_TEXT = (
 )
 
 
-def build_common_prefix():
-    """Prompt, a prefixed Skill call and its result, and a mid-run text quoting a card."""
+PLAN_TEXT = (
+    "Plan. Add `capitalize_words` to core/thing.py and a test beside the existing ones. "
+    "Verify with the unittest suite. Out of scope: the CLI wrapper."
+)
+
+
+def build_common_prefix(review=True):
+    """Prompt, a plan message, a build step, a mid-run text quoting a card, and the built in
+    review call. `review=False` leaves the review call out, which is the review_skipped shape."""
     lines = []
     p = user_prompt(None, PROMPT)
     lines.append(p)
-    a1 = assistant(p["uuid"], [tool_use("toolu_01PLAN", "Skill", {"skill": "compound-engineering:ce-plan", "args": "T-1 do the thing"})], "tool_use")
+    a1 = assistant(p["uuid"], [text(PLAN_TEXT)], "end_turn")
     lines.append(a1)
-    r1 = tool_result(a1["uuid"], "toolu_01PLAN", "Plan ready at docs/plans/2026-08-25-1400-feat-t1-plan.md")
-    lines.append(r1)
-    a2 = assistant(r1["uuid"], [text(QUOTED_CARD_TEXT)], "end_turn", branch="relay/T-1")
+    a2 = assistant(a1["uuid"], [tool_use("toolu_01EDIT", "Edit", {"file_path": CWD + "/core/thing.py", "old_string": "", "new_string": "def capitalize_words"})], "tool_use", branch="relay/T-1")
     lines.append(a2)
-    a3 = assistant(a2["uuid"], [tool_use("toolu_01WORK", "Skill", {"skill": "compound-engineering:ce-work", "args": "mode:return-to-caller docs/plans/2026-08-25-1400-feat-t1-plan.md"})], "tool_use", branch="relay/T-1")
+    r2 = tool_result(a2["uuid"], "toolu_01EDIT", "Edited core/thing.py", branch="relay/T-1")
+    lines.append(r2)
+    a3 = assistant(r2["uuid"], [text(QUOTED_CARD_TEXT)], "end_turn", branch="relay/T-1")
     lines.append(a3)
-    r3 = tool_result(a3["uuid"], "toolu_01WORK", "status: complete\nplan_path: docs/plans/2026-08-25-1400-feat-t1-plan.md", branch="relay/T-1")
-    lines.append(r3)
+    if review:
+        a4 = assistant(a3["uuid"], [tool_use("toolu_01REVIEW", "Skill", {"skill": "code-review", "args": "high"})], "tool_use", branch="relay/T-1")
+        lines.append(a4)
+        lines.append(tool_result(a4["uuid"], "toolu_01REVIEW", "Review complete. Two findings, both fixed.", branch="relay/T-1"))
     return lines
 
 
@@ -262,19 +269,29 @@ def waiting_then_complete():
 
 def path_gate():
     lines = build_common_prefix()
-    edit_path = CWD + "/.claude/skills/itg-brief/SKILL.md"
+    edit_path = CWD + "/.claude/skills/example-brief/SKILL.md"
     a = assistant(lines[-1]["uuid"], [tool_use("toolu_01HwgXRnMVx7V112x3B3N1JJ", "Edit", {"replace_all": False, "file_path": edit_path, "old_string": "three statuses", "new_string": "four statuses"})], "tool_use", branch="relay/T-1")
     lines.append(a)
     lines.append(tool_result(a["uuid"], "toolu_01HwgXRnMVx7V112x3B3N1JJ", DENIAL_TEXT.format(tool="Edit"), is_error=True, branch="relay/T-1"))
     return finish(lines, NO_ENVELOPE_TEXT)
 
 
-def skill_substitution():
-    lines = build_common_prefix()
-    for tid in ("toolu_01V3JKgePr4nvMbmgN3jfiqg", "toolu_012ooW2ZNeVRx5RjTRaxMqvB"):
-        a = assistant(lines[-1]["uuid"], [tool_use(tid, "Skill", {"skill": "code-review", "args": "high"})], "tool_use", branch="relay/T-1")
-        lines.append(a)
-        lines.append(tool_result(a["uuid"], tid, "Review complete. Ready with fixes.", branch="relay/T-1"))
+def review_skipped():
+    """A complete envelope with no review call anywhere in the transcript, and a similarly named
+    skill that must not count as one."""
+    lines = build_common_prefix(review=False)
+    a = assistant(lines[-1]["uuid"], [tool_use("toolu_01SIMPLIFY", "Skill", {"skill": "simplify", "args": ""})], "tool_use", branch="relay/T-1")
+    lines.append(a)
+    lines.append(tool_result(a["uuid"], "toolu_01SIMPLIFY", "Nothing to simplify.", branch="relay/T-1"))
+    return finish(lines, ENVELOPE_COMPLETE)
+
+
+def review_namespaced():
+    """The review skill reached through a plugin namespace still counts as the review."""
+    lines = build_common_prefix(review=False)
+    a = assistant(lines[-1]["uuid"], [tool_use("toolu_01NSREVIEW", "Skill", {"skill": "some-plugin:code-review", "args": "high"})], "tool_use", branch="relay/T-1")
+    lines.append(a)
+    lines.append(tool_result(a["uuid"], "toolu_01NSREVIEW", "Review complete.", branch="relay/T-1"))
     return finish(lines, ENVELOPE_COMPLETE)
 
 
@@ -299,11 +316,11 @@ def multi_end_turn():
 
 CLOSEOUT_PROMPT = (
     "Relay closeout for T-1. Outcome landed at abc1234def. Two duties, in order: record the "
-    "outcome on the tracker, then the compound judgment."
+    "outcome on the tracker, then the learning judgment."
 )
 CLOSEOUT_COMPLETE_TEXT = (
     "Closed the card and named the merge commit. The task turned on a gate that only fires at "
-    "push time, which is worth keeping, so I ran the compound skill and committed the doc.\n\n"
+    "push time, which is worth keeping, so I wrote the learning under docs/solutions and committed it.\n\n"
     "Documentation complete"
 )
 CLOSEOUT_SKIPPED_TEXT = (
@@ -317,11 +334,11 @@ CLOSEOUT_SKIPPED_LONG_TEXT = (
     "Recorded the blocked outcome on tasks.md and committed (not pushed, per the closeout scope). "
     "The task's own branch shows a complete, correct looking implementation with no reported "
     "blockers or denials, so there is no visible cause to document as a learning, just an "
-    "unexplained non landing. Nothing here rises to a durable learning worth compounding.\n\n"
+    "unexplained non landing. Nothing here rises to a durable learning worth keeping.\n\n"
     "Documentation skipped"
 )
 CLOSEOUT_UNFINISHED_TEXT = (
-    "Closed the card and named the merge commit. I started the compound judgment and the"
+    "Closed the card and named the merge commit. I started the learning judgment and the"
 )
 
 
@@ -341,11 +358,11 @@ def build_closeout_prefix(tracker_write="tracker.md"):
 
 def closeout_complete():
     lines = build_closeout_prefix()
-    a = assistant(lines[-1]["uuid"], [tool_use("toolu_01COMP", "Skill", {
-        "skill": "compound-engineering:ce-compound",
-        "args": "mode:non-interactive depth:full the gate fires only at push time"})], "tool_use")
+    a = assistant(lines[-1]["uuid"], [tool_use("toolu_01COMP", "Write", {
+        "file_path": CWD + "/docs/solutions/workflow-issues/gate-fires-only-at-push-time.md",
+        "content": "# The gate fires only at push time\n"})], "tool_use")
     lines.append(a)
-    lines.append(tool_result(a["uuid"], "toolu_01COMP", "Documentation complete"))
+    lines.append(tool_result(a["uuid"], "toolu_01COMP", "Wrote the file"))
     return finish(lines, CLOSEOUT_COMPLETE_TEXT)
 
 
@@ -390,7 +407,8 @@ if __name__ == "__main__":
     write("waiting_then_blocked.jsonl", waiting_then_blocked)
     write("waiting_then_complete.jsonl", waiting_then_complete)
     write("path_gate.jsonl", path_gate)
-    write("skill_substitution.jsonl", skill_substitution)
+    write("review_skipped.jsonl", review_skipped)
+    write("review_namespaced.jsonl", review_namespaced)
     write("tracker_denied.jsonl", tracker_denied)
     write("multi_end_turn.jsonl", multi_end_turn)
     write("malformed.jsonl", success, extra_raw=(2, '{"type": "assistant", "message": {this is not json'))

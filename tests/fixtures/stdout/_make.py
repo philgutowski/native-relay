@@ -115,7 +115,7 @@ def result():
             "total_cost_usd": 0.42, "uuid": uuid()}
 
 
-TEXT_FIRST = "I'll start by setting up the branch, then run the compound-engineering pipeline."
+TEXT_FIRST = "I'll start by setting up the branch, then write the plan as a message."
 TEXT_LAST = "The branch is ready and the suite is green."
 
 
@@ -144,7 +144,7 @@ def stream():
 
     # Skill, keyed on `skill`.
     lines.append(assistant([tool_use("toolu_01SKILL", "Skill", {
-        "skill": "compound-engineering:ce-plan", "args": "add the tail verb"})]))
+        "skill": "code-review", "args": "high"})]))
     lines.append(user(tool_result("toolu_01SKILL", "Launching skill")))
 
     # Agent, keyed on `description` because it carries no command, path, or pattern.

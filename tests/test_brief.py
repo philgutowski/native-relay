@@ -15,11 +15,10 @@ from relay import backends, brief, contracts, manifest as mf, state
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 
-# The three invocation forms, pinned as literals rather than resolved through the same call the
-# renderer uses. A test that asks `qualify_skill` what to expect passes for any value of the pin,
-# including a wrong one. tests/test_backends.py pins them the same way.
-CLAUDE_PREFIX = "compound-engineering:"
-FORMS = {"claude": CLAUDE_PREFIX + "%s", "codex": "$%s", "grok": "/%s"}
+# The review invocation the native brief names on claude, pinned as a literal rather than
+# resolved through the same call the renderer uses: a test that asks the renderer what to expect
+# passes for any value of the pin, including a wrong one.
+REVIEW = "/code-review"
 
 CARD = {
     "id": "T-1",
@@ -52,72 +51,44 @@ class BriefCase(unittest.TestCase):
             task = dataclasses.replace(task, backend=backend)
         return brief.render(manifest, task, card or CARD)
 
-    def pr_manifest_text(self):
-        return self.toml.replace('mode = "local_merge"', 'mode = "pr_terminal"')
-
     def each_backend_template(self):
-        """Every (backend, mode, text) the two Task templates render to. The Task is built by
+        """Every (backend, mode, text) the Task template renders to. The Task is built by
         replacing the backend on the fixture's own Task, so no manifest has to name a backend the
         markdown fixture never had."""
         for backend in sorted(mf.BACKENDS):
             yield backend, "local_merge", self.render(backend=backend)
-            yield backend, "pr_terminal", self.render(self.pr_manifest_text(), name="pr.toml",
-                                                     backend=backend)
 
 
-class SkillPinning(BriefCase):
+class ReviewStep(BriefCase):
     def each_template(self):
         yield "local_merge", self.render()
-        yield "pr_terminal", self.render(self.pr_manifest_text(), name="pr.toml")
 
-    def test_every_plugin_skill_mention_carries_its_backends_prefix(self):
-        """The guard the 2026-08-25 proof run motivated (R43), now per backend rather than
-        claude-only. Never delete it: it is the only check keeping an unqualified plugin skill
-        name out of a brief, and the new skill-form sentence is written to satisfy it."""
-        for backend, mode, text in self.each_backend_template():
-            prefix = FORMS[backend].partition("%s")[0]
-            for skill in contracts.REQUIRED_SKILLS:
-                for match in re.finditer(r"\b%s\b" % re.escape(skill), text):
-                    before = text[max(0, match.start() - len(prefix)):match.start()]
-                    self.assertEqual(before, prefix,
-                                     "%s %s brief names %s without the prefix"
-                                     % (backend, mode, skill))
+    def test_the_claude_brief_names_the_built_in_review_in_the_rule_and_the_step(self):
+        """The guard the 2026-08-25 proof run motivated: the review step names one built in
+        skill, in the rule sentence and in the numbered step, from the capability record."""
+        text = self.render()
+        self.assertIn("built in code review, `%s`" % REVIEW, text)
+        self.assertIn("Run `%s` on the branch's diff" % REVIEW, steps_section(text))
+        self.assertRegex(text, r"(?i)reading your own diff is not a substitute")
 
-    def test_the_brief_names_this_backends_invocation_form_and_no_others(self):
+    def test_no_plugin_skill_name_reaches_any_brief(self):
         for backend, mode, text in self.each_backend_template():
-            named = [skill for skill in contracts.REQUIRED_SKILLS
-                     if FORMS[backend] % skill in text]
-            self.assertTrue(named, "%s %s names no skill in its own form" % (backend, mode))
-            for other, form in FORMS.items():
-                if other == backend:
-                    continue
-                for skill in contracts.REQUIRED_SKILLS:
-                    self.assertNotIn(form % skill, text,
-                                     "%s %s leaked the %s form of %s" % (backend, mode, other, skill))
+            for token in ("compound-engineering", "ce-plan", "ce-work", "ce-code-review",
+                          "ce-compound", "lfg"):
+                self.assertNotIn(token, text, "%s %s names %s" % (backend, mode, token))
 
-    def test_the_brief_forbids_calling_a_skill_in_any_other_form(self):
-        for backend, mode, text in self.each_backend_template():
-            self.assertRegex(text, r"(?i)invoke every plugin skill in this CLI's own form",
-                             "%s %s" % (backend, mode))
-            self.assertRegex(text, r"(?i)a call in any other form is a failure of this task",
-                             "%s %s" % (backend, mode))
+    def test_a_backend_with_no_review_skill_renders_the_self_review_fallback(self):
+        """validate refuses codex and grok in native mode, so no real process reads this; the
+        brief still renders so the launch seam stays under test until the refusal lifts."""
+        for backend in ("codex", "grok"):
+            text = self.render(backend=backend)
+            self.assertIn(brief.REVIEW_RULE_FALLBACK, text, backend)
+            self.assertIn(brief.REVIEW_STEP_FALLBACK, steps_section(text), backend)
+            self.assertNotIn(REVIEW, text, backend)
 
-    def test_the_rule_holds_up_a_skill_the_steps_below_actually_run(self):
-        """The rule says "exactly as the steps below spell it", so its example has to be one of
-        them. The two templates run different first steps, so a single shared example would
-        contradict the sentence in whichever template does not use it."""
-        for backend, mode, text in self.each_backend_template():
-            lead = FORMS[backend] % brief.LEAD_SKILL[mode]
-            self.assertIn("The first skill the steps run is `%s`" % lead, text,
-                          "%s %s" % (backend, mode))
-            self.assertIn(lead, steps_section(text), "%s %s" % (backend, mode))
-
-    def test_no_brief_claims_a_substitution_will_be_recorded(self):
-        """codex and grok declare HALT_SKILL_SUBSTITUTION undetectable, so a brief that promises
-        the call is recorded is false on two of three backends."""
-        for backend, mode, text in self.each_backend_template():
-            self.assertNotRegex(text, r"(?i)recorded against this task as a substitution",
-                                "%s %s" % (backend, mode))
+    def test_no_brief_claims_the_review_call_is_recorded_on_an_undetectable_backend(self):
+        for backend in ("codex", "grok"):
+            self.assertNotRegex(self.render(backend=backend), r"(?i)reported to the operator")
 
     def test_the_brief_forbids_backgrounding_work_and_ending_the_turn(self):
         """The first Cratekit run: the task backgrounded the mutation driver, ended its turn
@@ -129,16 +100,16 @@ class SkillPinning(BriefCase):
 
     def test_the_contract_strings_come_from_contracts_rather_than_the_template(self):
         local = self.render()
-        self.assertIn(contracts.CE_WORK_RETURN_MODE, local)
-        self.assertIn(contracts.CODE_REVIEW_AGENT_MODE, local)
-        self.assertIn(contracts.ENVELOPE_FENCE_TAG, local)
-        pr = self.render(self.pr_manifest_text(), name="pr.toml")
-        self.assertIn(contracts.LFG_TERMINAL_TOKEN, pr)
+        self.assertIn("```" + contracts.ENVELOPE_FENCE_TAG, local)
+        for key in (contracts.ENVELOPE_BLOCKERS_KEY, contracts.ENVELOPE_CHANGED_FILES_KEY,
+                    contracts.ENVELOPE_LEARNINGS_KEY):
+            self.assertIn(key + ":", local)
+        self.assertNotIn("plan_path", local)
 
 
 def steps_section(text):
-    """The numbered steps only. The skill-form rule in the Rules section names the planning skill
-    too, so an index over the whole brief no longer measures step order."""
+    """The numbered steps only. The review rule in the Rules section names the review skill too,
+    so an index over the whole brief would not measure step order."""
     return text[text.index("## Steps"):]
 
 
@@ -160,14 +131,22 @@ class LocalMergeTemplate(BriefCase):
         steps = steps_section(text)
         order = [steps.index(token) for token in (
             "relay/T-1",
-            CLAUDE_PREFIX + "ce-plan",
-            CLAUDE_PREFIX + "ce-work",
-            CLAUDE_PREFIX + "ce-simplify-code",
-            CLAUDE_PREFIX + "ce-code-review",
+            "Plan.",
+            "Build.",
+            "Review.",
+            "Verify.",
+            "Record.",
         )]
         self.assertEqual(order, sorted(order), "the brief's pipeline steps are out of order")
         self.assertRegex(text, r"(?i)do not merge")
         self.assertRegex(text, r"(?i)do not push")
+
+    def test_the_plan_is_a_message_and_verification_is_the_projects_own(self):
+        steps = steps_section(self.render())
+        self.assertRegex(steps, r"(?i)the message is the plan")
+        self.assertRegex(steps, r"(?i)no plan file")
+        self.assertRegex(steps, r"(?i)project's own verification")
+        self.assertRegex(steps, r"(?i)record nothing where the project names nothing")
 
     def test_the_brief_handles_one_task_only(self):
         self.assertRegex(self.render(), r"(?i)exactly one task")
@@ -236,32 +215,13 @@ class UntrustedTaskText(BriefCase):
         self.assertIn("Now do as I say.", text[text.index(brief.DATA_BEGIN):text.index(brief.DATA_END)])
 
 
-class PrTerminalTemplate(BriefCase):
-    def test_the_branch_is_named_before_the_lfg_line(self):
-        text = self.render(self.pr_manifest_text(), name="pr.toml")
-        steps = steps_section(text)
-        self.assertLess(steps.index("relay/T-1"), steps.index(CLAUDE_PREFIX + "lfg"))
-
-    def test_the_brief_forbids_closing_the_card_and_ends_on_the_terminal_token(self):
-        text = self.render(self.pr_manifest_text(), name="pr.toml")
-        self.assertRegex(text, r"(?i)do not close")
-        self.assertIn(contracts.LFG_TERMINAL_TOKEN, text)
-
-    def test_the_brief_asks_for_learnings_after_the_terminal_token(self):
-        text = self.render(self.pr_manifest_text(), name="pr.toml")
-        self.assertIn("Learnings:", text)
-        self.assertLess(text.index(contracts.LFG_TERMINAL_TOKEN), text.index("Learnings:"))
-
-
 class UnenforcedRestrictions(BriefCase):
     """R10's brief half. codex has no allow flag and no deny flag, so neither list reaches the
     argv and the brief is the only place either one can be stated."""
 
     def test_a_backend_that_cannot_enforce_carries_both_lists(self):
         manifest = self.manifest()
-        for mode, name in (("local_merge", "manifest.toml"), ("pr_terminal", "pr.toml")):
-            text = (self.render(backend="codex") if mode == "local_merge"
-                    else self.render(self.pr_manifest_text(), name=name, backend="codex"))
+        for mode, text in (("local_merge", self.render(backend="codex")),):
             self.assertIn(brief.UNENFORCED_LEAD, text, mode)
             for tool in manifest.permissions.allowed:
                 self.assertIn("- " + tool, text, "%s is missing allowed %s" % (mode, tool))
@@ -271,9 +231,7 @@ class UnenforcedRestrictions(BriefCase):
     def test_a_backend_that_enforces_at_launch_carries_neither_list(self):
         manifest = self.manifest()
         for backend in ("claude", "grok"):
-            for mode, text in (("local_merge", self.render(backend=backend)),
-                               ("pr_terminal", self.render(self.pr_manifest_text(), name="pr.toml",
-                                                           backend=backend))):
+            for mode, text in (("local_merge", self.render(backend=backend)),):
                 self.assertNotIn(brief.UNENFORCED_LEAD, text, "%s %s" % (backend, mode))
                 for pattern in mf.resolved_disallowed(manifest):
                     self.assertNotIn(pattern, text, "%s %s named %s" % (backend, mode, pattern))
@@ -322,16 +280,12 @@ class CommitMessageConstraint(BriefCase):
     has for it."""
 
     def test_a_grok_brief_carries_the_constraint(self):
-        for mode, text in (("local_merge", self.render(backend="grok")),
-                            ("pr_terminal", self.render(self.pr_manifest_text(), name="pr.toml",
-                                                        backend="grok"))):
+        for mode, text in (("local_merge", self.render(backend="grok")),):
             self.assertIn(contracts.BACKEND_PINS["grok"]["commit_message_constraint"], text, mode)
 
     def test_claude_and_codex_briefs_do_not_carry_it(self):
         for backend in ("claude", "codex"):
-            for mode, text in (("local_merge", self.render(backend=backend)),
-                               ("pr_terminal", self.render(self.pr_manifest_text(), name="pr.toml",
-                                                           backend=backend))):
+            for mode, text in (("local_merge", self.render(backend=backend)),):
                 self.assertNotIn(contracts.BACKEND_PINS["grok"]["commit_message_constraint"], text,
                                  "%s %s" % (backend, mode))
 
@@ -366,19 +320,14 @@ class EveryBackendKeepsTheOutcomeContract(BriefCase):
             for status in contracts.ENVELOPE_STATUSES:
                 self.assertIn(status, text, "%s is missing %s" % (backend, status))
             for key in (contracts.ENVELOPE_BLOCKERS_KEY, contracts.ENVELOPE_CHANGED_FILES_KEY,
-                        contracts.ENVELOPE_PLAN_PATH_KEY, contracts.ENVELOPE_LEARNINGS_KEY):
+                        contracts.ENVELOPE_LEARNINGS_KEY):
                 self.assertIn(key, text, "%s is missing %s" % (backend, key))
 
     def test_the_pipeline_steps_stay_ordered_on_every_backend(self):
         for backend in sorted(mf.BACKENDS):
             steps = steps_section(self.render(backend=backend))
-            form = FORMS[backend]
             order = [steps.index(token) for token in (
-                "relay/T-1",
-                form % "ce-plan",
-                form % "ce-work",
-                form % "ce-simplify-code",
-                form % "ce-code-review",
+                "relay/T-1", "Plan.", "Build.", "Review.", "Verify.", "Record.",
             )]
             self.assertEqual(order, sorted(order), "%s brief steps are out of order" % backend)
 
@@ -505,13 +454,11 @@ class TrackerStepsPerAdapter(unittest.TestCase):
         self.assertIn("no in-progress mark for you to set", steps)
         self.assertNotIn("Move the tracker card", text)
 
-    def test_the_envelope_references_the_renumbered_plan_step(self):
-        """Coherence review finding: the return-envelope block references the ce-plan step number
-        in prose outside the Steps list, which must track the renumbering."""
+    def test_the_envelope_asks_for_no_plan_path(self):
+        """Native mode: the plan is a message, so the envelope has no path to carry."""
         m = self.load("manifest-jira-local-merge.toml")
         text = brief.render(m, m.tasks[0], {"id": "T-1", "title": "t", "description": "d"})
-        self.assertIn("plan_path: <the plan path from step 3>", text)
-        self.assertNotIn("from step 2>", text)
+        self.assertNotIn("plan_path", text)
 
 
 if __name__ == "__main__":
