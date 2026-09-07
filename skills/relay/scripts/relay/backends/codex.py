@@ -14,12 +14,14 @@ parse_version = _parse_after_name_token
 
 # Codex has no per-tool deny flag (no `enforces_at_launch`) and no structured skill-invocation
 # call, so none of these four classes can be observed from its evidence (Backends U6, R3, R4).
-# The first three depend on a denial existing at all; the fourth is a separate capability.
+# The first three depend on a denial existing at all; the fourth, a review step that never
+# ran, needs a structured skill call to be seen, and there is no verified review step here
+# anyway (`review_skill` is None).
 _UNDETECTABLE = frozenset((
     contracts.HALT_DENIED_TOOL,
     contracts.HALT_PATH_GATE,
     contracts.HALT_TRACKER_WRITE_DENIED,
-    contracts.HALT_SKILL_SUBSTITUTION,
+    contracts.REVIEW_SKIPPED,
 ))
 
 
@@ -151,6 +153,3 @@ def evidence_sources(home, cwd, session_id, log_path=None, **_kwargs):
         return (last_message, log_path)
     return (last_message,)
 
-
-def qualify_skill(name):
-    return CAPABILITY.skill_form % name

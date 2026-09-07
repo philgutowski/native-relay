@@ -25,7 +25,7 @@ in the foreground and wait for it the same way. Never end a turn on a promise to
 by", "will check back", "once it finishes", whether or not you actually backgrounded anything:
 there is no next turn to keep that promise on.
 
-$skill_form_rule
+$review_rule
 
 Work on the branch `$branch` and nothing else. Do not merge, do not push, and do not switch
 branches. The runner owns the gate, the merge, and the push once you exit. A branch you leave
@@ -39,12 +39,20 @@ $unenforced_restrictions
 
 1. $tracker_start_step
 2. Create `$branch` from `$default_branch` and stay on it for the rest of the session.
-3. Run `$ce_plan` from the task text above and note the path of the plan it writes. It runs its
-   own document review, so there is no separate review step for the plan.
-4. Run `$ce_work $return_mode <plan path>` with that path.
-5. Run `$ce_simplify` unless the diff is documentation only or under ten lines.
-6. Run `$ce_review $review_mode plan:<plan path>`, apply its findings, and commit the fixes.
-7. Run the project gate and make it pass. The gate is: $gate_description
+3. Plan. Read the project's own instructions at the repository root (`CLAUDE.md` or its
+   equivalent, and whatever it tells you to read next) and the files the task names. Then write
+   the plan as a message, before you edit anything: what will change, which files, how you will
+   verify it, and what is out of scope. There is no plan file; the message is the plan.
+4. Build. Implement the plan on `$branch`, committing as you go with a subject and a body and
+   nothing else in the message.
+5. Review. Run `$review_command` on the branch's diff against `$default_branch`, fix what it
+   finds, and commit the fixes. Do not substitute a self review for it.
+6. Verify. Run the project's own verification, whatever its instructions define as the bar for a
+   unit of work, in the foreground, and make it pass. The runner then runs the project gate after
+   you exit and refuses the merge if it fails. The gate is: $gate_description
+7. Record. Record what the project's method says a unit of work records, in the places it names,
+   on `$branch`: a finding you chose not to fix, a learning worth keeping, a changelog line.
+   Record nothing where the project names nothing.
 8. $tracker_review_step
 9. Print the return envelope below as your final message, with nothing after it.
 
@@ -62,7 +70,6 @@ Your final message must end with this fenced block:
 status: complete
 blockers:
 changed_files:
-plan_path: <the plan path from step 3>
 learnings:
 ```
 

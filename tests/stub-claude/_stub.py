@@ -1,7 +1,7 @@
 """Shared machinery for Relay's stub CLIs (Backends U12). Never calls a model.
 
 `claude`, `codex`, and `grok` are thin binaries: each owns only its own flag grammar, its own
-evidence write location, and its own `--version`/`plugin list` output. Everything else, the
+evidence write location, and its own `--version` output. Everything else, the
 queue protocol, the sleep and orphan-child knobs, and the `git.sh` hook, lives here so the three
 binaries cannot independently drift on it.
 
@@ -118,7 +118,7 @@ def run_git_hook(entry_dir):
 
 def main(session_id, write_evidence):
     """The shared body every thin binary's `main()` calls once its own flag parse and
-    `--version`/`plugin list` branches have already returned. `write_evidence(entry, queue)` is
+    `--version` branch has already returned. `write_evidence(entry, queue)` is
     the one backend-specific step: where the queued fixture actually lands. It receives an empty
     dict and `queue=None` when no queue is configured, and must no-op in that case."""
     emit({"type": "system", "subtype": "stub_start", "session_id": session_id})

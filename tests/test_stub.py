@@ -172,13 +172,6 @@ class StubCodex(_StubTestCase):
                                text=True, timeout=10)
         self.assertEqual(self.mod.parse_version(proc.stdout), self.pins["version_tested"])
 
-    def test_plugin_list_output_matches_the_pinned_pattern(self):
-        proc = subprocess.run(["codex", "plugin", "list"], env=self.env, capture_output=True,
-                               text=True, timeout=10)
-        match = re.search(self.pins["plugin_version_pattern"], proc.stdout)
-        self.assertIsNotNone(match, proc.stdout)
-        self.assertEqual(match.group("version"), self.pins["plugin_version"])
-
     def test_build_args_grammar_accepted_a_renamed_flag_rejected(self):
         fixture = os.path.join(self.fixtures, "last-message-complete.txt")
         write_entry(self.queue, 1, fixture)
@@ -300,13 +293,6 @@ class StubGrok(_StubTestCase):
         proc = subprocess.run(["grok", "--version"], env=self.env, capture_output=True,
                                text=True, timeout=10)
         self.assertEqual(self.mod.parse_version(proc.stdout), self.pins["version_tested"])
-
-    def test_plugin_list_output_matches_the_pinned_pattern(self):
-        proc = subprocess.run(["grok", "plugin", "list", "--json"], env=self.env,
-                               capture_output=True, text=True, timeout=10)
-        match = re.search(self.pins["plugin_version_pattern"], proc.stdout)
-        self.assertIsNotNone(match, proc.stdout)
-        self.assertEqual(match.group("version"), self.pins["plugin_version"])
 
     def test_build_args_grammar_with_allow_deny_pairs_accepted_a_renamed_flag_rejected(self):
         fixture = os.path.join(self.fixtures, "session-transcript-complete.jsonl")

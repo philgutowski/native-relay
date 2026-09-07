@@ -2,15 +2,15 @@
 
 The brief is the whole of what a task process is told. It is generated from a template plus
 manifest and record values (KTD12), never hand written per run, because the 2026-08-25 proof run
-showed a hand written brief being followed in part: the process substituted a harness skill for a
-plugin one twice, and stopped to ask a question nobody could answer.
+showed a hand written brief being followed in part: the process skipped a named step twice, and
+stopped to ask a question nobody could answer.
 
-Four things in here are load bearing.
+Three things in here are load bearing.
 
-Skill names are pinned by their fully qualified form, resolved per backend through
-`backends.qualify_skill`, so a bump to the plugin's naming is one diff rather than a search
-through prose (R43). The form differs per CLI: `compound-engineering:ce-plan` on claude,
-`$ce-plan` on codex, `/ce-plan` on grok. Nothing here may spell one of those prefixes itself.
+The review step names one built in skill, resolved from the backend's own capability record
+(`review_skill`) rather than spelled in the template, so the brief and the classifier that later
+looks for the call cannot disagree about its name. A backend with no such skill has no native
+brief, and `manifest.validate` refuses it before anything renders.
 
 Tracker text is untrusted (R56). A card's title and description are written by whoever can edit
 the board, and they end up verbatim inside a prompt for an unattended process. They go inside a
@@ -22,11 +22,11 @@ The scan is R41's first half. Under `dontAsk` the harness refuses an edit under 
 whatever the allowlist says, so a task whose text points at one of those paths can never finish
 unattended. Catching it before launch turns a wasted hour into a skipped line in the summary.
 
-The unenforced-restriction insert has a whitespace contract with the templates, described in full
-at `_unenforced_block`. The value carries its own surrounding newlines and the templates place its
+The unenforced-restriction insert has a whitespace contract with the template, described in full
+at `_unenforced_block`. The value carries its own surrounding newlines and the template places its
 placeholder with no blank line above or below, which is what makes the empty case render as it did
-before the placeholder existed. The templates look inconsistent there on purpose, and every
-template line is sent verbatim to the launched CLI, so the explanation cannot live in them.
+before the placeholder existed. The template looks inconsistent there on purpose, and every
+template line is sent verbatim to the launched CLI, so the explanation cannot live in it.
 
 The renderer takes a plain card dict (the shape of an adapter's `read`) rather than an adapter,
 which keeps it testable without U4 and makes R15 structural: there is no seam here through which
@@ -40,10 +40,8 @@ from . import adapters, backends, contracts, gitwrite, manifest as manifest_modu
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "templates")
 TEMPLATES = {
     "local_merge": "brief-local-merge.md",
-    # Reachable only by building a manifest by hand: `validate` refuses pr_terminal, because the
-    # run loop has no pull request sequence. The template is kept, and still rendered by its
-    # tests, because it is the design work the mode will need when it is implemented.
-    "pr_terminal": "brief-pr-terminal.md",
+    # `pr_terminal` is named in the manifest schema and refused by `validate`; it has no
+    # template, so a manifest built by hand under it fails here rather than launching.
 }
 
 DATA_HEADER = (
@@ -72,28 +70,26 @@ FOLLOWUP_FORBIDDEN = (
     "and let the operator decide."
 )
 
-# The skill-form rule, rendered per backend rather than written into the templates, because the
-# `compound-engineering:` prefix the templates used to name does not exist on codex or grok.
-# Two constraints on this string, both load bearing.
-#
-# It carries no bare `contracts.REQUIRED_SKILLS` token. The `%s` renders the qualified form, and
-# tests/test_brief.py asserts every mention of a plugin skill name in a rendered brief is preceded
-# by that backend's own prefix. A bare `ce-plan` here would fail that guard, and the guard is R43.
-#
-# It does not say the call is recorded. `backends/codex.py` and `backends/grok.py` both declare
-# HALT_SKILL_SUBSTITUTION undetectable, so on two of three backends nothing is recorded and a
-# brief promising otherwise is false.
-SKILL_FORM_RULE = (
-    "Invoke every plugin skill in this CLI's own form, exactly as the steps below spell it. "
-    "The first skill the steps run is `%s`, and every other one is named the same way. The "
-    "harness ships skills with similar bare names and they are not substitutes for the "
-    "plugin's; a call in any other form is a failure of this task."
+# The review rule, rendered from the backend's own `review_skill` rather than written into the
+# template, so the sentence and the step that names the skill cannot drift apart. It does not
+# say the call is recorded: codex and grok declare REVIEW_SKIPPED undetectable, and although
+# neither can run a native brief today, a rule that promises detection would be false the day
+# one of them can.
+REVIEW_RULE = (
+    "The review step runs this CLI's built in code review, `%s`, exactly as the steps below "
+    "spell it. Reading your own diff is not a substitute, and neither is any other skill with a "
+    "similar name; a task that completes without running it is reported to the operator as "
+    "a review that never ran."
 )
+# The fallback for a backend with no verified built in review. `manifest.validate` refuses such
+# a backend, so no real process reads this; it exists so the brief still renders for every
+# backend in the closed set and the launch seam stays under test until the refusal lifts.
+REVIEW_RULE_FALLBACK = (
+    "This CLI has no built in code review Relay can name, so the review step is a reading of "
+    "the whole diff, hunk by hunk, for correctness bugs, with each one fixed and committed."
+)
+REVIEW_STEP_FALLBACK = "a review of the full diff, hunk by hunk, for correctness bugs"
 
-# The skill each template's steps actually run first, so the rule's example is a form the reader
-# will meet below rather than an orphan. The pr_terminal steps run lfg and never name ce-plan, so
-# a single shared example would contradict the sentence's own "as the steps below spell it".
-LEAD_SKILL = {"local_merge": "ce-plan", "pr_terminal": "lfg"}
 
 # R10's brief half. A backend whose `enforces_at_launch` is False cannot refuse a tool call, and
 # codex has neither an allow flag nor a deny flag, so neither list reaches the argv at all. The
@@ -199,19 +195,16 @@ def _commit_message_block(capability):
 
 
 def values(manifest, task, card, branch=None, mode=None):
-    """Every placeholder the templates use, from manifest and card values only.
-
-    `mode` is the shipping mode whose template these values fill. It only selects which skill the
-    skill-form rule holds up as its example, because the two templates run different first steps
-    and an example the steps below never spell contradicts the rule's own sentence."""
+    """Every placeholder the template uses, from manifest and card values only. `mode` is
+    accepted for the caller's symmetry with `render` and selects nothing today: one template."""
     default_branch = manifest.project.default_branch or "the default branch"
     branch = branch or gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
     tracker_steps = adapters.task_tracker_steps(manifest, branch)
     module = backends.build(task.backend)
     # Bound once: the rule sentence and the step that runs the skill have to name the same thing,
     # and two independent calls are how they would come to name different ones.
-    ce_plan = module.qualify_skill("ce-plan")
-    lead_skill = module.qualify_skill(LEAD_SKILL.get(mode, "ce-plan"))
+    review = backends.review_command(module.CAPABILITY)
+    review_rule = REVIEW_RULE % review if review else REVIEW_RULE_FALLBACK
     return {
         "task_id": task.id,
         "title": defang(str(card.get("title") or "")).strip(),
@@ -228,18 +221,11 @@ def values(manifest, task, card, branch=None, mode=None):
         "data_end": DATA_END,
         "blocked_partial": PARTIAL_ALLOWED if manifest.on_blocked.merge_partial else PARTIAL_FORBIDDEN,
         "blocked_followup": FOLLOWUP_ALLOWED if manifest.on_blocked.open_followup else FOLLOWUP_FORBIDDEN,
-        "return_mode": contracts.CE_WORK_RETURN_MODE,
-        "review_mode": contracts.CODE_REVIEW_AGENT_MODE,
         "envelope_tag": contracts.ENVELOPE_FENCE_TAG,
-        "lfg_token": contracts.LFG_TERMINAL_TOKEN,
-        "skill_form_rule": SKILL_FORM_RULE % lead_skill,
+        "review_rule": review_rule,
+        "review_command": review or REVIEW_STEP_FALLBACK,
         "unenforced_restrictions": _unenforced_block(manifest, module.CAPABILITY),
         "commit_message_rule": _commit_message_block(module.CAPABILITY),
-        "ce_plan": ce_plan,
-        "ce_work": module.qualify_skill("ce-work"),
-        "ce_simplify": module.qualify_skill("ce-simplify-code"),
-        "ce_review": module.qualify_skill("ce-code-review"),
-        "ce_lfg": module.qualify_skill("lfg"),
     }
 
 

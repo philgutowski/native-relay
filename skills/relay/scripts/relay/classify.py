@@ -6,12 +6,11 @@ with an id, a name, and an input. A `user` line holds either the prompt or `tool
 blocks, each naming the `tool_use_id` it answers, with `is_error` set on a denial. The last
 `assistant` line with a text block is the final message, where the return envelope lives.
 
-Two joins do the work (KTD6). A denial is a `tool_result` whose content matches the denial
-regex; joined by id to its `tool_use` it yields the tool name and the path or argument it was
-denied on. A substitution is a `Skill` tool_use whose `input.skill` is not this backend's own
-qualified form of one of the plugin skills the brief pins; `required_skill_for` decides that,
-and the test is per backend rather than one prefix, because two of the three CLIs spell a skill
-with a bare sigil every skill on them shares.
+One join and one absence do the work (KTD6). A denial is a `tool_result` whose content matches
+the denial regex; joined by id to its `tool_use` it yields the tool name and the path or argument
+it was denied on. A skipped review is the absence of any `Skill` tool_use naming the backend's
+`review_skill` in a transcript whose envelope reads complete; `review_ran` decides whether a
+call counts, and only a backend with a `review_skill` is judged at all.
 Classes assigned here are the ones the transcript alone can decide: timeout (from the launch
 result), blocked_envelope, no_envelope, path_gate, and unexpected_error when the transcript
 itself would not open, which is the runner's fault and never the task's silence (KTD5).
@@ -41,7 +40,6 @@ STATUS_RE = re.compile(
     r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:\s*[`*]*(%s)\b" % (contracts.ENVELOPE_STATUS_KEY, "|".join(contracts.ENVELOPE_STATUSES)),
     re.M | re.I,
 )
-PLAN_PATH_RE = re.compile(r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:\s*[`*]*([^\s`*]+)" % contracts.ENVELOPE_PLAN_PATH_KEY, re.M)
 
 
 def _text_of(content):
@@ -235,35 +233,15 @@ def scan_self_kill(log_path, victim_pid):
     return None
 
 
-def required_skill_for(skill_name, backend="claude"):
-    """The qualified skill a Skill call should have been in this backend's own form, or None when
-    it was already qualified or names nothing the brief pins. `code-review` maps to
-    `ce-code-review`.
-
-    Already qualified is a two-part test (backends KTD3), not a prefix check. The form is
-    `compound-engineering:%s` on claude but a bare `$%s` and `/%s` on codex and grok, sigils every
-    skill on those CLIs shares, so the prefix alone would accept `$code-review`, the harness skill
-    this exists to catch, as the plugin's. The remainder has to be a skill the brief actually
-    pins. This is the one site that reads `skill_form` rather than calling `qualify_skill`,
-    because no interface callable answers "is this string already in your form"."""
-    if not skill_name:
-        return None
-    module = backends.build(backend)
-    prefix, _, suffix = module.CAPABILITY.skill_form.partition("%s")
-    # `prefix or suffix`, not `prefix` alone: a form with only a suffix would otherwise skip the
-    # test entirely and report every correctly qualified call as a substitution requiring itself.
-    if (prefix or suffix) and skill_name.startswith(prefix) and skill_name.endswith(suffix):
-        stripped = skill_name[len(prefix):]
-        if suffix:
-            stripped = stripped[:-len(suffix)]
-        if stripped in contracts.REQUIRED_SKILLS:
-            return None
-    bare = skill_name.split(":")[-1].lstrip("$/")
-    for required in contracts.REQUIRED_SKILLS:
-        short = required[3:] if required.startswith("ce-") else required
-        if bare in (required, short) or "ce-" + bare == required:
-            return module.qualify_skill(required)
-    return None
+def review_ran(skill_name, review_skill):
+    """True when a `Skill` call names the backend's review skill: the bare name, or the name
+    behind a namespace (`some-plugin:code-review`), since a harness can register the same skill
+    under a plugin prefix. Anything else, including a skill with a similar name, does not count,
+    which is the point of asking rather than trusting the envelope."""
+    if not skill_name or not review_skill:
+        return False
+    bare = skill_name.split(":")[-1].strip().lstrip("$/")
+    return bare == review_skill
 
 
 KEY_LINE_RE = re.compile(r"^[ \t]*(?:[-*]\s*)?[`*]*[A-Za-z_]+[`*]*\s*:")
@@ -308,13 +286,11 @@ def parse_envelope(text):
         matches = STATUS_RE.findall(block)
     if not matches:
         return None
-    plan = PLAN_PATH_RE.search(block)
     return {
         "status": matches[-1].lower(),
         "fenced": bool(fenced),
         "blockers": _list_after(block, contracts.ENVELOPE_BLOCKERS_KEY),
         "changed_files": _list_after(block, contracts.ENVELOPE_CHANGED_FILES_KEY),
-        "plan_path": plan.group(1) if plan else None,
         "learnings": _list_after(block, contracts.ENVELOPE_LEARNINGS_KEY),
     }
 
@@ -360,6 +336,8 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
 
     tool_uses = {}
     last_text = None
+    review_skill = module.CAPABILITY.review_skill
+    reviewed = False
     for number, obj in lines:
         kind = obj.get("type")
         message = obj.get("message")
@@ -394,14 +372,8 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
                                     break
                     if block.get("name") == "Skill":
                         skill = str((block.get("input") or {}).get("skill", ""))
-                        required = required_skill_for(skill, backend)
-                        if required:
-                            result["findings"].append({
-                                "class": contracts.HALT_SKILL_SUBSTITUTION,
-                                "name": skill,
-                                "required": required,
-                                "line": number,
-                            })
+                        if review_ran(skill, review_skill):
+                            reviewed = True
                 elif block.get("type") == "text":
                     texts.append(str(block.get("text", "")))
             if texts and not obj.get("isSidechain"):
@@ -483,6 +455,14 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
         result["findings_unavailable"] = True
     elif envelope and envelope["status"] == contracts.ENVELOPE_STATUS_COMPLETE:
         result["routable"] = True
+        # Native mode: a complete claim with no review call in the transcript. A finding, not a
+        # class, because verify decides landing from git and the tracker; the summary lists it
+        # as a check by hand. Judged only on a backend that names a review skill at all.
+        if review_skill and not reviewed:
+            result["findings"].append({
+                "class": contracts.REVIEW_SKIPPED,
+                "review": backends.review_command(module.CAPABILITY),
+            })
     elif envelope:
         result["halt_class"] = contracts.HALT_PATH_GATE if has_path_gate else contracts.HALT_BLOCKED_ENVELOPE
     else:

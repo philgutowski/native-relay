@@ -206,8 +206,7 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
     # Resolved once, here, from the repo as it stands before any task has touched it. Reading
     # it per closeout would let a task's own merge move the bound its closeout is checked
     # against (R53, KTD15).
-    allowed_paths = tuple(manifest_module.completed_allowed_paths(
-        manifest, manifest_module.docs_root_for(repo)))
+    allowed_paths = tuple(manifest_module.completed_allowed_paths(manifest))
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
                   retry_blocked, overrides, launch_kwargs, now, allowed_paths)
     outcome = RunOutcome(EXIT_OK, store=store)
@@ -859,7 +858,7 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         ctx.manifest, ctx.card, outcome, ctx.digest, comments, ctx.adapter, ctx.store,
         allowed_paths, backend=ctx.task.backend, task_model=ctx.task.model,
         landing_ref=landing_ref, branch=branch or ctx.branch,
-        commit_range=commit_range, plan_path=envelope.get("plan_path"), gate=gate,
+        commit_range=commit_range, gate=gate,
         wall_seconds=ctx.launched.wall_seconds, active_seconds=ctx.launched.active_seconds,
         halt_class=halt_class, cause_line=cause_line,
         timeout_seconds=ctx.overrides.get("closeout_seconds"),

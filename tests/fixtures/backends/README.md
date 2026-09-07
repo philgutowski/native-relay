@@ -1,5 +1,9 @@
 # Backend fixtures, captured in U1
 
+These captures predate native mode: the tasks ran the plugin pipeline this fork has since
+removed, so their skill calls and stage names are history. The normalizers read event shapes,
+which did not change.
+
 Every file here was produced by a real CLI running a real task against a throwaway target
 repository (`relay-proof/target` in the paths) on 2026-08-28. Nothing is synthesized,
 paraphrased, or hand written. `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`

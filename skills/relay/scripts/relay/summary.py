@@ -132,10 +132,10 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir):
                 checks.append({"kind": "unrecorded_blocker", "task": task_id,
                                "text": "%s blocked and its card carries no new comment. Check the "
                                        "card by hand." % task_id})
-            elif finding["class"] == contracts.HALT_SKILL_SUBSTITUTION:
-                checks.append({"kind": "skill_substitution", "task": task_id,
-                               "text": "%s ran a skill without the plugin prefix: %s"
-                                       % (task_id, finding["line"])})
+            elif finding["class"] == contracts.REVIEW_SKIPPED:
+                checks.append({"kind": "review_skipped", "task": task_id,
+                               "text": "%s completed without running %s. Review the diff by "
+                                       "hand." % (task_id, finding.get("review") or "the review step")})
             elif finding["class"] == contracts.CLOSEOUT_UNFINISHED:
                 checks.append({"kind": "closeout_unfinished", "task": task_id,
                                "text": "%s: the closeout did not print a terminal line. Its "

@@ -1,14 +1,13 @@
 # Concepts
 
 Shared domain vocabulary for this project, entities, named processes, and status concepts with
-project-specific meaning. Seeded with core domain vocabulary, then accretes as ce-compound and
-ce-compound-refresh process learnings; direct edits are fine. Glossary only, not a spec or
-catch-all.
+project-specific meaning. Seeded with core domain vocabulary, then accretes as learnings are
+recorded; direct edits are fine. Glossary only, not a spec or catch-all.
 
 ## Relationships
 
 A Runner reads one Manifest and drives a series of Tasks. Each Task gets its own Task process and,
-once it lands, its own Compound process. The Runner decides a Task's outcome by Verify-landed,
+once it exits, its own Closeout process. The Runner decides a Task's outcome by Verify-landed,
 which consults git and the Tracker through a Tracker adapter, never the Task process itself. The
 Shipping mode named in the Manifest decides what landing means for that project.
 
@@ -111,10 +110,14 @@ kills a background command is the process's own turn ending, not the Runner noti
 ### Backend
 The CLI that runs a Task process and that Task's Closeout process, one of `claude`, `codex`, or
 `grok`. A Task names its backend. A Manifest may default it. Absence of every backend key means
-`claude`. `/relay` proposes one from a written rubric while the Manifest is authored. The
-operator sees every proposal and can change it. The Runner launches on that CLI. It does not
-choose or change the backend during a run. `/relay` itself still runs in Claude Code. Only
-the launched processes vary.
+`claude`. The Runner launches on that CLI. It does not choose or change the backend during a run.
+`/relay` itself still runs in Claude Code. Only the launched processes vary.
+
+Native mode runs on `claude` alone, decided 2026-09-07: the Review step is a built in skill, and
+only a backend whose Capability record names a verified one can run the Brief. `validate` refuses
+a Task naming another backend with a sentence saying so. The other two backends' launch seams and
+evidence readers stay in the Runner, pinned against the CLI versions they were observed on, so the
+refusal can lift one backend at a time once a review step is verified live.
 
 Between runs the Manifest's resolution decides again, so editing a Task's backend or model moves
 any Task that has not landed, and the Runner reports the move on its own output and as a finding
@@ -127,10 +130,10 @@ launches; a model name Relay does not recognise is allowed through.
 
 ### Capability record
 The frozen facts the Runner reads about one backend: whether it enforces tool restrictions at
-launch, its permission flags and forbidden spellings, the version it was tested against, how to
-query its plugin, its credential prefixes and nesting markers, and whether the session id is
-runner chosen. The launch seam, the readiness probe, and the Brief inserts all read this record
-rather than a second per backend table.
+launch, its permission flags and forbidden spellings, the version it was tested against, the
+built in review skill the Brief names on it, its credential prefixes and nesting markers, and
+whether the session id is runner chosen. The launch seam, the readiness probe, the Brief inserts,
+and the classifier all read this record rather than a second per backend table.
 
 ### Task path bound
 The commit-scope prefix list a Manifest names for Task branches. On a backend that cannot refuse
@@ -140,8 +143,15 @@ the Closeout's own path allowance, and it does not observe which tools the Task 
 
 ### Brief
 The instruction text a Runner hands a process it launches, rendered for that process alone from a
-template plus the Task's own facts. There is one shape per Shipping mode for a Task process, and one
-for a Closeout process.
+template plus the Task's own facts. There is one shape for a Task process and one for a Closeout
+process.
+
+The Task brief's steps are the native pipeline: move the card, branch, plan in a message, build,
+run the Review step, run the project's own verification, record what the project's method says a
+unit records, comment the card, print the Envelope. The plan is a message in the transcript rather
+than a file, and verification is whatever the project's own instructions define, which the Task
+process reads because it runs inside that project's checkout. Nothing project specific is in the
+template.
 
 A Brief renders deterministically, so the same inputs produce the same text and a re-run after a
 halt does not change what a process was told. Its template is read at the moment of rendering rather
@@ -149,10 +159,18 @@ than held from the Runner's start, which is what lets a Task change the Brief th
 the same run receive, and equally what lets a template naming a value the running Runner cannot yet
 supply stop the run outright.
 
+### Review step
+The step of the Task brief that runs the backend's built in code review on the branch's diff and
+fixes what it finds. The skill's name comes from the Capability record, so the Brief that asks for
+it and the classifier that looks for it cannot disagree. A Task whose Envelope reads complete and
+whose transcript holds no call to that skill gets a `review_skipped` finding: it lands if the gate
+passes, and the summary lists its diff as one to review by hand. A backend with no such skill has
+no native Brief and is refused at validate.
+
 ### Envelope
 The structured block a Task process prints at the end of its work to report what it did: whether it
-completed, was blocked, or failed, the blockers if any, the files it changed, the plan it worked
-from, and anything it judged worth keeping as a learning.
+completed, was blocked, or failed, the blockers if any, the files it changed, and anything it
+judged worth keeping as a learning.
 
 An Envelope is a claim, not evidence. The Runner reads it to classify how a Task process exited, and
 never to decide whether the Task landed, which is Verify-landed's job from git and the Tracker
@@ -177,20 +195,22 @@ rendered Brief, actually carries it forward.
 ### Closeout process
 A separate short agent invocation the Runner launches after every Task process exit except a
 timeout that left the tree dirty. It has two ordered duties: write the Task's outcome to the Tracker (the closing reference
-when Landed, a comment carrying the Runner's blocker digest when Blocked), then the Compound
+when Landed, a comment carrying the Runner's blocker digest when Blocked), then the Learning
 judgment. It exists because the Runner never writes to the Tracker and the Task process exits
 before the landing commit exists, so neither can name it.
 
-Its ending is a contract: the final line of its last message says whether the Compound judgment
+Its ending is a contract: the final line of its last message says whether the Learning judgment
 wrote a learning or skipped one, and the Runner reads that line from the end of the message, not
 the start. A Closeout process that ends any other way is recorded as unfinished, which is a
 finding for the operator rather than a halt.
 
-### Compound process
+### Learning judgment
 The second duty of the Closeout process: judging whether a Task produced a learning worth keeping
-and writing it if so. It is kept out of the Task process because a Task process at the end of its
-context is the worst available judge of its own learning. Runs for Blocked Tasks too, since a
-blocker is often the learning.
+and writing it if so, as one markdown file under the Manifest's docs root, committed inside the
+Closeout's allowed paths with no plugin involved. It is kept out of the Task process because a
+Task process at the end of its context is the worst available judge of its own learning. Runs for
+Blocked Tasks too, since a blocker is often the learning. The Task process may also record what
+the project's own method tells it to on its branch; the judgment does not write that twice.
 
 ### Halt class
 The Runner's classification of one Task process exit, drawn from a closed set and decided from the
@@ -203,7 +223,8 @@ and is classified as one, so the Cause line reads as though the Task misbehaved:
 model allowance running out mid run reads as a crash, and another session writing an untracked
 file into the working tree reads as the Task leaving the tree dirty. The set is closed deliberately, so the answer to such a
 cause is a finding attached to the record, or a check made before the run starts, rather than a
-new class.
+new class. The set was amended once, by the native mode plan of 2026-09-07: `skill_substitution`
+left it, and `review_skipped` joined the findings.
 
 Three classes are run scoped and always stop the run, named in `contracts.RUN_SCOPED_HALT_CLASSES`:
 each puts something outside the failing Task in question, the remote, the Lease, or the Runner

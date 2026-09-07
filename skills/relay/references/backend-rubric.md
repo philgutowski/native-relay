@@ -1,8 +1,10 @@
 # Backend routing rubric
 
+**Native mode runs on `claude` only, decided 2026-09-07.** The review step of the native brief is Claude Code's built in `/code-review`, and neither `codex` nor `grok` has a verified equivalent reachable from a headless run, so `validate` refuses a Task naming either. Until that refusal lifts for a backend, `/relay` proposes nothing from this file and writes `claude`. The rubric below is kept for that day, because the launch seams and the compensating controls it describes are still in the runner.
+
 `/relay` proposes a backend per Task from this file. The operator sees every proposal and can change it. The Runner never chooses or changes a backend during a run.
 
-The closed set is `claude`, `codex`, and `grok`. Every backend runs the same pipeline. What differs is launch-time enforcement, residual exposure, and the compensating controls.
+The closed set is `claude`, `codex`, and `grok`. Every backend runs the same brief. What differs is launch-time enforcement, residual exposure, and the compensating controls.
 
 ## What distinguishes them for routing
 

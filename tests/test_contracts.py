@@ -1,4 +1,4 @@
-"""U1: every pinned contract string is traceable to a source line in the installed plugin."""
+"""U1: Relay's own vocabulary stays closed and consistent, and its regexes match the observed text."""
 import os
 import re
 import unittest
@@ -6,10 +6,6 @@ from types import SimpleNamespace
 
 import _paths  # noqa: F401
 from relay import classify, contracts, summary
-
-PLUGIN_ROOT = os.path.expanduser(
-    "~/.claude/plugins/cache/compound-engineering-plugin/compound-engineering/%s" % contracts.PLUGIN_MIN_VERSION
-)
 
 RUN_PY_PATH = os.path.join(_paths.SCRIPTS_DIR, "relay", "run.py")
 CLOSEOUT_PY_PATH = os.path.join(_paths.SCRIPTS_DIR, "relay", "closeout.py")
@@ -38,26 +34,6 @@ def _digest_keys_read(source_path):
     return read_keys - locally_set_keys
 
 
-class PinsTraceToSource(unittest.TestCase):
-    def test_every_pin_is_found_in_its_named_source(self):
-        if not os.path.isdir(PLUGIN_ROOT):
-            self.skipTest("compound-engineering %s is not installed at %s" % (contracts.PLUGIN_MIN_VERSION, PLUGIN_ROOT))
-        for name, needle, rel_path in contracts.PLUGIN_PINS:
-            with self.subTest(pin=name):
-                path = os.path.join(PLUGIN_ROOT, rel_path)
-                self.assertTrue(os.path.exists(path), "%s names a missing source %s" % (name, rel_path))
-                with open(path, encoding="utf-8") as handle:
-                    self.assertIn(needle, handle.read(), "%s: %r not in %s" % (name, needle, rel_path))
-
-    def test_pin_values_match_module_constants(self):
-        for name, needle, _ in contracts.PLUGIN_PINS:
-            with self.subTest(pin=name):
-                value = getattr(contracts, name)
-                if isinstance(value, bool):
-                    continue
-                self.assertEqual(needle.strip("`"), value)
-
-
 class OwnVocabulary(unittest.TestCase):
     def test_every_class_that_can_print_has_a_cause_line_and_nothing_else_does(self):
         self.assertEqual(set(contracts.HALT_LINES), set(contracts.LINE_CLASSES))
@@ -71,6 +47,23 @@ class OwnVocabulary(unittest.TestCase):
             self.assertIn(cls, contracts.LINE_CLASSES)
         for cls in contracts.FINDING_CLASSES:
             self.assertIn(cls, contracts.LINE_CLASSES)
+
+    def test_the_review_skipped_finding_is_a_finding_and_not_a_halt_class(self):
+        """Native mode. The amended set (docs/plans/2026-09-07-native-mode-plan.md) removed
+        skill_substitution from HALT_CLASSES and added review_skipped as a finding only."""
+        self.assertNotIn("skill_substitution", contracts.HALT_CLASSES)
+        self.assertNotIn("skill_substitution", contracts.LINE_CLASSES)
+        self.assertIn(contracts.REVIEW_SKIPPED, contracts.FINDING_CLASSES)
+        self.assertNotIn(contracts.REVIEW_SKIPPED, contracts.HALT_CLASSES)
+        line = summary.cause_line(contracts.REVIEW_SKIPPED,
+                                  {"class": contracts.REVIEW_SKIPPED, "review": "/code-review"})
+        self.assertIn("/code-review", line)
+        self.assertNotIn("{", line)
+
+    def test_the_closeout_terminal_lines_are_relays_own_and_distinct(self):
+        self.assertEqual(len(set(contracts.CLOSEOUT_TERMINAL_LINES)), 2)
+        for line in contracts.CLOSEOUT_TERMINAL_LINES:
+            self.assertNotIn("\n", line)
 
     def test_the_reassignment_class_prints_one_line_and_survives_a_missing_key(self):
         """Issue #58. The class is a finding only, so it has to reach LINE_CLASSES and

@@ -9,7 +9,6 @@ continue the task's work, do not touch its code, and do not judge whether it sho
 Outcome: $outcome
 $landing_line
 Branch: $branch
-Plan: $plan_path
 Timing: $timing
 Gate: $gate
 
@@ -49,7 +48,7 @@ $duty_one
 
 Write once. If a comment above already says what you were about to say, do not repeat it.
 
-## Duty two: the compound judgment
+## Duty two: the learning judgment
 
 Decide whether this task produced a learning a future session would get wrong without it: a
 cause that was not where it looked, a contract or seam whose rules are not visible in the code,
@@ -59,13 +58,16 @@ nothing gets no document, and a blocked task is often where the best one is.
 The learnings the task process reported above are its own account, not a verdict: weigh them
 against what you see in the outcome, blockers, and findings, since the run may show more than
 the task noticed at the time, and an empty or reflexive entry there does not settle the question.
+The task may also have recorded something itself, on its branch, where the project's own method
+told it to; a learning already written there is not written again here.
 
-If there is one, run exactly this:
+If there is one, write it yourself as one markdown file under `$learnings_dir`, or wherever the
+project's own instructions at the repository root say learnings live if that place lies inside
+the paths below. Give it a filename that names the problem, and a body with a short title, the
+problem as it appeared, the cause, and what to do next time. Match the frontmatter and layout of
+the files already in that directory when there are any.
 
-    $compound_command
-
-$compound_skill does not commit. Commit whatever it wrote yourself, in one commit, touching only
-these paths and nothing else:
+Commit whatever you wrote yourself, in one commit, touching only these paths and nothing else:
 
 $allowed_paths
 

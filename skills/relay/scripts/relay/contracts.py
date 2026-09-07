@@ -1,52 +1,19 @@
 """Every string Relay depends on from outside itself, pinned in one place.
 
-A contract here is a fact about another program: the compound-engineering plugin, the Claude
-Code CLI, or the transcript the CLI writes. Each pin names its source so a version bump is one
-diff and tests/test_contracts.py can grep the installed plugin for the string. Relay's own
-vocabulary (halt classes, record statuses, the envelope fence tag) lives here too so classify,
-verify, and summary share one set.
+A contract here is a fact about another program: a backend CLI, the transcript it writes, or
+the built in skill the brief names. Each pin names its source so a version bump is one diff.
+Relay's own vocabulary (halt classes, record statuses, the envelope fence tag, the closeout
+terminal lines) lives here too so brief, classify, closeout, verify, and summary share one set.
 """
 import re
 
-# The plugin and CLI versions these pins were read from.
-PLUGIN_NAME = "compound-engineering"
-PLUGIN_MIN_VERSION = "3.23.4"
 # Backward-compatible Claude pin. New terminal records use the per-backend values in
 # BACKEND_PINS, which are the single source of truth for all three CLIs.
 CLI_VERSION_TESTED = "2.1.250"
 
-# Source paths are relative to the installed plugin root, for the pin check test.
-# Each entry: (constant name, string that must appear in the source, source path).
-PLUGIN_PINS = (
-    # lfg prints this token when the whole pipeline is complete. skills/lfg/SKILL.md step 10.
-    ("LFG_TERMINAL_TOKEN", "<promise>DONE</promise>", "skills/lfg/SKILL.md"),
-    # ce-work enters return-to-caller mode on this leading token followed by a plan path.
-    ("CE_WORK_RETURN_MODE", "mode:return-to-caller", "skills/ce-work/references/input-triage.md"),
-    # The envelope's status field and its three values.
-    ("ENVELOPE_STATUS_KEY", "`status`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_STATUS_COMPLETE", "`complete`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_STATUS_BLOCKED", "`blocked`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_STATUS_FAILED", "`failed`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_BLOCKERS_KEY", "`blockers`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_CHANGED_FILES_KEY", "`changed_files`", "skills/ce-work/references/return-to-caller.md"),
-    ("ENVELOPE_PLAN_PATH_KEY", "`plan_path`", "skills/ce-work/references/return-to-caller.md"),
-    # ce-compound non-interactive grammar and its two terminal lines.
-    ("COMPOUND_NON_INTERACTIVE", "mode:non-interactive", "skills/ce-compound/SKILL.md"),
-    ("COMPOUND_DEPTH_LIGHTWEIGHT", "depth:lightweight", "skills/ce-compound/SKILL.md"),
-    ("COMPOUND_DEPTH_FULL", "depth:full", "skills/ce-compound/SKILL.md"),
-    ("COMPOUND_COMPLETE_LINE", "Documentation complete", "skills/ce-compound/references/report.md"),
-    ("COMPOUND_SKIPPED_LINE", "Documentation skipped", "skills/ce-compound/references/report.md"),
-    # ce-plan runs its own non-interactive document review, so a brief adds no ce-doc-review step.
-    ("CE_PLAN_RUNS_DOC_REVIEW", "Document review is mandatory for a Durable plan", "skills/ce-plan/SKILL.md"),
-    # ce-code-review agent mode and its verdict strings.
-    ("CODE_REVIEW_AGENT_MODE", "mode:agent", "skills/ce-code-review/references/modes-and-output.md"),
-    ("CODE_REVIEW_VERDICT_READY", "Ready to merge", "skills/ce-code-review/references/finish-review.md"),
-    ("CODE_REVIEW_VERDICT_FIXES", "Ready with fixes", "skills/ce-code-review/references/finish-review.md"),
-    ("CODE_REVIEW_VERDICT_NOT_READY", "Not ready", "skills/ce-code-review/references/finish-review.md"),
-)
-
-LFG_TERMINAL_TOKEN = "<promise>DONE</promise>"
-CE_WORK_RETURN_MODE = "mode:return-to-caller"
+# The return envelope (KTD8): the status field, its three values, and the list keys. The task
+# brief asks for it inside a fenced block with ENVELOPE_FENCE_TAG so a quoted `status:`
+# elsewhere in the final message cannot be mistaken for it.
 ENVELOPE_STATUS_KEY = "status"
 ENVELOPE_STATUS_COMPLETE = "complete"
 ENVELOPE_STATUS_BLOCKED = "blocked"
@@ -54,34 +21,15 @@ ENVELOPE_STATUS_FAILED = "failed"
 ENVELOPE_STATUSES = (ENVELOPE_STATUS_COMPLETE, ENVELOPE_STATUS_BLOCKED, ENVELOPE_STATUS_FAILED)
 ENVELOPE_BLOCKERS_KEY = "blockers"
 ENVELOPE_CHANGED_FILES_KEY = "changed_files"
-ENVELOPE_PLAN_PATH_KEY = "plan_path"
-# Relay's own addition to the envelope, not part of the plugin's return-to-caller contract the
-# four keys above pin against (docs/backlog.md line two).
 ENVELOPE_LEARNINGS_KEY = "learnings"
-COMPOUND_NON_INTERACTIVE = "mode:non-interactive"
-COMPOUND_DEPTH_LIGHTWEIGHT = "depth:lightweight"
-COMPOUND_DEPTH_FULL = "depth:full"
-COMPOUND_COMPLETE_LINE = "Documentation complete"
-COMPOUND_SKIPPED_LINE = "Documentation skipped"
-COMPOUND_TERMINAL_LINES = (COMPOUND_COMPLETE_LINE, COMPOUND_SKIPPED_LINE)
-CE_PLAN_RUNS_DOC_REVIEW = True
-CODE_REVIEW_AGENT_MODE = "mode:agent"
-CODE_REVIEW_VERDICT_READY = "Ready to merge"
-CODE_REVIEW_VERDICT_FIXES = "Ready with fixes"
-CODE_REVIEW_VERDICT_NOT_READY = "Not ready"
-CODE_REVIEW_VERDICTS = (CODE_REVIEW_VERDICT_READY, CODE_REVIEW_VERDICT_FIXES, CODE_REVIEW_VERDICT_NOT_READY)
-
-# Relay's own envelope convention (KTD8): the brief asks for the envelope inside a fenced block
-# with this tag, so a quoted `status:` elsewhere in the final message cannot be mistaken for it.
 ENVELOPE_FENCE_TAG = "relay-envelope"
 
-# Skill names. The brief pins every plugin skill in its backend's own invocation form, and the
-# classifier flags a Skill call outside that form as a substitution (R43). The 2026-08-25 proof
-# run invoked the harness `code-review` twice when the brief said `/ce-code-review`. The forms
-# themselves live on BACKEND_PINS below as `skill_form`, one per backend, and are read only
-# through `backends.qualify_skill`; there is deliberately no module-level prefix constant here,
-# because a second copy of claude's form is a copy that can drift from the pin.
-REQUIRED_SKILLS = ("ce-plan", "ce-work", "ce-simplify-code", "ce-code-review", "ce-compound", "lfg")
+# The Closeout process's ending contract: its last non-empty line is exactly one of these. The
+# runner reads it from the end of the message, never the head.
+CLOSEOUT_COMPLETE_LINE = "Documentation complete"
+CLOSEOUT_SKIPPED_LINE = "Documentation skipped"
+CLOSEOUT_TERMINAL_LINES = (CLOSEOUT_COMPLETE_LINE, CLOSEOUT_SKIPPED_LINE)
+
 
 # CLI contracts, observed on CLI_VERSION_TESTED and documented nowhere.
 # A denied tool call is a `user` transcript line whose tool_result content begins with this.
@@ -130,10 +78,12 @@ CLI_FLAGS = (
 FORBIDDEN_PERMISSION_MODE = "bypassPermissions"
 OUTPUT_FORMAT = "stream-json"
 
-# Per-backend launch facts, every one observed in U1 by running the installed CLI against
-# a throwaway target repository on 2026-08-28. Nothing here is read from documentation.
-# Pins are the producer. backends.Capability is the frozen view U4 copies.
-# Do not restate these values elsewhere.
+# Per-backend launch facts, every one observed by running the installed CLI against a throwaway
+# target repository on 2026-08-28, plus `review_skill`, the built in review the native brief
+# names on that backend (None where no verified equivalent exists, which is what makes
+# manifest.validate refuse the backend in native mode). Nothing here is read from
+# documentation. Pins are the producer. backends.Capability is the frozen view the backend
+# modules copy. Do not restate these values elsewhere.
 #
 # The fixtures these were taken from are in tests/fixtures/backends/, one directory per backend,
 # and tests/fixtures/backends/README.md names which task produced which file.
@@ -144,19 +94,6 @@ BACKEND_PINS = {
         # `claude --version` leads with the number, so the leading-digit parse works here and
         # nowhere else. See the two entries below.
         "version_output_sample": "2.1.250 (Claude Code)",
-        "plugin_version": "3.23.4",
-        "plugin_query": ("claude", "plugin", "list"),
-        # `claude plugin list` prints `Version:` and `Status:` as separate lines in the same
-        # entry; a disabled plugin still reports its installed version on the `Version:` line.
-        # The interior scan is bounded to this entry (never crossing the next `❯` bullet) so a
-        # disabled compound-engineering entry cannot borrow a later, unrelated plugin's enabled
-        # status. skills-relay-contracts-129-disabled-plugin-ready. Not covered: two entries for
-        # this same plugin at different scopes (e.g. a disabled project-scope install followed by
-        # an enabled user-scope one) would let re.search retry past the first and match the
-        # second; unconfirmed whether the real CLI can list the same plugin twice.
-        "plugin_version_pattern": (r"(?ims)^\s*❯\s*compound-engineering@compound-engineering-plugin\s+"
-                                   r"Version:\s*(?P<version>\d+(?:\.\d+)+)"
-                                   r"(?:(?!❯).)*?Status:\s*(?:\S+\s+)?enabled\b"),
         "headless_flag": "-p",
         "session_id_choosable": True,
         "permission_mode": "dontAsk",
@@ -167,7 +104,10 @@ BACKEND_PINS = {
         # Demonstrated, not assumed (R25): tests/fixtures/backends/claude/denial-refusal.jsonl
         # holds a refused `rm -rf`, and the target file was still present afterwards.
         "enforces_at_launch": True,
-        "skill_form": "compound-engineering:%s",
+        # The built in review skill the native brief's review step names, invoked through the
+        # Skill tool in a headless session. The 2026-08-25 proof run showed a headless process
+        # reaching it on its own, so the classifier can see the call in the transcript.
+        "review_skill": "code-review",
         "evidence": "session jsonl under ~/.claude/projects/<slug>/<session-id>.jsonl",
         "credential_prefixes": ("ANTHROPIC_", "CLAUDE_"),
         "credential_file": "~/.claude/.credentials.json",
@@ -185,10 +125,6 @@ BACKEND_PINS = {
         # Leads with a name token, so the leading-digit parse returns None. KTD8 is why parsing
         # is per-backend rather than one regex.
         "version_output_sample": "codex-cli 0.149.0",
-        "plugin_version": "3.23.4",
-        "plugin_query": ("codex", "plugin", "list"),
-        "plugin_version_pattern": (r"(?im)^compound-engineering@compound-engineering-plugin\s+"
-                                   r"installed,\s+enabled\s+(?P<version>\d+(?:\.\d+)+)\s+"),
         "headless_flag": "exec",
         # Codex assigns its own thread id, so the runner names the evidence instead (KTD4).
         "session_id_choosable": False,
@@ -209,7 +145,9 @@ BACKEND_PINS = {
         # simply could not complete. `config_overrides` below removes that, and nothing detects a
         # push from a Task or Closeout here yet. Issue #60.
         "enforces_at_launch": False,
-        "skill_form": "$%s",
+        # No verified built in review reachable from `codex exec`, so native mode refuses this
+        # backend at validate until one is observed live.
+        "review_skill": None,
         "evidence": "stdout log plus --output-last-message file; session jsonl at "
                     "~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl",
         "credential_prefixes": ("CODEX_", "OPENAI_"),
@@ -260,13 +198,6 @@ BACKEND_PINS = {
         # confirmed against 1.0.13, the version installed and exercised in that session.
         "version_tested": "1.0.13",
         "version_output_sample": "grok 1.0.13 (5e9a58528b76) [stable]",
-        "plugin_version": "3.23.4",
-        "plugin_query": ("grok", "plugin", "list", "--json"),
-        # `grok plugin list --json` carries only a `"status": "installed"` field, unchanged by
-        # `grok plugin disable`/`enable` as of the version tested; there is no field this pattern
-        # can require to exclude a disabled plugin the way the claude and codex patterns do.
-        "plugin_version_pattern": (r'(?s)\{(?=[^{}]*"name"\s*:\s*"compound-engineering")'
-                                   r'(?=[^{}]*"version"\s*:\s*"(?P<version>\d+(?:\.\d+)+)")[^{}]*\}'),
         "headless_flag": "-p",
         "session_id_choosable": True,
         # U1 finding, and a correction to the plan's Assumptions and KTD6. Grok accepts
@@ -279,7 +210,7 @@ BACKEND_PINS = {
         # Issue #57, observed round eight 2026-09-01 on tasks 45 and 56, confirmed live against
         # grok 1.0.13 the same day. Under `auto` mode a `run_terminal_command` whose argument
         # uses command substitution or a heredoc, the `git commit -m "$(cat <<'EOF' ...
-        # EOF)"` form the compound-engineering pipeline teaches, is cancelled outright rather
+        # EOF)"` form many agent commit guides teach, is cancelled outright rather
         # than executed or refused: `updates.jsonl` carries the exact same shape as the
         # demonstrated `--deny` refusal above, a `tool_call_update` with `status: "failed"`, but
         # the body reads "User cancelled the execution for tool `run_terminal_command`" instead
@@ -293,11 +224,9 @@ BACKEND_PINS = {
         # reliably reproducible from a single trivial `-p` probe outside a real multi-turn task;
         # the live probe that confirmed the marker text and `status` value used the real
         # capture from task 45's own session file rather than a fresh reproduction attempt.
-        # Code review found the compound-engineering plugin's own `ce-commit-push-pr` skill
-        # (outside this repo) shows a worked commit example using this exact heredoc form. That
-        # path is unreachable under this manifest's `local_merge` shipping mode (`ce-work`'s
-        # return-to-caller mode never loads it), but would defeat this brief instruction outright
-        # if `pr_terminal` mode is ever enabled for a grok task; re-check before that switch.
+        # Any skill or guide the task reads that shows a worked commit in this heredoc form
+        # would defeat the brief instruction outright; re-check before native mode ever admits
+        # a grok task.
         "permission_mode": "auto",
         "forbidden_permission_modes": ("bypassPermissions", "dontAsk"),
         "output_format": ("--output-format", "streaming-json"),
@@ -309,9 +238,9 @@ BACKEND_PINS = {
         # ("malformed rule: missing closing parenthesis") rather than silently accepted, and a
         # bare `Skill` entry, which closeout.BASE_TOOLS carries, is accepted.
         "enforces_at_launch": True,
-        # U1 finding, resolving the plan's open question. Grok registers plugin skills under
-        # bare names, with no plugin namespace, so the Claude prefix would not resolve.
-        "skill_form": "/%s",
+        # No built in review observed on this CLI, so native mode refuses this backend at
+        # validate until one is verified live.
+        "review_skill": None,
         "evidence": "~/.grok/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl",
         "credential_prefixes": ("GROK_", "XAI_"),
         "credential_file": "~/.grok/auth.json",
@@ -426,7 +355,6 @@ HALT_TRACKER_WRITE_DENIED = "tracker_write_denied"
 HALT_REMOTE_ADVANCED = "remote_advanced"
 HALT_CLOSEOUT_OUT_OF_SCOPE = "closeout_out_of_scope"
 HALT_RUNNER_CRASHED = "runner_crashed"
-HALT_SKILL_SUBSTITUTION = "skill_substitution"
 HALT_GATE_REFUSED = "gate_refused"
 HALT_PARTIAL_LANDING = "partial_landing"
 HALT_TIMEOUT = "timeout"
@@ -461,6 +389,12 @@ WAITING_LAST_MESSAGE = "waiting_last_message"
 # or unclean_exit), this names the mechanism instead of leaving the Cause line to read only the
 # downstream symptom, the same shape WAITING_LAST_MESSAGE above already established.
 CANCELLED_TOOL_CALL = "cancelled_tool_call"
+# Native mode. A Task on a backend with a `review_skill` whose envelope read complete and
+# whose transcript holds no Skill call naming that skill. Finding only: the runner's own
+# verify decides landing, and a review that never ran is a check by hand for the operator,
+# not a stop. Backends without a review skill declare it undetectable, and the 2026-08-25
+# proof run is the precedent: a headless process substituted or skipped review steps twice.
+REVIEW_SKIPPED = "review_skipped"
 # Issue #58. The Manifest's resolution decided this relaunch's backend or model, and it differed
 # from what the record carried, so the Task went somewhere other than where it last ran. Finding
 # only, and unlike the three above it names an operator's own choice rather than a failure: the
@@ -485,7 +419,6 @@ HALT_CLASSES = (
     HALT_REMOTE_ADVANCED,
     HALT_CLOSEOUT_OUT_OF_SCOPE,
     HALT_RUNNER_CRASHED,
-    HALT_SKILL_SUBSTITUTION,
     HALT_GATE_REFUSED,
     HALT_PARTIAL_LANDING,
     HALT_TIMEOUT,
@@ -521,7 +454,6 @@ FINDING_CLASSES = (
     HALT_DENIED_TOOL,
     HALT_PATH_GATE,
     HALT_TRACKER_WRITE_DENIED,
-    HALT_SKILL_SUBSTITUTION,
     HALT_NO_ENVELOPE,
     CLOSEOUT_UNFINISHED,
     BLOCKED_UNRECORDED,
@@ -529,6 +461,7 @@ FINDING_CLASSES = (
     RUNNER_SELF_KILL,
     WAITING_LAST_MESSAGE,
     CANCELLED_TOOL_CALL,
+    REVIEW_SKIPPED,
     BACKEND_REASSIGNED,
 )
 
@@ -536,7 +469,7 @@ FINDING_CLASSES = (
 # findings that are never a record's own class but still have to print.
 LINE_CLASSES = HALT_CLASSES + (
     CLOSEOUT_UNFINISHED, BLOCKED_UNRECORDED, UNENFORCED_DISALLOWED, RUNNER_SELF_KILL,
-    WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, BACKEND_REASSIGNED,
+    WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, REVIEW_SKIPPED, BACKEND_REASSIGNED,
 )
 
 HALT_LINES = {
@@ -553,7 +486,6 @@ HALT_LINES = {
     # for every crash. The tree is deliberately absent: the reclaim path that raises this
     # most often runs in a later process that never saw the repository.
     HALT_RUNNER_CRASHED: "runner died during {status_before} on {branch}",
-    HALT_SKILL_SUBSTITUTION: "ran {name} instead of {required}",
     HALT_GATE_REFUSED: "gate refused {branch} at {sha}; output in {log}",
     HALT_PARTIAL_LANDING: "landed at {sha} but card reads {card_status}",
     HALT_TIMEOUT: "timed out after {active_minutes} active minutes ({wall_minutes} wall); tree {tree} on {branch}",
@@ -566,6 +498,7 @@ HALT_LINES = {
     RUNNER_SELF_KILL: "self-kill: {command} named the runner's own pid {victim_pid} among {pids}",
     WAITING_LAST_MESSAGE: "ended the turn waiting on background work that does not resume headless: {last_message}",
     CANCELLED_TOOL_CALL: "the CLI cancelled its own tool call, no user present: {tool} on {target}",
+    REVIEW_SKIPPED: "completed without running {review}",
     # Tense neutral on purpose: the runner streams this sentence before the launch, where the
     # move is still intent, and writes it onto the record afterwards, where it is history.
     BACKEND_REASSIGNED: ("{to_backend} {to_model}, reassigned from "

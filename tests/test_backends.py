@@ -136,62 +136,17 @@ class CapabilityRecord(unittest.TestCase):
         self.assertIsNone(cap.allow_flag)
         self.assertIsNone(cap.deny_flag)
 
-    def test_plugin_version_pattern_is_present_for_each_backend(self):
-        for name in mf.BACKENDS:
-            self.assertTrue(backends.build(name).CAPABILITY.plugin_version_pattern, name)
+    def test_only_claude_names_a_native_review_skill(self):
+        """Native mode, decided 2026-09-07: the review step is a built in skill, and only a
+        backend with a verified one can run the native brief. `manifest.validate` reads this."""
+        self.assertEqual(backends.build("claude").CAPABILITY.review_skill, "code-review")
+        self.assertIsNone(backends.build("codex").CAPABILITY.review_skill)
+        self.assertIsNone(backends.build("grok").CAPABILITY.review_skill)
 
-    def test_plugin_version_patterns_parse_the_observed_list_shapes(self):
-        samples = {
-            "claude": ("  ❯ compound-engineering@compound-engineering-plugin\n"
-                       "    Version: 3.23.4\n"
-                       "    Scope: user\n"
-                       "    Status: ✔ enabled"),
-            "codex": "compound-engineering@compound-engineering-plugin  installed, enabled  3.23.4   /tmp/plugin",
-            "grok": '{"name":"compound-engineering", "version":"3.23.4"}',
-        }
-        for name, output in samples.items():
-            self.assertEqual(mf._plugin_version(backends.build(name).CAPABILITY, output), "3.23.4", name)
-
-    def test_grok_pattern_does_not_borrow_another_plugins_version(self):
-        output = ('[{"name":"compound-engineering", "version":"3.0.0"}, '
-                  '{"name":"other-plugin", "version":"9.0.0"}]')
-        self.assertEqual(mf._plugin_version(backends.build("grok").CAPABILITY, output), "3.0.0")
-
-    def test_claude_pattern_rejects_a_disabled_plugin(self):
-        # skills-relay-contracts-129-disabled-plugin-ready: a disabled plugin still reports its
-        # installed version on the `Version:` line, so readiness must also require `Status:`.
-        output = ("  ❯ compound-engineering@compound-engineering-plugin\n"
-                  "    Version: 3.23.4\n"
-                  "    Scope: user\n"
-                  "    Status: ✘ disabled")
-        self.assertIsNone(mf._plugin_version(backends.build("claude").CAPABILITY, output))
-
-    def test_claude_pattern_does_not_borrow_a_later_plugins_enabled_status(self):
-        output = ("  ❯ compound-engineering@compound-engineering-plugin\n"
-                  "    Version: 3.23.4\n"
-                  "    Scope: user\n"
-                  "    Status: ✘ disabled\n"
-                  "\n"
-                  "  ❯ other-plugin@other\n"
-                  "    Version: 1.0.0\n"
-                  "    Scope: user\n"
-                  "    Status: ✔ enabled")
-        self.assertIsNone(mf._plugin_version(backends.build("claude").CAPABILITY, output))
-
-    def test_codex_pattern_already_excludes_a_disabled_status(self):
-        # codex's CLI has no disable/enable subcommand and cannot currently produce this state,
-        # but the pattern's literal "installed, enabled" requirement already excludes it.
-        output = "compound-engineering@compound-engineering-plugin  installed, disabled  3.23.4   /tmp/plugin"
-        self.assertIsNone(mf._plugin_version(backends.build("codex").CAPABILITY, output))
-
-    def test_claude_pattern_accepts_a_status_line_with_no_glyph(self):
-        # The glyph before "enabled"/"disabled" is optional in the pattern so a future CLI
-        # dropping it doesn't silently stop matching; pin that branch directly.
-        output = ("  ❯ compound-engineering@compound-engineering-plugin\n"
-                  "    Version: 3.23.4\n"
-                  "    Scope: user\n"
-                  "    Status: enabled")
-        self.assertEqual(mf._plugin_version(backends.build("claude").CAPABILITY, output), "3.23.4")
+    def test_review_command_is_the_slash_form_or_none(self):
+        self.assertEqual(backends.review_command(backends.build("claude").CAPABILITY), "/code-review")
+        self.assertIsNone(backends.review_command(backends.build("codex").CAPABILITY))
+        self.assertIsNone(backends.review_command(backends.build("grok").CAPABILITY))
 
 
 class SharedSurface(unittest.TestCase):
@@ -205,7 +160,6 @@ class SharedSurface(unittest.TestCase):
                 "readable",
                 "normalize_transcript",
                 "normalize_stream",
-                "qualify_skill",
             ),
         )
         for name in mf.BACKENDS:
@@ -239,11 +193,6 @@ class SharedSurface(unittest.TestCase):
         self.assertIsNone(backends.build("grok").parse_version("grok 3 updates available"))
         self.assertIsNone(backends.build("codex").parse_version("codex-cli 5 new updates"))
         self.assertIsNone(backends.build("claude").parse_version("3 updates available"))
-
-    def test_qualify_skill_interpolates_the_pin_form(self):
-        self.assertEqual(backends.build("claude").qualify_skill("ce-plan"), "compound-engineering:ce-plan")
-        self.assertEqual(backends.build("codex").qualify_skill("ce-plan"), "$ce-plan")
-        self.assertEqual(backends.build("grok").qualify_skill("ce-plan"), "/ce-plan")
 
 
 class ClaudeEvidence(unittest.TestCase):

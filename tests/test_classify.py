@@ -35,7 +35,7 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(r["envelope"]["changed_files"], ["core/thing.py", "tests/test_thing.py"])
         self.assertEqual(r["envelope"]["blockers"], [])
         self.assertEqual(r["envelope"]["learnings"], [])
-        self.assertEqual(r["envelope"]["plan_path"], "docs/plans/2026-08-25-1400-feat-t1-plan.md")
+        self.assertNotIn("plan_path", r["envelope"])
         self.assertEqual(r["findings"], [])
         self.assertEqual(r["malformed_lines"], 0)
         self.assertEqual(r["tool_calls"], 2)
@@ -119,20 +119,29 @@ class Fixtures(unittest.TestCase):
         gates = [f for f in r["findings"] if f["class"] == contracts.HALT_PATH_GATE]
         self.assertEqual(len(gates), 1)
         self.assertEqual(gates[0]["tool"], "Edit")
-        self.assertTrue(gates[0]["target"].endswith(".claude/skills/itg-brief/SKILL.md"))
+        self.assertTrue(gates[0]["target"].endswith(".claude/skills/example-brief/SKILL.md"))
         self.assertEqual(gates[0]["detail"], contracts.PATH_GATE_CLAUDE_DIR)
         self.assertIsNotNone(gates[0]["tool_use_line"])
         self.assertEqual(r["halt_class"], contracts.HALT_PATH_GATE)
         self.assertIn(contracts.HALT_NO_ENVELOPE, classes(r), "the missing envelope stays visible")
 
-    def test_skill_substitution_names_bare_and_required(self):
-        r = run("skill_substitution.jsonl")
-        subs = [f for f in r["findings"] if f["class"] == contracts.HALT_SKILL_SUBSTITUTION]
-        self.assertEqual(len(subs), 2)
-        self.assertEqual(subs[0]["name"], "code-review")
-        self.assertEqual(subs[0]["required"], "compound-engineering:ce-code-review")
-        self.assertTrue(r["routable"], "a substitution is a warning; the verdict is unchanged")
-        self.assertEqual(classify.finding_line(subs[0]), "ran code-review instead of compound-engineering:ce-code-review")
+    def test_a_complete_envelope_with_no_review_call_is_a_review_skipped_finding(self):
+        """Native mode. A similarly named skill (`simplify`) does not count as the review."""
+        r = run("review_skipped.jsonl")
+        skipped = [f for f in r["findings"] if f["class"] == contracts.REVIEW_SKIPPED]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["review"], "/code-review")
+        self.assertTrue(r["routable"], "a skipped review is a finding; the verdict is unchanged")
+        self.assertEqual(classify.finding_line(skipped[0]), "completed without running /code-review")
+
+    def test_a_review_reached_through_a_plugin_namespace_still_counts(self):
+        r = run("review_namespaced.jsonl")
+        self.assertEqual([f for f in r["findings"] if f["class"] == contracts.REVIEW_SKIPPED], [])
+
+    def test_a_blocked_task_with_no_review_call_is_not_judged_on_review(self):
+        """The review step comes after the build; a task that stopped before it did not skip it."""
+        r = run("blocked.jsonl")
+        self.assertEqual([f for f in r["findings"] if f["class"] == contracts.REVIEW_SKIPPED], [])
 
     def test_tracker_denied_with_jira_patterns(self):
         r = run("tracker_denied.jsonl", patterns=JIRA_PATTERNS)
@@ -272,43 +281,14 @@ class WritePatterns(unittest.TestCase):
         use = {"name": "Edit", "input": {"file_path": "/x/repo/docs/tracker.md.bak"}}
         self.assertFalse(classify.matches_write_pattern(use, MARKDOWN_PATTERNS))
 
-    def test_required_skill_mapping(self):
-        self.assertEqual(classify.required_skill_for("code-review"), "compound-engineering:ce-code-review")
-        self.assertEqual(classify.required_skill_for("ce-work"), "compound-engineering:ce-work")
-        self.assertEqual(classify.required_skill_for("lfg"), "compound-engineering:lfg")
-        self.assertIsNone(classify.required_skill_for("compound-engineering:ce-work"))
-        self.assertIsNone(classify.required_skill_for("dj-sync"))
-
-    def test_the_required_skill_is_named_in_the_backends_own_form(self):
-        """Backends KTD15's fourth call site. A finding that names an invocation the task's CLI
-        cannot run tells the operator to fix it with a command that does not exist there."""
-        self.assertEqual(classify.required_skill_for("code-review", backend="codex"),
-                         "$ce-code-review")
-        self.assertEqual(classify.required_skill_for("code-review", backend="grok"),
-                         "/ce-code-review")
-        self.assertIsNone(classify.required_skill_for("$ce-work", backend="codex"))
-        self.assertIsNone(classify.required_skill_for("/ce-work", backend="grok"))
-
-    def test_a_bare_sigil_is_not_proof_of_plugin_ownership(self):
-        """`$` and `/` are how those CLIs invoke every skill, the harness's included, so the
-        prefix alone cannot decide whether a call was already qualified."""
-        self.assertEqual(classify.required_skill_for("$code-review", backend="codex"),
-                         "$ce-code-review")
-        self.assertEqual(classify.required_skill_for("/code-review", backend="grok"),
-                         "/ce-code-review")
-
-    def test_a_prefixed_name_the_plugin_does_not_ship_is_still_a_substitution(self):
-        """The one claude outcome this tightening changes. `compound-engineering:code-review` is
-        not a skill the plugin ships, so accepting it silently was wrong. A real plugin skill
-        outside the pipeline set still returns None, because the bare-name pass finds no match."""
-        self.assertEqual(classify.required_skill_for("compound-engineering:code-review"),
-                         "compound-engineering:ce-code-review")
-        self.assertIsNone(classify.required_skill_for("compound-engineering:ce-debug"))
-
-    def test_a_claude_qualified_call_on_another_backend_is_a_substitution(self):
-        self.assertEqual(classify.required_skill_for("compound-engineering:ce-work",
-                                                     backend="codex"),
-                         "$ce-work")
+    def test_review_ran_matches_the_bare_and_namespaced_forms_only(self):
+        self.assertTrue(classify.review_ran("code-review", "code-review"))
+        self.assertTrue(classify.review_ran("some-plugin:code-review", "code-review"))
+        self.assertTrue(classify.review_ran("/code-review", "code-review"))
+        self.assertFalse(classify.review_ran("ce-code-review", "code-review"))
+        self.assertFalse(classify.review_ran("simplify", "code-review"))
+        self.assertFalse(classify.review_ran("code-review", None))
+        self.assertFalse(classify.review_ran("", "code-review"))
 
 
 class ParagraphBlockers(unittest.TestCase):
@@ -319,20 +299,18 @@ class ParagraphBlockers(unittest.TestCase):
         env = classify.parse_envelope(
             "```relay-envelope\nstatus: blocked\nblockers:\n"
             "Cannot move the tracker card: no card id was provided in this session.\n"
-            "changed_files: toolkit/stats.py, tests/test_stats.py\nplan_path: docs/plans/x.md\n```")
+            "changed_files: toolkit/stats.py, tests/test_stats.py\n```")
         self.assertEqual(env["blockers"],
                          ["Cannot move the tracker card: no card id was provided in this session."])
         self.assertEqual(env["changed_files"], ["toolkit/stats.py, tests/test_stats.py"])
-        self.assertEqual(env["plan_path"], "docs/plans/x.md")
 
     def test_a_multi_line_paragraph_stops_at_the_next_key(self):
         env = classify.parse_envelope(
-            "status: blocked\nblockers:\nfirst line of prose\nsecond line of prose\n\nplan_path: p.md\n")
+            "status: blocked\nblockers:\nfirst line of prose\nsecond line of prose\n\nchanged_files: p.md\n")
         self.assertEqual(env["blockers"], ["first line of prose", "second line of prose"])
-        self.assertEqual(env["plan_path"], "p.md")
 
     def test_an_empty_blockers_key_followed_by_another_key_stays_empty(self):
-        env = classify.parse_envelope("status: complete\nblockers:\nchanged_files:\n- a.py\nplan_path: p.md\n")
+        env = classify.parse_envelope("status: complete\nblockers:\nchanged_files:\n- a.py\nlearnings:\n")
         self.assertEqual(env["blockers"], [])
         self.assertEqual(env["changed_files"], ["a.py"])
 
@@ -348,16 +326,16 @@ class LearningsField(unittest.TestCase):
         self.assertEqual(env["learnings"], ["the timeout was upstream, not in this service"])
 
     def test_an_absent_learnings_key_is_empty(self):
-        env = classify.parse_envelope("status: complete\nblockers: none\nchanged_files:\n- a.py\nplan_path: p.md\n")
+        env = classify.parse_envelope("status: complete\nblockers: none\nchanged_files:\n- a.py\n")
         self.assertEqual(env["learnings"], [])
 
     def test_a_present_but_empty_learnings_key_stays_empty(self):
-        env = classify.parse_envelope("status: complete\nlearnings:\nplan_path: p.md\n")
+        env = classify.parse_envelope("status: complete\nlearnings:\nchanged_files:\n")
         self.assertEqual(env["learnings"], [])
 
     def test_a_multi_line_learnings_paragraph_stops_at_the_next_key(self):
         env = classify.parse_envelope(
-            "status: complete\nlearnings:\nfirst line of prose\nsecond line of prose\n\nplan_path: p.md\n")
+            "status: complete\nlearnings:\nfirst line of prose\nsecond line of prose\n\nchanged_files: p.md\n")
         self.assertEqual(env["learnings"], ["first line of prose", "second line of prose"])
 
     def test_a_colon_led_line_inside_learnings_truncates_there(self):
@@ -387,7 +365,7 @@ class LearningsField(unittest.TestCase):
             {"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "content": [
                 {"type": "text", "text": (
                     "```relay-envelope\nstatus: complete\nblockers:\nchanged_files:\n"
-                    "plan_path: docs/plans/x.md\nlearnings:\n"
+                    "learnings:\n"
                     "- the retry helper already existed; no need to write a new one\n```")}]}},
         ]
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
@@ -534,11 +512,11 @@ class CodexEvidence(unittest.TestCase):
         self.assertEqual(evidence.decoded_events, 0)
         self.assertFalse(module.readable(last_message, evidence))
 
-    def test_denied_path_gate_and_tracker_write_and_skill_substitution_are_all_unavailable(self):
+    def test_denied_path_gate_and_tracker_write_and_review_skipped_are_all_unavailable(self):
         r = run_codex("last-message-complete.txt", "stdout-complete.jsonl")
         self.assertEqual(r["undetectable"], sorted([
             contracts.HALT_DENIED_TOOL, contracts.HALT_PATH_GATE,
-            contracts.HALT_SKILL_SUBSTITUTION, contracts.HALT_TRACKER_WRITE_DENIED,
+            contracts.REVIEW_SKIPPED, contracts.HALT_TRACKER_WRITE_DENIED,
         ]))
         self.assertEqual(classes(r), [])
 
@@ -855,9 +833,9 @@ class GrokEvidence(unittest.TestCase):
         denied = [f for f in r["findings"] if f["class"] == contracts.HALT_DENIED_TOOL]
         self.assertEqual(denied, [])
 
-    def test_skill_substitution_is_unavailable_but_denial_still_reports_normally(self):
+    def test_review_skipped_is_unavailable_but_denial_still_reports_normally(self):
         r = run_grok("session-transcript-complete.jsonl")
-        self.assertEqual(r["undetectable"], [contracts.HALT_SKILL_SUBSTITUTION])
+        self.assertEqual(r["undetectable"], [contracts.REVIEW_SKIPPED])
         self.assertTrue(any(f["class"] == contracts.HALT_DENIED_TOOL for f in r["findings"]))
 
     def test_closeout_terminal_line_past_the_200_character_head_is_still_readable(self):

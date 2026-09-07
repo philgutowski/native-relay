@@ -11,8 +11,8 @@ default_branch = "main"
 # Optional. Task branches are this prefix plus the Task id. Default is "relay/" when the key is
 # absent. Jira keys already look like ABC-12, so an empty prefix is the id alone.
 # branch_prefix = ""
-# A mirror rule is an argument list for git push, run after the closeout so a compound doc never
-# leaves the mirror a commit behind. Empty means no mirror.
+# A mirror rule is an argument list for git push, run after the closeout so a learning the
+# closeout wrote never leaves the mirror a commit behind. Empty means no mirror.
 mirror = []
 
 [tracker]
@@ -47,9 +47,11 @@ ci_poll_minutes = 30
 model = "sonnet"
 effort = "medium"
 allowed_tools = []
-# The closeout may always touch the CE artifact root, CONCEPTS.md, and the markdown tracker file
+# The closeout may always touch the docs root below, CONCEPTS.md, and the markdown tracker file
 # when that adapter is in use. Add more here if your project keeps docs elsewhere.
 allowed_paths = []
+# Optional. Where the closeout may write a learning, as <docs_root>/solutions/. Default "docs".
+# docs_root = "docs"
 
 [gate]
 command = ["bin/test"]

@@ -15,7 +15,6 @@ The interface, with the shapes each callable returns:
     readable(transcript_path, evidence)  -> bool (Backends U6)
     normalize_transcript(path, log_path=None) -> Evidence (Backends U6)
     normalize_stream(raw_line, state=None)    -> (events, state) (Backends U6)
-    qualify_skill(name)                  -> the skill invocation string for this backend
 """
 import json
 import os
@@ -41,7 +40,6 @@ INTERFACE = (
     "readable",
     "normalize_transcript",
     "normalize_stream",
-    "qualify_skill",
 )
 
 
@@ -143,9 +141,6 @@ class Capability:
     binary: str
     version_tested: str
     version_output_sample: str
-    plugin_version: str
-    plugin_query: tuple
-    plugin_version_pattern: str
     headless_flag: str
     session_id_choosable: bool
     permission_mode: str
@@ -154,7 +149,9 @@ class Capability:
     allow_flag: str | None
     deny_flag: str | None
     enforces_at_launch: bool
-    skill_form: str
+    # The built in review skill the native brief names on this backend, or None where no
+    # verified equivalent exists. None is what makes manifest.validate refuse the backend.
+    review_skill: str | None
     evidence: str
     credential_prefixes: tuple
     credential_file: str
@@ -176,6 +173,17 @@ class Capability:
     # each backend module rather than by `contracts.BACKEND_PINS`, because a pin is a launch
     # fact and these names are neither read nor written at launch.
     known_models: tuple = ()
+
+
+def review_command(capability):
+    """The invocation the native brief's review step names, and the string a REVIEW_SKIPPED
+    finding prints, built in one place so the brief and the classifier cannot disagree. None on
+    a backend with no review skill: `manifest.validate` refuses such a backend before a real
+    process is launched, and the brief renders a self review fallback for it so the launch seam
+    stays exercisable by the suite until the refusal lifts."""
+    if not capability.review_skill:
+        return None
+    return "/" + capability.review_skill
 
 
 # Capability fields that do not come from `contracts.BACKEND_PINS`. Named here so the pins

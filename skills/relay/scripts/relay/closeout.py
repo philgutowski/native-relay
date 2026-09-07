@@ -17,6 +17,9 @@ so the brief names the paths it may touch and forbids a push. The runner checks 
 against that list before pushing (U8's scope check, R53, KTD15). A bound checked before the push
 is a guard; the same bound checked after is a report.
 
+Duty two is native: the process judges, and writes the learning itself as one markdown file
+under the manifest's docs root, inside the same allowed paths. No plugin is in the loop.
+
 Its ending is a contract, not a judgement call: the last line is `Documentation complete` or
 `Documentation skipped`, and anything else is a finding on the record rather than a halt, because
 the runner's own verify decides landing and does not need this process's opinion.
@@ -25,7 +28,7 @@ import os
 import string
 from dataclasses import dataclass, field
 
-from . import backends, brief, classify, contracts, launch, manifest as manifest_module, state
+from . import brief, classify, contracts, launch, manifest as manifest_module, state
 
 OUTCOME_LANDED = "landed"
 OUTCOME_BLOCKED = "blocked"
@@ -35,9 +38,9 @@ RESULT_COMPLETE = "complete"
 RESULT_SKIPPED = "skipped"
 RESULT_UNFINISHED = "unfinished"
 
-# The closeout's own allowlist floor. Narrower than a task's: it reads, edits docs, commits, and
-# calls one skill. The adapter adds what its tracker write needs and the manifest may add more.
-BASE_TOOLS = ("Read", "Edit", "Write", "Bash", "Grep", "Glob", "Skill")
+# The closeout's own allowlist floor. Narrower than a task's: it reads, writes docs, and commits.
+# The adapter adds what its tracker write needs and the manifest may add more.
+BASE_TOOLS = ("Read", "Edit", "Write", "Bash", "Grep", "Glob")
 
 TEMPLATE = "brief-closeout.md"
 
@@ -47,15 +50,10 @@ DATA_END = brief.DATA_END
 
 NONE_LINE = "none"
 
-# Findings that make the compound judgment worth a full pass rather than a lightweight one
-# (the plan's Assumptions): something went wrong in a way a future session could repeat.
-FULL_DEPTH_FINDINGS = (
-    contracts.HALT_DENIED_TOOL,
-    contracts.HALT_PATH_GATE,
-    contracts.HALT_TRACKER_WRITE_DENIED,
-    contracts.HALT_SKILL_SUBSTITUTION,
-    contracts.UNENFORCED_DISALLOWED,
-)
+# Where duty two writes, relative to the repository root: the manifest's docs root plus this
+# conventional subdirectory, which the brief offers as the default and the project's own
+# instructions may override inside the allowed paths.
+LEARNINGS_SUBDIR = "solutions"
 
 
 @dataclass
@@ -66,15 +64,6 @@ class CloseoutResult:
     launch_result: object = None
     brief_path: str | None = None
     brief_sha256: str | None = None
-
-
-def depth_for(digest):
-    """`full` when something went wrong that a future session could repeat, `lightweight`
-    otherwise. The closeout process still decides whether to run it at all."""
-    for finding in (digest or {}).get("findings") or []:
-        if finding.get("class") in FULL_DEPTH_FINDINGS:
-            return contracts.COMPOUND_DEPTH_FULL
-    return contracts.COMPOUND_DEPTH_LIGHTWEIGHT
 
 
 def allowed_tools(manifest, adapter):
@@ -139,23 +128,22 @@ def _timing_line(digest, wall_seconds=None, active_seconds=None):
     return "%.0f seconds active, %.0f seconds wall" % (active_seconds or 0, wall_seconds or 0)
 
 
-def compound_command(depth, hint, backend):
-    """The exact invocation the brief pins, so the process cannot drift into interactive mode.
-
-    `backend` is required, not defaulted (backends KTD2). Only `run()` may default it: a second
-    independent default here is how the brief's invocation and the CLI that reads it drift apart,
-    which is the failure backends KTD15 exists to prevent."""
-    return "%s %s %s %s" % (backends.build(backend).qualify_skill("ce-compound"),
-                            contracts.COMPOUND_NON_INTERACTIVE, depth, hint)
+def learnings_dir(manifest):
+    """The directory duty two writes under: the docs root the manifest names plus
+    LEARNINGS_SUBDIR, as a repository relative path with a trailing slash."""
+    root = manifest.closeout.docs_root.strip().rstrip("/")
+    return "%s/%s/" % (root, LEARNINGS_SUBDIR)
 
 
 def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, backend,
-           landing_ref=None, branch=None, commit_range=None, plan_path=None, gate=None,
+           landing_ref=None, branch=None, commit_range=None, gate=None,
            wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None):
     """The closeout brief. Deterministic from its inputs, like the task brief, and it never
     receives the task process transcript (R27), only the digest the runner composed from it.
 
-    `backend` is required for the same reason `compound_command`'s is. `halt_class`/`cause_line`
+    `backend` is required, not defaulted (backends KTD2): only `run()` may default it, because a
+    second independent default here is how the brief and the CLI that reads it drift apart
+    (backends KTD15). `halt_class`/`cause_line`
     are set only for `OUTCOME_HALTED`, the runner's own values for the halt already raised (R4);
     `cause_line` is defanged because, unlike a landing sha, it can carry task-influenced text (a
     denied call's captured argument, a dirty tree's file list) that must not close the data block
@@ -164,7 +152,6 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
     failing final verify), naming it keeps the comment from reading as an undifferentiated halt
     on a card the runner already moved to a terminal status."""
     task_id = card.get("id")
-    depth = depth_for(digest)
     envelope = (digest or {}).get("envelope") or {}
     landing_line = ""
     if outcome == OUTCOME_HALTED:
@@ -181,13 +168,11 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
     if commit_range:
         landing_line += "\nCommit range: %s" % commit_range
 
-    hint = "relay task %s, outcome %s" % (task_id, outcome)
     values = {
         "task_id": task_id,
         "outcome": outcome,
         "landing_line": landing_line,
         "branch": branch or "none",
-        "plan_path": plan_path or envelope.get("plan_path") or "none recorded",
         "timing": _timing_line(digest, wall_seconds, active_seconds),
         "gate": _gate_line(gate),
         "blockers": _bullets(envelope.get("blockers") or []),
@@ -201,11 +186,10 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
         "description": brief.defang(str(card.get("description") or "")).strip(),
         "comments": brief.defang(_bullets(_comment_lines(comments))),
         "duty_one": adapter.closeout_instructions(outcome),
-        "compound_command": compound_command(depth, hint, backend),
-        "compound_skill": backends.build(backend).qualify_skill("ce-compound"),
+        "learnings_dir": learnings_dir(manifest),
         "allowed_paths": _bullets(allowed_paths),
-        "complete_line": contracts.COMPOUND_COMPLETE_LINE,
-        "skipped_line": contracts.COMPOUND_SKIPPED_LINE,
+        "complete_line": contracts.CLOSEOUT_COMPLETE_LINE,
+        "skipped_line": contracts.CLOSEOUT_SKIPPED_LINE,
     }
     path = os.path.join(brief.TEMPLATE_DIR, TEMPLATE)
     try:
@@ -230,9 +214,9 @@ def parse(last_message):
         if line.strip():
             last = line.strip().strip("*`_ ")
             break
-    if last == contracts.COMPOUND_COMPLETE_LINE:
+    if last == contracts.CLOSEOUT_COMPLETE_LINE:
         return RESULT_COMPLETE
-    if last == contracts.COMPOUND_SKIPPED_LINE:
+    if last == contracts.CLOSEOUT_SKIPPED_LINE:
         return RESULT_SKIPPED
     return RESULT_UNFINISHED
 
@@ -240,7 +224,7 @@ def parse(last_message):
 def _closeout_task(manifest, task_id, backend, task_model=None):
     """A task record shaped for the launcher, carrying the closeout's own model and effort
     (R29): two bounded jobs that need judgement, not depth. `backend` is required for the same
-    reason `compound_command`'s is.
+    reason `render`'s is.
 
     The manifest's closeout model is claude vocabulary. On any other backend it is not a model
     that CLI serves (U14 found codex refusing `sonnet` with a 400 and its Closeout dying without
@@ -256,7 +240,7 @@ def _closeout_task(manifest, task_id, backend, task_model=None):
 
 def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths,
         backend, task_model=None,
-        landing_ref=None, branch=None, commit_range=None, plan_path=None, gate=None,
+        landing_ref=None, branch=None, commit_range=None, gate=None,
         wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None,
         timeout_seconds=None,
         **launch_kwargs):
@@ -268,7 +252,7 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
     task_id = card.get("id")
     text = render(manifest, card, outcome, digest, comments, adapter, allowed_paths, backend,
                   landing_ref=landing_ref, branch=branch, commit_range=commit_range,
-                  plan_path=plan_path, gate=gate, wall_seconds=wall_seconds,
+                  gate=gate, wall_seconds=wall_seconds,
                   active_seconds=active_seconds, halt_class=halt_class, cause_line=cause_line)
     brief_path = store.path("briefs", task_id + ".closeout.md")
     with open(brief_path, "w", encoding="utf-8") as handle:

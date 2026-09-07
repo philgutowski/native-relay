@@ -56,11 +56,6 @@ def parse_args(argv):
 
 
 def main(argv):
-    if argv == ["plugin", "list", "--json"]:
-        print('{"name": "compound-engineering", "version": "%s", "status": "installed"}'
-              % _PINS["plugin_version"])
-        return 0
-
     if argv[:1] == ["--version"]:
         print(os.environ.get("RELAY_STUB_CLI_VERSION", _PINS["version_output_sample"]))
         return 0

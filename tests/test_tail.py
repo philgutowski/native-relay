@@ -147,7 +147,7 @@ class RealStream(unittest.TestCase):
 
     def test_every_tool_call_renders_with_its_argument(self):
         for name, argument in (("Bash", "git status"), ("Read", "cli.py"), ("Grep", "def cmd_"),
-                               ("Skill", "compound-engineering:ce-plan"),
+                               ("Skill", "code-review"),
                                ("Agent", "Review the follower")):
             hits = [event for event in self.events if name in event and argument in event]
             self.assertTrue(hits, "no rendered event for %s with %r" % (name, argument))
@@ -814,7 +814,7 @@ class TailAStubRun(CliCase):
         with open(path, "w") as handle:
             handle.write(say(body))
             handle.write(assistant([{"type": "tool_use", "name": "Skill",
-                                     "input": {"skill": "compound-engineering:ce-work"}}]) + "\n")
+                                     "input": {"skill": "code-review"}}]) + "\n")
         return path
 
     def streamed_run(self):
@@ -865,7 +865,7 @@ class TailAStubRun(CliCase):
     def test_the_tool_calls_render_decoded_rather_than_as_stream_json(self):
         self.streamed_run()
         _, out = self.call("tail", self.manifest_path)
-        self.assertIn("compound-engineering:ce-work", out)
+        self.assertIn("code-review", out)
         self.assertNotIn('"type": "tool_use"', out)
 
 

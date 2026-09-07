@@ -28,14 +28,9 @@ CARD = {
 }
 MERGE_SHA = "abc1234def5678901234567890123456789012ab"
 
-# Pinned as literals, not resolved through `qualify_skill`: a test that asks the call under test
-# what to expect passes for any value of the pin, including a wrong one.
-CLAUDE_PREFIX = "compound-engineering:"
-COMPOUND_FORMS = {
-    "claude": CLAUDE_PREFIX + "ce-compound",
-    "codex": "$ce-compound",
-    "grok": "/ce-compound",
-}
+# Every backend the closeout can be launched on. The brief's duty two is native and identical
+# per backend, so the same assertions hold on each.
+BACKENDS = ("claude", "codex", "grok")
 
 
 def write_entry(queue, n, fixture, exit_code=0, sleep=0, git_sh=None):
@@ -90,7 +85,7 @@ class CloseoutCase(unittest.TestCase):
         return mf.load(path)
 
     def allowed_paths(self):
-        return mf.completed_allowed_paths(self.manifest, "docs")
+        return mf.completed_allowed_paths(self.manifest)
 
     def render(self, outcome="landed", digest=None, comments=(), backend="claude", **kwargs):
         kwargs.setdefault("landing_ref", MERGE_SHA if outcome == "landed" else None)
@@ -112,7 +107,7 @@ class LandedBrief(CloseoutCase):
             manifest, opener=object(),
             env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
         brief = closeout.render(manifest, CARD, "landed", digest_from("success.jsonl"),
-                                [], adapter, mf.completed_allowed_paths(manifest, "docs"),
+                                [], adapter, mf.completed_allowed_paths(manifest),
                                 "claude", landing_ref=MERGE_SHA, branch="relay/T-1")
         self.assertIn("example.atlassian.net", brief)
 
@@ -121,44 +116,36 @@ class LandedBrief(CloseoutCase):
         self.assertIn("Transition the card to its terminal status", text)
         self.assertIn(MERGE_SHA, text)
 
-    def test_the_brief_pins_the_qualified_compound_skill_and_its_non_interactive_mode(self):
+    def test_the_brief_names_the_learnings_directory_and_no_plugin(self):
         text = self.render()
-        self.assertIn(CLAUDE_PREFIX + "ce-compound", text)
-        self.assertIn(contracts.COMPOUND_NON_INTERACTIVE, text)
+        self.assertIn("docs/solutions/", text)
+        self.assertRegex(text, r"(?i)write it yourself as one markdown file")
+        for token in ("compound-engineering", "ce-compound", "mode:non-interactive", "depth:"):
+            self.assertNotIn(token, text)
 
-    def test_the_pinned_compound_invocation_matches_the_cli_that_will_read_the_brief(self):
-        """Backends KTD15. Four sites build a skill invocation and this brief carries two of
-        them, the pinned command and the bare skill name in the sentence under it."""
-        for backend, form in COMPOUND_FORMS.items():
-            text = self.render(backend=backend)
-            self.assertIn(form, text, backend)
-            for other, other_form in COMPOUND_FORMS.items():
-                if other != backend:
-                    self.assertNotIn(other_form, text,
-                                     "%s closeout brief leaked the %s form" % (backend, other))
-
-    def test_the_compound_command_keeps_its_plugin_contract_on_every_backend(self):
-        for backend, form in COMPOUND_FORMS.items():
-            command = closeout.compound_command(contracts.COMPOUND_DEPTH_FULL, "relay task T-1",
-                                                backend)
-            self.assertTrue(command.startswith(form), command)
-            self.assertIn(contracts.COMPOUND_NON_INTERACTIVE, command)
-            self.assertIn(contracts.COMPOUND_DEPTH_FULL, command)
-            self.assertIn("relay task T-1", command)
+    def test_the_learnings_directory_follows_the_manifest_docs_root(self):
+        text = self.toml.replace("[closeout]", '[closeout]\ndocs_root = "notes"', 1)
+        manifest = self.load(text, name="notes.toml")
+        self.assertEqual(closeout.learnings_dir(manifest), "notes/solutions/")
+        rendered = closeout.render(manifest, CARD, "landed", digest_from("success.jsonl"), [],
+                                   self.adapter, mf.completed_allowed_paths(manifest), "claude",
+                                   landing_ref=MERGE_SHA, branch="relay/T-1")
+        self.assertIn("notes/solutions/", rendered)
+        self.assertIn("- notes/", rendered)
 
     def test_every_backends_brief_keeps_the_terminal_lines_and_the_bound(self):
-        for backend in COMPOUND_FORMS:
+        for backend in BACKENDS:
             text = self.render(backend=backend)
-            self.assertIn(contracts.COMPOUND_COMPLETE_LINE, text, backend)
-            self.assertIn(contracts.COMPOUND_SKIPPED_LINE, text, backend)
+            self.assertIn(contracts.CLOSEOUT_COMPLETE_LINE, text, backend)
+            self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, text, backend)
             self.assertRegex(text, r"(?i)do not push", backend)
             for path in self.allowed_paths():
                 self.assertIn(path, text, backend)
 
     def test_the_brief_names_both_terminal_lines_and_forbids_a_push(self):
         text = self.render()
-        self.assertIn(contracts.COMPOUND_COMPLETE_LINE, text)
-        self.assertIn(contracts.COMPOUND_SKIPPED_LINE, text)
+        self.assertIn(contracts.CLOSEOUT_COMPLETE_LINE, text)
+        self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, text)
         self.assertRegex(text, r"(?i)do not push")
 
     def test_the_brief_lists_the_allowed_paths_the_runner_will_check(self):
@@ -166,10 +153,10 @@ class LandedBrief(CloseoutCase):
         for path in self.allowed_paths():
             self.assertIn(path, text)
 
-    def test_the_brief_carries_the_plan_path_and_the_commit_range_when_there_is_one(self):
-        text = self.render(plan_path="docs/plans/x.md", commit_range="aaaa111..bbbb222")
-        self.assertIn("docs/plans/x.md", text)
+    def test_the_brief_carries_the_commit_range_when_there_is_one(self):
+        text = self.render(commit_range="aaaa111..bbbb222")
         self.assertIn("aaaa111..bbbb222", text)
+        self.assertNotIn("Plan:", text)
 
 
 class BlockedBrief(CloseoutCase):
@@ -182,7 +169,7 @@ class BlockedBrief(CloseoutCase):
     def test_the_brief_carries_the_last_denial_line(self):
         digest = digest_from("path_gate.jsonl")
         text = self.render(outcome="blocked", digest=digest)
-        self.assertIn(".claude/skills/itg-brief/SKILL.md", text)
+        self.assertIn(".claude/skills/example-brief/SKILL.md", text)
         self.assertIn("Edit", text)
 
     def test_a_blocked_brief_names_no_landing_reference(self):
@@ -226,22 +213,6 @@ class HaltedBrief(CloseoutCase):
         self.assertIn("Landed at %s, but the run then halted." % MERGE_SHA, text)
         self.assertIn("Halt class: gate_refused", text)
         self.assertIn("Cause: the mirror push was refused for T-1", text)
-
-
-class CompoundDepth(CloseoutCase):
-    def test_a_path_gate_finding_chooses_the_full_depth(self):
-        text = self.render(outcome="blocked", digest=digest_from("path_gate.jsonl"))
-        self.assertIn(contracts.COMPOUND_DEPTH_FULL, text)
-        self.assertNotIn(contracts.COMPOUND_DEPTH_LIGHTWEIGHT, text)
-
-    def test_a_skill_substitution_chooses_the_full_depth(self):
-        self.assertEqual(closeout.depth_for(digest_from("skill_substitution.jsonl")),
-                         contracts.COMPOUND_DEPTH_FULL)
-
-    def test_a_clean_run_chooses_the_lightweight_depth(self):
-        text = self.render(digest=digest_from("success.jsonl"))
-        self.assertIn(contracts.COMPOUND_DEPTH_LIGHTWEIGHT, text)
-        self.assertNotIn(contracts.COMPOUND_DEPTH_FULL, text)
 
 
 class UntrustedCommentText(CloseoutCase):
@@ -388,7 +359,8 @@ class RunTheProcess(CloseoutCase):
         self.assertEqual(args[args.index("--model") + 1], self.manifest.closeout.model)
         self.assertEqual(args[args.index("--effort") + 1], self.manifest.closeout.effort)
         allowed = args[args.index("--allowedTools") + 1]
-        self.assertIn("Skill", allowed)
+        self.assertNotIn("Skill", allowed, "duty two is native; the closeout calls no skill")
+        self.assertIn("Write", allowed)
 
 
 class OneBackendValueReachesEveryConsumer(CloseoutCase):
@@ -409,8 +381,8 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
 
         def fake_classify(transcript_path, launch_result, write_tool_patterns=None, backend=None):
             seen["classify_backend"] = backend
-            return {"findings": [], "last_message_tail": contracts.COMPOUND_SKIPPED_LINE,
-                    "last_message": contracts.COMPOUND_SKIPPED_LINE}
+            return {"findings": [], "last_message_tail": contracts.CLOSEOUT_SKIPPED_LINE,
+                    "last_message": contracts.CLOSEOUT_SKIPPED_LINE}
 
         with mock.patch.object(closeout.launch, "launch", fake_launch), \
              mock.patch.object(closeout.classify, "classify", fake_classify):
@@ -425,23 +397,23 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
         return state.StateStore(self.manifest.path, self.repo, home=self.home)
 
     def test_each_backend_reaches_the_task_the_brief_and_the_classifier(self):
-        for backend, skill_form in COMPOUND_FORMS.items():
+        for backend in BACKENDS:
             seen = self.go_spied(backend)
             self.assertEqual(seen["task_backend"], backend)
             self.assertEqual(seen["classify_backend"], backend)
-            self.assertIn(skill_form, seen["brief"])
+            self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, seen["brief"])
 
     def test_an_explicit_claude_backend_reaches_every_consumer(self):
         seen = self.go_spied(mf.DEFAULT_BACKEND)
         self.assertEqual(seen["task_backend"], mf.DEFAULT_BACKEND)
         self.assertEqual(seen["classify_backend"], mf.DEFAULT_BACKEND)
-        self.assertIn(COMPOUND_FORMS["claude"], seen["brief"])
+        self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, seen["brief"])
 
     def test_a_non_claude_closeout_runs_on_the_tasks_own_model(self):
         """U14 live finding: codex refused the manifest closeout model `sonnet` with a 400 and
         the Closeout died without a terminal line. The manifest closeout model is claude
         vocabulary, so a non claude Closeout runs on the Task's model instead."""
-        for backend in COMPOUND_FORMS:
+        for backend in BACKENDS:
             seen = self.go_spied(backend, task_model="task-chosen-model")
             if backend == mf.DEFAULT_BACKEND:
                 self.assertEqual(seen["task_model"], self.manifest.closeout.model)
@@ -484,7 +456,7 @@ class RunLoopPassesTheTasksBackend(CloseoutCase):
         )
 
     def test_each_tasks_backend_reaches_the_closeout_boundary(self):
-        for backend in COMPOUND_FORMS:
+        for backend in BACKENDS:
             ctx = self.context(backend)
             seen = {}
 
@@ -570,13 +542,13 @@ class TranscriptTextIsData(CloseoutCase):
         digest = dict(digest_from("path_gate.jsonl"))
         text = self.render(outcome="blocked", digest=digest)
         begin, end = text.index(closeout.DATA_BEGIN), text.index(closeout.DATA_END)
-        marker = ".claude/skills/itg-brief/SKILL.md"
+        marker = ".claude/skills/example-brief/SKILL.md"
         self.assertLess(begin, text.index(marker))
         self.assertLess(text.index(marker), end)
 
 
 class LearningsInBrief(CloseoutCase):
-    """R8, R9: the task's own reported learnings, rendered next to blockers so ce-compound's
+    """R8, R9: the task's own reported learnings, rendered next to blockers so the learning judgment's
     non-interactive judgment sees them without ever reading the task transcript."""
 
     def carrying(self, learning):
