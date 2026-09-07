@@ -80,9 +80,9 @@ class LaunchCase(unittest.TestCase):
 
 class Slug(unittest.TestCase):
     def test_the_slug_replaces_every_character_outside_the_alphanumeric_set(self):
-        path = "/Users/p.g/Documents/PhilAI/support_workbench"
+        path = "/Users/p.g/code/example_tool"
         self.assertEqual(contracts.slug_for(path),
-                         "-Users-p-g-Documents-PhilAI-support-workbench")
+                         "-Users-p-g-code-example-tool")
 
     def test_the_transcript_path_is_the_slug_directory_and_the_session_id(self):
         session = "11111111-1111-4111-8111-111111111111"

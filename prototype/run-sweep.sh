@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Relay prototype runner, preserved verbatim below the header.
 #
-# Origin: /Users/pgutowski/Documents/PhilAI/Integrel/support-workbench/plans/run-sweep.sh
+# Origin: the gitignored plans directory of a private project's checkout.
 # Copied: 2026-08-25
 #
 # This is the hand-built proof that the Relay design works. It ran one card

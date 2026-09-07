@@ -5,17 +5,17 @@
   },
   "metadata": {
     "description": "Single plugin marketplace for Native Relay, so the repository installs by path or URL.",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "native-relay",
-      "description": "Run a manifest of independent tasks through the compound-engineering pipeline, one fresh headless Claude Code process per task, serially and unattended.",
+      "description": "Run a manifest of independent tasks through a native plan, build, review, verify, record pipeline, one fresh headless Claude Code process per task, serially and unattended.",
       "author": {
         "name": "Phillip Gutowski"
       },
       "homepage": "https://github.com/philgutowski/native-relay",
-      "tags": ["compound-engineering", "unattended", "runner", "workflow-automation"],
+      "tags": ["outer-loop", "unattended", "runner", "workflow-automation"],
       "source": "./"
     }
   ]

@@ -21,13 +21,18 @@ SKILL = os.path.join(REPO_ROOT, "skills", "relay", "SKILL.md")
 VERBS = ("validate", "run", "status", "tail", "summary", "verify", "lease")
 
 # What must never appear in anything Relay ships (R40). These are the shapes a real project
-# leaks in: a Jira key, the operator's own repo, and a live Atlassian site.
+# leaks in: a Jira key, the operator's own repo, a live Atlassian site, and the operator's own
+# account and workspace names. The planning ladder and the solutions store are history and are
+# deliberately outside SHIPPED.
 LEAK_PATTERNS = (
     r"IW-[0-9]+",
     r"support-workbench",
-    r"[a-z0-9-]+\.atlassian\.net/[a-z]",
+    r"\b(?!example\.)[a-z0-9-]+\.atlassian\.net/[a-z]",
+    r"pgutowski",
+    r"PhilAI",
 )
-SHIPPED = ("skills", "docs/examples", "README.md")
+SHIPPED = ("skills", "docs/examples", "README.md", "CONCEPTS.md", "CLAUDE.md", ".claude-plugin",
+           "tests")
 
 
 def example_paths():
@@ -163,7 +168,11 @@ class NoProjectLeakage(unittest.TestCase):
                 if "__pycache__" in root:
                     continue
                 for name in names:
-                    yield os.path.join(root, name)
+                    full = os.path.join(root, name)
+                    # This file carries the patterns themselves.
+                    if os.path.samefile(full, __file__):
+                        continue
+                    yield full
 
     def test_nothing_shipped_names_a_real_project_tracker_or_person(self):
         for path in self.shipped_files():

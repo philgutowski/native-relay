@@ -17,12 +17,6 @@ GITHUB_PATTERNS = {"tools": [], "bash": ["gh issue", "gh project item-edit"], "p
 EXITED = SimpleNamespace(timed_out=False, exit_code=0)
 TIMED_OUT = SimpleNamespace(timed_out=True, exit_code=-15)
 
-IW83 = os.path.expanduser(
-    "~/.claude/projects/-Users-pgutowski-Documents-PhilAI-Integrel-support-workbench/"
-    "9581f5c5-2eb9-47c3-bc46-2af7ce43f4be.jsonl"
-)
-
-
 def run(name, launch=EXITED, patterns=None):
     return classify.classify(os.path.join(FIXTURES, name), launch, patterns)
 
@@ -315,29 +309,6 @@ class WritePatterns(unittest.TestCase):
         self.assertEqual(classify.required_skill_for("compound-engineering:ce-work",
                                                      backend="codex"),
                          "$ce-work")
-
-
-class RealTranscriptSmoke(unittest.TestCase):
-    def test_proof_run_transcript_classifies_as_the_plan_predicts(self):
-        if not os.path.exists(IW83):
-            self.skipTest("the 2026-08-25 proof transcript is not on this machine")
-        r = classify.classify(IW83, EXITED, JIRA_PATTERNS)
-        self.assertEqual(r["malformed_lines"], 0)
-        self.assertEqual(r["line_count"], 1127)
-        self.assertEqual(r["tool_calls"], 261)
-        self.assertIn(r["halt_class"], (contracts.HALT_PATH_GATE, contracts.HALT_BLOCKED_ENVELOPE, contracts.HALT_NO_ENVELOPE))
-        gates = [f for f in r["findings"] if f["class"] == contracts.HALT_PATH_GATE]
-        subs = [f for f in r["findings"] if f["class"] == contracts.HALT_SKILL_SUBSTITUTION]
-        self.assertEqual(len(gates), 1)
-        self.assertTrue(gates[0]["target"].endswith(".claude/skills/itg-brief/SKILL.md"))
-        self.assertEqual(len(subs), 2)
-        self.assertEqual(r["halt_class"], contracts.HALT_PATH_GATE)
-        self.assertFalse(any(f["class"] == contracts.HALT_TRACKER_WRITE_DENIED for f in r["findings"]),
-                         "the Jira transition succeeded in that run")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ParagraphBlockers(unittest.TestCase):

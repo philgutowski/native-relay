@@ -200,10 +200,11 @@ class ClaudeDirScanRegex(unittest.TestCase):
 class SlugRule(unittest.TestCase):
     def test_matches_the_on_machine_examples(self):
         cases = {
-            "/Users/pgutowski/Documents/PhilAI/relay-compound": "-Users-pgutowski-Documents-PhilAI-relay-compound",
-            "/Users/pgutowski/.config/raycast/script-commands": "-Users-pgutowski--config-raycast-script-commands",
+            "/Users/example/code/relay-target": "-Users-example-code-relay-target",
+            # A dotfile directory yields a doubled dash: the slash and the dot both map to one.
+            "/Users/example/.config/tool/commands": "-Users-example--config-tool-commands",
             "/private/tmp": "-private-tmp",
-            "/Users/x/Documents/PhilAI/DJ_tools": "-Users-x-Documents-PhilAI-DJ-tools",
+            "/Users/x/code/my_tool": "-Users-x-code-my-tool",
             "/Users/x/a.b c": "-Users-x-a-b-c",
         }
         for path, slug in cases.items():

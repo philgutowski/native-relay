@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerates the transcript fixtures from real line shapes.
 
-Every line shape below is copied from the IW-83 session transcript (CLI 2.1.245, plugin
+Every line shape below is copied from the ABC-83 session transcript (CLI 2.1.245, plugin
 3.23.4): the same keys in the same places, with the long values trimmed. The denial text, the
 tool_use and tool_result join by id, the Skill call shape, the stop_reason values, and the
 last-prompt line are all verbatim shapes. Run this file to rewrite the fixtures; commit both.

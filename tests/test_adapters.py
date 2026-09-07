@@ -125,7 +125,7 @@ class AdapterCase(unittest.TestCase):
     def github_manifest(self, status_field="Shipped"):
         text = self.toml.replace('adapter = "markdown"', 'adapter = "github"')
         text = text.replace('file = "tracker.md"',
-                            'owner = "philgutowski"\nproject_number = 4\nstatus_field = "%s"' % status_field)
+                            'owner = "example-org"\nproject_number = 4\nstatus_field = "%s"' % status_field)
         return self.manifest(text, name="github.toml")
 
     def jira(self, opener, env=None):
@@ -161,7 +161,7 @@ class SharedContract(AdapterCase):
             self.assertEqual(public, set(adapters.INTERFACE), "%s exposes more than the interface" % name)
 
     def test_every_adapter_returns_the_status_shape_verify_reads(self):
-        ids = {"jira": "IW-83", "github": "12", "markdown": "T-2"}
+        ids = {"jira": "ABC-83", "github": "12", "markdown": "T-2"}
         for name, adapter in self.each():
             result = adapter.status(ids[name])
             for key in ("status", "terminal", "reference", "skipped"):
@@ -198,39 +198,39 @@ class Jira(AdapterCase):
 
     def test_a_done_issue_reads_terminal_with_its_flattened_description(self):
         adapter = self.jira(self.opener())
-        card = adapter.read("IW-83")
-        self.assertEqual(card["id"], "IW-83")
+        card = adapter.read("ABC-83")
+        self.assertEqual(card["id"], "ABC-83")
         self.assertEqual(card["title"], "Add the brief renderer")
         self.assertIn("Render the task brief from a template.", card["description"])
         self.assertIn("Second paragraph", card["description"])
         self.assertEqual(card["status"], "Done")
-        self.assertTrue(adapter.status("IW-83")["terminal"])
+        self.assertTrue(adapter.status("ABC-83")["terminal"])
 
     def test_a_backlog_issue_is_not_terminal(self):
         adapter = self.jira(self.opener(**{"/issue/": "jira_issue_open.json"}))
-        self.assertFalse(adapter.status("IW-84")["terminal"])
+        self.assertFalse(adapter.status("ABC-84")["terminal"])
 
     def test_closing_reference_finds_the_comment_naming_the_sha_prefix(self):
         adapter = self.jira(self.opener())
-        self.assertEqual(adapter.closing_reference("IW-83", "abc1234def56789"), "10002")
+        self.assertEqual(adapter.closing_reference("ABC-83", "abc1234def56789"), "10002")
 
     def test_closing_reference_returns_none_when_no_comment_names_it(self):
         adapter = self.jira(self.opener())
-        self.assertIsNone(adapter.closing_reference("IW-83", "9999999"))
+        self.assertIsNone(adapter.closing_reference("ABC-83", "9999999"))
 
     def test_comments_since_a_baseline_returns_exactly_the_newer_ones_in_order(self):
         adapter = self.jira(self.opener())
-        newer = adapter.comments_since("IW-83", "10001")
+        newer = adapter.comments_since("ABC-83", "10001")
         self.assertEqual([entry["id"] for entry in newer], ["10002", "10003"])
         self.assertIn("Landed on main", newer[0]["body"])
 
     def test_comments_since_none_returns_every_comment(self):
         adapter = self.jira(self.opener())
-        self.assertEqual(len(adapter.comments_since("IW-83", None)), 3)
+        self.assertEqual(len(adapter.comments_since("ABC-83", None)), 3)
 
     def test_comments_since_an_absent_baseline_is_unresolved_not_everything(self):
         adapter = self.jira(self.opener())
-        self.assertEqual(adapter.comments_since("IW-83", "99999"), [])
+        self.assertEqual(adapter.comments_since("ABC-83", "99999"), [])
 
     def test_a_missing_token_env_var_is_a_named_configuration_error_before_any_request(self):
         opener = self.opener()
@@ -241,24 +241,24 @@ class Jira(AdapterCase):
 
     def test_the_request_carries_basic_auth_and_the_thirty_second_timeout(self):
         opener = self.opener()
-        self.jira(opener).read("IW-83")
+        self.jira(opener).read("ABC-83")
         url, headers, timeout = opener.requests[0]
-        self.assertIn("example.atlassian.net/rest/api/3/issue/IW-83", url)
+        self.assertIn("example.atlassian.net/rest/api/3/issue/ABC-83", url)
         self.assertEqual(timeout, adapters.NETWORK_TIMEOUT_SECONDS)
         self.assertTrue(any(key.lower() == "authorization" for key in headers))
 
     def test_a_read_that_raises_becomes_a_skipped_result_rather_than_an_exception(self):
         adapter = self.jira(FakeOpener({}, error=OSError("connection refused")))
-        result = adapter.status("IW-83")
+        result = adapter.status("ABC-83")
         self.assertIn("connection refused", result["skipped"])
         self.assertFalse(result["terminal"])
-        self.assertEqual(adapter.comments_since("IW-83", None), [])
-        self.assertIsNone(adapter.closing_reference("IW-83", "abc1234"))
+        self.assertEqual(adapter.comments_since("ABC-83", None), [])
+        self.assertIsNone(adapter.closing_reference("ABC-83", "abc1234"))
 
     def test_candidates_lists_the_project_issues(self):
         adapter = self.jira(self.opener())
         found = adapter.candidates()
-        self.assertEqual([entry["id"] for entry in found], ["IW-83", "IW-84"])
+        self.assertEqual([entry["id"] for entry in found], ["ABC-83", "ABC-84"])
 
     def test_the_write_patterns_name_the_atlassian_mcp_and_nothing_else(self):
         patterns = self.jira(self.opener()).write_tool_patterns()
@@ -306,7 +306,7 @@ class GitHub(AdapterCase):
         self.assertEqual([entry["id"] for entry in found], ["12", "13"])
         self.assertEqual(found[0]["title"], "Add the brief renderer")
         self.assertIn("--owner", run.calls[0])
-        self.assertIn("philgutowski", run.calls[0])
+        self.assertIn("example-org", run.calls[0])
 
     def test_the_item_list_asks_for_more_than_the_thirty_gh_returns_by_default(self):
         run = self.run_for()

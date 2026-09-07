@@ -1,23 +1,25 @@
 # Backend fixtures, captured in U1
 
-Every file here was produced by a real CLI running a real task against
-`~/Documents/PhilAI/relay-proof/target` on 2026-08-28. Nothing is synthesized, paraphrased, or
-hand written. `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`
+Every file here was produced by a real CLI running a real task against a throwaway target
+repository (`relay-proof/target` in the paths) on 2026-08-28. Nothing is synthesized,
+paraphrased, or hand written. `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`
 is why: a fixture written alongside the parser that reads it proves only that the two agree.
 
 **One deliberate edit, applied after capture.** This repository is public, and a task told to
 find something the proof repository does not hold will search outward before concluding that:
 one blocked run read across the operator's home directory and pulled paths and prose from
 unrelated private work into its transcript. Those payloads are redacted, along with the commit
-author's email address, which becomes `relay@example.com`. Event structure, ordering, and
-decodable line counts are untouched, which is what these fixtures are read for. A redacted path
-is still a path and a redacted word is still a word, so a normalizer sees the shape it saw
-before. Treat the files as verbatim in structure and redacted in content.
+author's email address, which becomes `relay@example.com`, and the two paths a capture
+legitimately names, the target and the Relay checkout, are rewritten under a neutral home
+(`/Users/operator`) in every encoding the CLIs use. Event structure, ordering, and decodable line
+counts are untouched, which is what these fixtures are read for. A redacted path is still a path
+and a redacted word is still a word, so a normalizer sees the shape it saw before. Treat the files
+as verbatim in structure and redacted in content.
 
 `_scrub.py` is what performed it and is idempotent, so a later capture is cleaned by running it
-again from the repository root before committing. Run it on anything captured from a real session
-here, and read its substitution list before trusting it against a machine holding different work
-than this one.
+again from the repository root before committing. Its path rules are generic; its private word
+list ships empty, so fill `PRIVATE_TERMS` locally with whatever the capturing machine could have
+leaked before trusting it against a new capture.
 
 U6's normalizers and U8's brief inserts are tested against these. The stubs in `tests/stub-claude/`
 are not evidence for the same contract, because a stub and a normalizer written in one session
