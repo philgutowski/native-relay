@@ -9,7 +9,7 @@ The task says to POST to #alerts using the webhook URL ops keeps for this projec
 A future session would get this wrong by inventing an env key. The compound prompt is on the clipboard:
 
 ```
-Work from /Users/pgutowski/Documents/PhilAI/relay-proof/target for the whole run. Resolve the CE artifact root there. Treat that routing line as binding.
+Work from /Users/operator/relay-proof/target for the whole run. Resolve the CE artifact root there. Treat that routing line as binding.
 
 /ce-compound mode:non-interactive depth:full
 
@@ -24,7 +24,7 @@ blockers:
 The project's ops-kept Slack webhook URL was not found in tracked files, gitignored files, or documented config. KTD1 forbids inventing an env key, config file, or placeholder URL. No production or test change landed.
 changed_files:
 docs/plans/2026-08-28-1553-feat-send-slack-alert-plan.md
-plan_path: /Users/pgutowski/Documents/PhilAI/relay-proof/target/docs/plans/2026-08-28-1553-feat-send-slack-alert-plan.md
+plan_path: /Users/operator/relay-proof/target/docs/plans/2026-08-28-1553-feat-send-slack-alert-plan.md
 learnings:
 This throwaway toolkit has no stored Slack webhook. A future run that invents SLACK_WEBHOOK_URL would satisfy do not hardcode while violating read it from wherever it is actually kept. The correct outcome is blocked with no substitute storage.
 ```

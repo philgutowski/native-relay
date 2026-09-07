@@ -20,7 +20,7 @@ in `.compound-engineering/config.yaml` or `config.local.yaml` at its root. Witho
 resolves to `auto`, and any run reaching `ce-plan`, `ce-doc-review`, or `ce-code-review` sends the
 full document or diff to a third party provider with no disclosure in a non-interactive run. See
 `ce-doc-review-cross-model-pass-sends-docs-to-third-party-models.md` in the workspace corpus. As of
-2026-08-25 this is set in relay, support-workbench, the Integrel workspace, and Cratekit on main.
+2026-08-25 this is set in relay and in the private projects it ran against.
 A new repo has it unset. *No unit yet. This is a proposed plan edit, see Feedback below.*
 
 **Pick a queue, not a task.** Three questions per candidate card:

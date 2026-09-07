@@ -131,7 +131,7 @@ FORBIDDEN_PERMISSION_MODE = "bypassPermissions"
 OUTPUT_FORMAT = "stream-json"
 
 # Per-backend launch facts, every one observed in U1 by running the installed CLI against
-# ~/Documents/PhilAI/relay-proof/target on 2026-08-28. Nothing here is read from documentation.
+# a throwaway target repository on 2026-08-28. Nothing here is read from documentation.
 # Pins are the producer. backends.Capability is the frozen view U4 copies.
 # Do not restate these values elsewhere.
 #

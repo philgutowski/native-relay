@@ -67,7 +67,7 @@ class TaskBranchName(unittest.TestCase):
         self.assertEqual(gitwrite.task_branch_for("55"), "relay/55")
 
     def test_an_override_prefix_is_concatenated(self):
-        self.assertEqual(gitwrite.task_branch_for("55", "IW-"), "IW-55")
+        self.assertEqual(gitwrite.task_branch_for("55", "ABC-"), "ABC-55")
 
     def test_an_empty_prefix_is_the_task_id_alone(self):
         self.assertEqual(gitwrite.task_branch_for("55", ""), "55")
