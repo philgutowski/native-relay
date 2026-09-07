@@ -210,7 +210,7 @@ BACKEND_PINS = {
         # Issue #57, observed round eight 2026-09-01 on tasks 45 and 56, confirmed live against
         # grok 1.0.13 the same day. Under `auto` mode a `run_terminal_command` whose argument
         # uses command substitution or a heredoc, the `git commit -m "$(cat <<'EOF' ...
-        # EOF)"` form the compound-engineering pipeline teaches, is cancelled outright rather
+        # EOF)"` form many agent commit guides teach, is cancelled outright rather
         # than executed or refused: `updates.jsonl` carries the exact same shape as the
         # demonstrated `--deny` refusal above, a `tool_call_update` with `status: "failed"`, but
         # the body reads "User cancelled the execution for tool `run_terminal_command`" instead
@@ -224,11 +224,9 @@ BACKEND_PINS = {
         # reliably reproducible from a single trivial `-p` probe outside a real multi-turn task;
         # the live probe that confirmed the marker text and `status` value used the real
         # capture from task 45's own session file rather than a fresh reproduction attempt.
-        # Code review found the compound-engineering plugin's own `ce-commit-push-pr` skill
-        # (outside this repo) shows a worked commit example using this exact heredoc form. That
-        # path is unreachable under this manifest's `local_merge` shipping mode (`ce-work`'s
-        # return-to-caller mode never loads it), but would defeat this brief instruction outright
-        # if `pr_terminal` mode is ever enabled for a grok task; re-check before that switch.
+        # Any skill or guide the task reads that shows a worked commit in this heredoc form
+        # would defeat the brief instruction outright; re-check before native mode ever admits
+        # a grok task.
         "permission_mode": "auto",
         "forbidden_permission_modes": ("bypassPermissions", "dontAsk"),
         "output_format": ("--output-format", "streaming-json"),

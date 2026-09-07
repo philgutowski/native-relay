@@ -44,6 +44,8 @@ model = "sonnet"
 effort = "medium"
 allowed_tools = []
 allowed_paths = []
+# Optional. Where the closeout may write a learning, as <docs_root>/solutions/. Default "docs".
+# docs_root = "docs"
 
 [gate]
 command = ["make", "check"]

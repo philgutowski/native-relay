@@ -1,14 +1,17 @@
 ---
 name: relay
-description: Author a Relay manifest from a conversation, validate it, launch the runner detached, and explain a halt from state. Use when the operator wants to run a list of independent tracker tasks through the compound-engineering pipeline unattended, one fresh headless process per task, or asks what a running or halted Relay run is doing.
+description: Author a Relay manifest from a conversation, validate it, launch the runner detached, and explain a halt from state. Use when the operator wants to run a list of independent tracker tasks through a native plan, build, review, verify, record pipeline unattended, one fresh headless process per task, or asks what a running or halted Relay run is doing.
 ---
 
 # Relay
 
-Relay runs a list of independent tasks through the compound-engineering pipeline, one fresh
-headless process per task, serially, with nobody watching. Your job in this skill is to author
-the manifest, check it, start the runner, and later explain what happened. You never do the
-runner's work by hand.
+Relay runs a list of independent tasks through a native pipeline, plan, build, review, verify,
+record, one fresh headless process per task, serially, with nobody watching. No plugin is in the
+loop: the task process plans in a message, runs the CLI's built in code review, and runs the
+project's own verification as the project's own instructions define it. Your job in this skill
+is to author the manifest, check it, start the runner, and later explain what happened. You
+never do the runner's work by hand. `docs/manifest-authoring.md` at the repo root is the same
+authoring procedure as a plain document, for an operator on any host.
 
 Read `CONCEPTS.md` at the repo root for the vocabulary: Runner, Manifest, Task process, Closeout
 process, Backend, Halt class, Verify-landed. Use those words with the operator.
@@ -82,12 +85,13 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    Then write a draft manifest and run `validate <manifest> --list` to read the candidate tasks
    back.
 2. Confirm with the operator, one question at a time: which tasks to include and in what order;
-   the model, effort, and backend for each; any task to exclude and why; and the three degraded path
+   the model and effort for each; any task to exclude and why; and the three degraded path
    answers, `on_blocked.merge_partial`, `on_blocked.open_followup`, and
-   `on_halt.continue_past_task_halt`. For each included Task, propose a backend from the rubric
-   with a one-line reason, then wait for accept or change. Do not write a backend the operator
-   has not seen. Nothing re-applies the rubric after they choose. A Jira tracker can only pair
-   with `claude`. The third degraded-path answer trades a mid run stop for throughput: on, a
+   `on_halt.continue_past_task_halt`. Native mode runs on `claude` only, so write that backend
+   and no other: `validate` refuses a Task naming `codex` or `grok` because neither has a
+   verified built in review step. The rubric at `<rubric>` says how a backend will be proposed
+   once that refusal lifts; today it proposes nothing. Do not write a backend the operator has
+   not seen. Nothing re-applies the rubric after they choose. The third degraded-path answer trades a mid run stop for throughput: on, a
    halt contained to one task pauses that task and the later independent tasks keep running,
    so several halts in a row surface only in the summary; off, the first halt stops the run.
    A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
@@ -95,12 +99,10 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    `local_merge`, where the runner merges and pushes. `pr_terminal` is named in the schema and
    refused by `validate`: the run loop has no pull request sequence, so every task under it
    would halt without one being opened or checked.
-3. If any chosen backend does not enforce tool restrictions at launch (today that is `codex`),
-   state that condition in plain words: launch-time refusal is gone, the Task path bound covers
-   commit scope only, and the evidence audit detects after the fact. Say in the same breath that
-   a `codex` Task launches with its sandbox network on, granted so it can write to the tracker at
-   all, and that the sandbox takes no host allowlist, so the reach is every host and not only the
-   tracker, held with the operator's own `gh` login and its account scope. Ask the operator to write
+3. If a chosen backend does not enforce tool restrictions at launch (`codex`, which native
+   mode refuses today, so this step is dormant until that refusal lifts), state that condition
+   in plain words: launch-time refusal is gone, the Task path bound covers commit scope only, and
+   the evidence audit detects after the fact. Ask the operator to write
    `permissions.unenforced_acceptance` in their own words, and to set `permissions.task_allowed_paths`.
    Write only what they supply. Never invent either sentence or list, including to make validate
    pass.
@@ -116,11 +118,13 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    commands, ask which one the runner runs and say what covers the others (a pre-commit hook,
    usually). Do not author a wrapper script to bundle them unless the operator asks for one.
    Do not add a permission mode field: permission posture is fixed per backend by
-   `contracts.BACKEND_PINS`, never a manifest choice. Put a `[defaults] backend` when every Task
-   should inherit one. The resolved default is that value when the key is present, else `claude`.
-   On a Task whose backend differs from that resolved default, write `reason` with the one-line
-   reason they accepted, or the string they supplied after they changed the backend. One `reason`
-   also covers an excluded Task. A Task that matches the resolved default needs no reason.
+   `contracts.BACKEND_PINS`, never a manifest choice. `[defaults] backend` is `claude`, and the
+   resolved default is that value when the key is present, else `claude`. On a Task whose backend
+   differs from that resolved default, write `reason` with the operator's one-line reason; that
+   `reason` also covers an excluded Task, and a Task that matches the resolved default needs none.
+   Write `[closeout] docs_root` when the project keeps its documentation somewhere other than
+   `docs/`; the closeout writes a learning under `<docs_root>/solutions/` and may commit only
+   inside the docs root, `CONCEPTS.md`, the markdown tracker file, and `closeout.allowed_paths`.
 
 The examples under `docs/examples/` are the three shapes, one per adapter.
 
@@ -137,9 +141,9 @@ and ask the operator for it. Do not invent one on their behalf. A missing
 `permissions.unenforced_acceptance`, a missing `task_allowed_paths` on an unenforced backend,
 or a Task whose backend differs from the default with no `reason`, is the same shape: ask for
 the operator's words, never invent them. If validate names a missing credential environment
-variable, ask them to set it and run validate again. A backend readiness failure (binary
-missing, plugin missing or below floor) is also a validate refusal, before any Task launches.
-See Backend readiness below.
+variable, ask them to set it and run validate again. A backend readiness failure (the backend's
+binary missing from PATH) is also a validate refusal, before any Task launches, and so is a Task
+naming a backend with no verified native review step. See Backend readiness below.
 
 ## Confirm before launch
 
@@ -235,6 +239,7 @@ The classes and what they mean for the operator:
 | `closeout_out_of_scope` | the closeout committed outside its allowed paths; the runner reset it | look at what it tried to write, then resume |
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
 | `unclean_exit` | the process left a dirty tree, or claimed to finish and left nothing to merge | inspect the tree, clean it, resume |
+| `review_skipped` (a finding, never a halt) | the task claimed complete without a `/code-review` call in its transcript; it landed if the gate passed | review the diff of the landing commit by hand |
 | `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
 | `unexpected_error` | the run loop hit something it did not anticipate: a defect, a library error, a task process that could not be launched, or a manifest naming an unimplemented shipping mode | read the error text in the cause line and the runner log; the fault is in the runner or the manifest, not the task, so fix that before resuming |
 | `ci_undecided` | reserved for `pr_terminal` mode, which `validate` refuses; no run can reach it today | not applicable |
@@ -254,9 +259,7 @@ never started.
 | Error text | What it means | What the operator does |
 |---|---|---|
 | `backend <name> binary <binary> is missing from PATH` | that backend's CLI is not installed, or not on `PATH` | install the backend's CLI and put it on `PATH` |
-| `backend <name> plugin probe failed: <exc>` | the backend's plugin-list subcommand could not run at all | run it by hand and fix why it errors or hangs: `claude plugin list`, `codex plugin list`, or `grok plugin list --json` |
-| `backend <name> has no readable compound-engineering plugin at or above <version>` | `compound-engineering` is missing, disabled, or unreadable for that backend | install it: `codex plugin add compound-engineering@compound-engineering-plugin`, `grok plugin install EveryInc/compound-engineering-plugin`, or for `claude` add it from its own marketplace and enable it |
-| `backend <name> has compound-engineering plugin <version>, below required <version>` | the installed plugin is older than the pinned floor | upgrade it through that backend's own plugin update command to at least the pinned floor |
+| `tasks[i] (<id>) names backend <name>, which has no verified native review step; native mode runs on claude only` | the manifest names `codex` or `grok` | set the Task's backend to `claude`, with a claude model, and remove the `reason` if it no longer differs from the default |
 
 After fixing the environment, confirm before resuming:
 
@@ -273,16 +276,12 @@ Blocked tasks are skipped by default, because blocked is a deliberate outcome ra
 failure. Pass `--retry-blocked` only when the operator asks for it, and expect it to refuse when a
 stranded Task branch still carries commits; that work is theirs to keep or discard.
 
-Editing a task's `backend` or `model` between runs moves it. The manifest's resolution decides a
-relaunch, so the next run launches that task where the operator sent it and names the move on its
-output and on the task's record. Three things bound that: a stranded task branch is refused
-exactly as above, judged against the name and baseline the record already carries, so the edit
-does not get the task past it; a blocked task needs `--retry-blocked` before a reassignment
-reaches it at all; and `validate` refuses a manifest pairing a backend with a model another
-backend is known to accept, before any task launches. That last check is a narrow one by design.
-It knows the model names Relay has been told about, so it catches the common slip of leaving a
-claude model on a task moved to grok, and it stays silent on a name it does not recognise rather
-than refusing a model the provider shipped after Relay last learned the list.
+Editing a task's `model` between runs moves it. The manifest's resolution decides a relaunch,
+so the next run launches that task where the operator sent it and names the move on its output
+and on the task's record. Two things bound that: a stranded task branch is refused exactly as
+above, judged against the name and baseline the record already carries, so the edit does not get
+the task past it; and a blocked task needs `--retry-blocked` before a reassignment reaches it at
+all. A backend edit is refused at validate today, since native mode runs on `claude` alone.
 
 ## What this skill never does
 
