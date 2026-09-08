@@ -36,7 +36,7 @@ Nothing here takes the Lease. `tail` is a reader, the same rule `status` follows
 import os
 import time
 
-from . import backends
+from . import backends, contracts, progress
 
 # Re-exported from backends, the single source every normalize_stream truncates against, so
 # this module's own constant cannot drift from what actually bounds a printed event.
@@ -183,7 +183,7 @@ class _Reader:
 
 def follow(manifest, store, stream, sleep=time.sleep, poll_seconds=POLL_SECONDS, floor=None,
            deadline_seconds=None, clock=time.monotonic, phases_only=False, notifier=None,
-           runner_alive=None):
+           runner_alive=None, bar=False, bar_every_seconds=progress.BAR_INTERVAL_SECONDS):
     """Follow the run's logs until it reaches a terminal record. Returns that record's
     `run_status`, which the caller maps to an exit code.
 
@@ -196,6 +196,11 @@ def follow(manifest, store, stream, sleep=time.sleep, poll_seconds=POLL_SECONDS,
     advance a scripted run between polls instead of waiting on a wall clock. Never acquires either
     Lease: this reads `state.json` and the log files and writes nothing, the same rule `status`
     follows.
+
+    `bar` prints the progress bar (`progress.bar`) as its own line whenever the counts or the
+    task in flight change, and again every `bar_every_seconds` while nothing moves. It goes to
+    the stream and never to the notifier: a bar is a report of counts, not a phase event, and
+    a desktop notification a minute for the length of a run is noise.
     """
     offsets = (floor or {}).get("offsets") or {}
     terminal_floor = (floor or {}).get("terminal")
@@ -271,16 +276,44 @@ def follow(manifest, store, stream, sleep=time.sleep, poll_seconds=POLL_SECONDS,
         moment anyway."""
         return store.read() or {}
 
+    def view_of(state):
+        """The progress view from one poll's read, so the phrase on a status move and the bar
+        both describe the moment the statuses were read rather than a second read of their own."""
+        return progress.build(manifest, store, raw=state, live=True)
+
     def note_statuses(state):
-        """Announce every record whose status moved since the last poll."""
+        """Announce every record whose status moved since the last poll, each with the progress
+        phrase, the same shape the Runner's own announcement takes, so an operator reads one
+        sentence whichever process reached their desktop."""
         nonlocal statuses
         current = {task_id: record.get("status")
                    for task_id, record in (state.get("tasks") or {}).items()}
         if statuses is not None:
-            for task_id in sorted(current):
-                if current[task_id] != statuses.get(task_id):
-                    announce("%s is now %s" % (task_id, current[task_id]))
+            moved = [task_id for task_id in sorted(current)
+                     if current[task_id] != statuses.get(task_id)]
+            if moved:
+                phrase = progress.phrase(view_of(state))
+                for task_id in moved:
+                    announce("%s is now %s; %s" % (task_id, current[task_id], phrase))
         statuses = current
+
+    bar_key = None
+    bar_due = None
+
+    def show_bar(state):
+        """Print the bar when its shape moved or its interval elapsed. The shape is the counts
+        plus which tasks are in flight; the elapsed inside the line is deliberately not part of
+        it, or every poll would be a new bar."""
+        nonlocal bar_key, bar_due
+        view = view_of(state)
+        key = (tuple(sorted(view["counts"].items())),
+               tuple(entry["id"] for entry in view["tasks"]
+                     if entry["in_manifest"] and entry["status"] in contracts.IN_FLIGHT_STATUSES))
+        now = clock()
+        if key != bar_key or bar_due is None or now >= bar_due:
+            bar_key = key
+            bar_due = now + bar_every_seconds
+            stream(progress.bar(view))
 
     def frontier():
         """The highest candidate this follower has seen output on, or -1 when there is none."""
@@ -327,6 +360,8 @@ def follow(manifest, store, stream, sleep=time.sleep, poll_seconds=POLL_SECONDS,
             emit(cursor)
         state = poll_state()
         note_statuses(state)
+        if bar:
+            show_bar(state)
 
         record = terminal_of(state)
         if record is not None:

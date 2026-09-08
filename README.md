@@ -127,8 +127,9 @@ list with you, validates, and launches the runner detached, or run the verbs you
 python3 skills/relay/scripts/relay_cli.py validate <manifest> --list
 python3 skills/relay/scripts/relay_cli.py run <manifest>
 python3 skills/relay/scripts/relay_cli.py run <manifest> --detach --notify
+python3 skills/relay/scripts/relay_cli.py run <manifest> --follow --phases --bar
 python3 skills/relay/scripts/relay_cli.py status <manifest>
-python3 skills/relay/scripts/relay_cli.py tail <manifest>
+python3 skills/relay/scripts/relay_cli.py tail <manifest> --bar
 python3 skills/relay/scripts/relay_cli.py summary <manifest>
 python3 skills/relay/scripts/relay_cli.py verify <manifest> <task-id>
 python3 skills/relay/scripts/relay_cli.py lease <manifest>
@@ -144,12 +145,19 @@ Folders or Full Disk Access prompt on that Mac, with no halt class and no log li
 has started yet. Look at the Mac display.
 
 `--notify` on macOS fires a desktop notification as each task's status moves and once at the end
-with the run's counts. The runner carries it, so a run launched with a bare `--detach` from
+with the run's counts. Each status move says how far along the run is beside the move itself,
+`T-3 is now landed; 3 of 8 settled, roughly 40m left`, so one notification is enough to know
+whether to come back. The runner carries it, so a run launched with a bare `--detach` from
 launchd or cron reaches you with nothing attached to it, and a run you launched with `--follow`
 keeps notifying after you stop following.
 
-`status` is the one screen answer to how far along a run is: the landed, running, halted, and
-todo counts, the elapsed per task and in total, and a rough estimate of what is left drawn from
+`--bar` on `run --follow` and `tail` prints a progress bar line, `[#####...............] 2 of 8
+settled; 2 landed, 1 running, 5 todo; T-3 running 4m 12s; roughly 40m left`, whenever the counts
+move and once a minute in between. It is a new line each time rather than one that redraws, so it
+reads the same in a terminal, in a session's tool output, and in `runner.log`. It never notifies.
+
+`status` is the one screen answer to how far along a run is: the same bar, the landed, running,
+halted, and todo counts, the elapsed per task and in total, and a rough estimate of what is left drawn from
 the mean of the tasks that have already landed. It says it has no estimate rather than guessing
 when nothing has landed yet. Like `tail` it takes no lease, so it is safe against a live run.
 

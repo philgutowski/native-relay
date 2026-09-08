@@ -174,9 +174,69 @@ def format_counts(counts):
     return ", ".join("%d %s" % (counts[status], status) for status in sorted(counts))
 
 
+# Statuses this run will not touch again: the bar's fill. Halted is here even though
+# `REMAINING_STATUSES` names it, because those two answer different questions. Remaining is what
+# a later run attempts again; settled is what this run is done with, and a halt is done with in
+# either sense, since the run either stopped on it or continued past it.
+SETTLED_STATUSES = (contracts.STATUS_LANDED, contracts.STATUS_BLOCKED, contracts.STATUS_EXCLUDED,
+                    contracts.STATUS_HALTED)
+
+BAR_WIDTH = 20
+# How often the Follower repeats the bar while nothing moves, so a long Task still shows the
+# clock advancing. A minute is coarse enough that a nine minute follow prints under ten of them.
+BAR_INTERVAL_SECONDS = 60
+
+
+def settled_of_total(data):
+    """(settled, total) over the manifest's own tasks."""
+    counts = data["counts"]
+    settled = sum(counts.get(status, 0) for status in SETTLED_STATUSES)
+    return settled, sum(counts.values())
+
+
+def phrase(data):
+    """The short form a phase event carries: how many tasks are settled and, when there is one,
+    the estimate. Kept to one clause of each so it fits a notification body beside the event
+    itself. Says nothing about the estimate when there is none, since the event is the news and
+    "no estimate yet" is not."""
+    settled, total = settled_of_total(data)
+    text = "%d of %d settled" % (settled, total)
+    if _worth_saying(data["estimate_seconds"]):
+        text += ", roughly %s left" % duration(data["estimate_seconds"])
+    return text
+
+
+def _worth_saying(estimate):
+    """An estimate of nothing is not one. `_estimate` returns zero once every task is settled,
+    and also while the last task runs past the mean, and "roughly 0s left" beside a task that is
+    still merging is the wrong sentence in both cases. The `remaining:` line in `lines` keeps
+    printing it, since that line names the sample it came from and reads as arithmetic."""
+    return estimate is not None and estimate > 0
+
+
+def bar(data, width=BAR_WIDTH):
+    """One line: the fill, the settled count, the counts by status, the task in flight with its
+    elapsed, and the estimate. Printed as a new line each time rather than redrawn in place,
+    because its reader is as often a captured stream, a session's tool output or `runner.log`,
+    as a terminal, and a line that rewrites itself is lost in a log."""
+    settled, total = settled_of_total(data)
+    fill = int(round(width * settled / total)) if total else 0
+    parts = ["[%s] %d of %d settled" % ("#" * fill + "." * (width - fill), settled, total)]
+    counts = format_counts(data["counts"])
+    if counts:
+        parts.append(counts)
+    for entry in data["tasks"]:
+        if entry["in_manifest"] and entry["status"] in contracts.IN_FLIGHT_STATUSES:
+            parts.append("%s %s" % (entry["id"], task_line(entry)))
+    if _worth_saying(data["estimate_seconds"]):
+        parts.append("roughly %s left" % duration(data["estimate_seconds"]))
+    return "; ".join(parts)
+
+
 def lines(data):
     """The text form. Each line is one question an operator asks `status` to answer."""
-    out = ["progress: %s" % (format_counts(data["counts"]) or "nothing recorded yet")]
+    out = [bar(data),
+           "progress: %s" % (format_counts(data["counts"]) or "nothing recorded yet")]
     total = duration(data["total_seconds"])
     if total is not None:
         out.append("elapsed: %s across %d task(s)" % (total, data["measured_count"]))

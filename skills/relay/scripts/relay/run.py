@@ -143,6 +143,23 @@ def _announcer(stream, notifier):
     return announce
 
 
+def _moved_line(manifest, store, task_id, after):
+    """One status move as a sentence: the move, then the progress phrase, so a notification on
+    the desktop says how far along the run is and not only which card moved.
+
+    The phrase is read from the store after the move was written, which the observer's contract
+    guarantees: it fires outside the lock, after `_write_locked`. Its failure costs the phrase and
+    never the event, the same isolation `_announcer` gives the stream and the notifier, because
+    this runs inside `store.upsert` on the run's own path and a reader that raised here would
+    surface as an unexpected error on the task.
+    """
+    line = "%s is now %s" % (task_id, after)
+    try:
+        return "%s; %s" % (line, progress.phrase(progress.build(manifest, store)))
+    except Exception:
+        return line
+
+
 def _counts_line(store, run_status):
     """The terminal record's phase event (R3). Read from the records rather than from a tally the
     loop keeps, so a status another path wrote is counted too, and short enough to read inside a
@@ -188,7 +205,8 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
     # Attached before `acquire()`, which is what makes a stale lease reclaim visible: the records
     # it marks halted are written by `_mark_crashed` inside that call, and it is the strongest
     # signal an operator who is not watching can receive.
-    store.observer = lambda task_id, _before, after: announce("%s is now %s" % (task_id, after))
+    store.observer = lambda task_id, _before, after: announce(_moved_line(manifest, store,
+                                                                          task_id, after))
 
     acquired = store.acquire()
     if acquired.code == state.LOCKED:

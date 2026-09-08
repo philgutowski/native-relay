@@ -412,3 +412,81 @@ class AgainstARealStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Phrase(unittest.TestCase):
+    """The clause a phase event carries."""
+
+    def phrase(self, tasks, ids=("T-1", "T-2", "T-3")):
+        return progress.phrase(progress.build(manifest(*ids), FakeStore(tasks), now=lambda: NOW))
+
+    def test_landed_blocked_excluded_and_halted_are_settled(self):
+        text = self.phrase({
+            "T-1": record(contracts.STATUS_LANDED, NOW - 20, NOW - 10),
+            "T-2": record(contracts.STATUS_BLOCKED),
+            "T-3": record(contracts.STATUS_EXCLUDED),
+            "T-4": record(contracts.STATUS_HALTED),
+        }, ids=("T-1", "T-2", "T-3", "T-4", "T-5"))
+        self.assertTrue(text.startswith("4 of 5 settled"), text)
+
+    def test_running_and_todo_are_not_settled(self):
+        text = self.phrase({"T-1": record(contracts.STATUS_RUNNING, NOW - 5)})
+        self.assertTrue(text.startswith("0 of 3 settled"), text)
+
+    def test_the_estimate_rides_on_the_phrase_when_there_is_one(self):
+        text = self.phrase({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)})
+        self.assertEqual(text, "1 of 3 settled, roughly 3m 20s left")
+
+    def test_no_estimate_says_nothing_about_one(self):
+        text = self.phrase({"T-1": record(contracts.STATUS_RUNNING, NOW - 5)})
+        self.assertNotIn("roughly", text)
+
+    def test_a_zero_estimate_is_not_said(self):
+        """Every task settled: `_estimate` returns zero, and "roughly 0s left" is not news."""
+        text = self.phrase({"T-1": record(contracts.STATUS_LANDED, NOW - 20, NOW - 10)},
+                           ids=("T-1",))
+        self.assertEqual(text, "1 of 1 settled")
+
+
+class Bar(unittest.TestCase):
+    def bar(self, tasks, ids=("T-1", "T-2", "T-3", "T-4")):
+        return progress.bar(progress.build(manifest(*ids), FakeStore(tasks), now=lambda: NOW))
+
+    def test_nothing_recorded_is_an_empty_bar(self):
+        text = self.bar({})
+        self.assertTrue(text.startswith("[" + "." * progress.BAR_WIDTH + "] 0 of 4 settled"), text)
+
+    def test_the_fill_is_the_settled_share_of_the_width(self):
+        text = self.bar({
+            "T-1": record(contracts.STATUS_LANDED, NOW - 20, NOW - 10),
+            "T-2": record(contracts.STATUS_BLOCKED),
+        })
+        half = progress.BAR_WIDTH // 2
+        self.assertTrue(text.startswith("[" + "#" * half + "." * half + "] 2 of 4 settled"), text)
+
+    def test_every_task_settled_fills_the_bar(self):
+        text = self.bar({"T-1": record(contracts.STATUS_LANDED, NOW - 20, NOW - 10)},
+                        ids=("T-1",))
+        self.assertTrue(text.startswith("[" + "#" * progress.BAR_WIDTH + "] 1 of 1 settled"), text)
+
+    def test_the_counts_and_the_task_in_flight_follow_the_fill(self):
+        text = self.bar({
+            "T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100),
+            "T-2": record(contracts.STATUS_RUNNING, NOW - 40),
+        })
+        self.assertIn("1 landed, 1 running, 2 todo", text)
+        self.assertIn("T-2 running  40s", text)
+        self.assertIn("roughly", text)
+
+    def test_no_estimate_prints_no_roughly(self):
+        text = self.bar({"T-1": record(contracts.STATUS_RUNNING, NOW - 40)})
+        self.assertNotIn("roughly", text)
+
+    def test_a_stray_record_is_neither_filled_nor_named_in_flight(self):
+        text = self.bar({"OLD-1": record(contracts.STATUS_RUNNING, NOW - 40)}, ids=("T-1",))
+        self.assertTrue(text.startswith("[" + "." * progress.BAR_WIDTH + "] 0 of 1 settled"), text)
+        self.assertNotIn("OLD-1", text)
+
+    def test_the_status_lines_open_with_the_bar(self):
+        data = progress.build(manifest("T-1"), FakeStore({}), now=lambda: NOW)
+        self.assertEqual(progress.lines(data)[0], progress.bar(data))

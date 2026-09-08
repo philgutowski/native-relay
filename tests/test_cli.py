@@ -323,6 +323,21 @@ class FollowedRun(CliCase):
         self.assertIn("T-1 is now %s" % contracts.STATUS_LANDED, out)
         self.assertNotIn("stub_done", out)
 
+    def test_bar_prints_a_progress_line_beside_the_phase_events(self):
+        """The launch SKILL.md documents: phases only, plus the bar. The bar is what a session
+        that kicked the run off reads to see how far along it is."""
+        self.queue_complete()
+        code, out = self.call("run", self.manifest_path, "--follow", "--phases", "--bar")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        bars = [line for line in out.splitlines() if line.startswith("[")]
+        self.assertTrue(bars, out)
+        self.assertIn("of 3 settled", bars[-1])
+        self.assertNotIn("stub_done", out)
+
+    def test_bar_is_accepted_by_tail_too(self):
+        self.assertTrue(cli.build_parser().parse_args(["tail", "m.toml", "--bar"]).bar)
+        self.assertFalse(cli.build_parser().parse_args(["tail", "m.toml"]).bar)
+
     def test_a_runner_that_dies_without_a_record_ends_the_follow_with_its_own_code(self):
         """A second runner cannot take the lease, so it exits 3 having written nothing. Without
         R16 the follower would sit until its bound with nothing to report."""
@@ -637,6 +652,19 @@ class StatusProgressView(CliCase):
         self.assertIn("progress:", out)
         self.assertEqual(json.dumps(self.store().read(), sort_keys=True), before)
         holder.release()
+
+
+class StatusBar(CliCase):
+    def test_status_opens_its_progress_block_with_the_bar(self):
+        self.complete_run()
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        lines = out.splitlines()
+        bars = [line for line in lines if line.startswith("[")]
+        self.assertEqual(len(bars), 1, out)
+        self.assertIn("3 of 3 settled", bars[0])
+        self.assertLess(lines.index(bars[0]), lines.index(
+            [line for line in lines if line.startswith("progress:")][0]))
 
 
 class StatusAgainstAShrunkManifest(CliCase):

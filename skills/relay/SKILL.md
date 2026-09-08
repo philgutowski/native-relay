@@ -50,10 +50,14 @@ python3 <runner> lease <manifest>               # who holds the lease
 python3 <runner> lease <manifest> --break       # clear it; operator's explicit call only
 ```
 
-`run --follow` and `tail` share three options: `--phases` prints phase events without the decoded
-task activity, `--for <seconds>` stops following at a bound and leaves the run going, and
-`--notify` fires a macOS notification on each phase event. A phase event is a task's log starting,
-a task's status moving, or the run reaching a terminal record.
+`run --follow` and `tail` share four options: `--phases` prints phase events without the decoded
+task activity, `--for <seconds>` stops following at a bound and leaves the run going, `--notify`
+fires a macOS notification on each phase event, and `--bar` prints a progress bar line whenever
+the counts move and once a minute in between. A phase event is a task's log starting, a task's
+status moving, or the run reaching a terminal record. A status move carries the progress phrase
+after it, `T-3 is now landed; 3 of 8 settled, roughly 40m left`, on the printed line and in the
+notification alike. Settled means the run is done with the task: landed, blocked, excluded, or
+halted. The bar is not a phase event: it prints and never notifies.
 
 `--notify` also works on `run` with no follower at all, including under a bare `--detach`, which is
 the case that matters for a launchd or cron launch. There the runner notifies on each task status
@@ -63,9 +67,10 @@ after the `--for` bound ends the follower. A `tail --notify` you start separatel
 somebody else launched notifies from the follower as before.
 
 `status` answers two questions: where the run is, as the cursor plus a line per task, and how far
-along it is, as the landed, running, halted, and todo counts, the elapsed per task and in total,
-and a rough estimate of what is left drawn from the mean of the tasks that have landed. The
-estimate says it has none rather than guessing when no landed task carries a duration.
+along it is, as the progress bar, the landed, running, halted, and todo counts, the elapsed per
+task and in total, and a rough estimate of what is left drawn from the mean of the tasks that
+have landed. The estimate says it has none rather than guessing when no landed task carries a
+duration.
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease. Under `on_halt.continue_past_task_halt`, 0
@@ -159,7 +164,7 @@ Launch and then stay with it. The operator should not have to open a second term
 what their own run is doing.
 
 ```bash
-python3 <runner> run <manifest> --follow --phases --notify --for 540
+python3 <runner> run <manifest> --follow --phases --bar --notify --for 540
 ```
 
 Run that with your harness's command timeout set to its maximum, 600000 ms. The `--for 540` bound
@@ -181,7 +186,10 @@ Mac display.
 
 `--phases` is what makes this usable in a session. Without it the follower prints every tool call
 every task makes, which is right in a terminal and would consume this session's context in
-minutes. `--notify` reaches the operator when they have walked away, and it is the runner that
+minutes. `--bar` is the line that says how far along the run is: it prints when a count moves and
+once a minute while nothing does, so a nine minute follow of one long task still shows the clock
+advancing, at under ten lines. Read the last bar line when reporting where the run has got to.
+`--notify` reaches the operator when they have walked away, and it is the runner that
 carries it, so the notifications continue for the whole run rather than stopping when the `--for`
 bound ends the follower. That is the point of the bound: this session lets go after nine minutes
 and the operator's desktop does not.
