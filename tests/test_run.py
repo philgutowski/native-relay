@@ -15,8 +15,9 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import _paths
+from _fakes import FakeAdapter
 import _repo
-from relay import (backends, classify, closeout, contracts, gitread, gitwrite, launch,
+from relay import (summary as summary_module, backends, classify, closeout, contracts, gitread, gitwrite, launch,
                    manifest as mf, run as runner, state, verify)
 
 TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
@@ -1998,3 +1999,92 @@ class PhaseEventsOnHalt(RunCase):
         self.assertIn("1 landed", last)
         self.assertIn("halted on T-2", last)
         self.assertIn(contracts.HALT_TIMEOUT, last)
+
+
+class ReturnTheCard(RunCase):
+    """Stale cards, R1 and R4, driven end to end with a tracker the task process moved and the
+    Closeout never returned. The suite's markdown adapter has no in review status, so these
+    cases hand the run a fake whose cards read todo once, at the baseline, and in review on
+    every read after that: exactly the board a blocked task leaves behind."""
+
+    class Stuck(FakeAdapter):
+        def __init__(self, in_review):
+            super().__init__(statuses={task_id: {"status": "todo"}
+                                       for task_id in ("T-1", "T-2", "T-3")})
+            self.in_review = in_review
+            self.seen = set()
+
+        def status(self, task_id):
+            if task_id in self.seen:
+                self.calls.append(("status", task_id))
+                return {"status": self.in_review, "terminal": False, "reference": None,
+                        "skipped": None}
+            self.seen.add(task_id)
+            return super().status(task_id)
+
+    def setUp(self):
+        super().setUp()
+        for task_id in ("T-1", "T-2", "T-3"):
+            self.task_blocked(task_id)
+            self.closeout_blocked(task_id)
+        self.seen = []
+
+    def go_stuck(self):
+        adapter = self.Stuck(self.manifest.tracker.in_review_status)
+        outcome = self.go(adapter=adapter, notifier=self.seen.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        return adapter
+
+    def test_the_blocked_closeout_is_told_where_the_card_came_from(self):
+        adapter = self.go_stuck()
+        self.assertIn(("closeout_instructions", "blocked", "todo"), adapter.calls)
+        with open(self.store().path("briefs", "T-2.closeout.md")) as handle:
+            self.assertIn("Return the card to `todo` first.", handle.read())
+
+    def test_a_card_left_in_review_after_the_closeout_is_a_finding_and_never_a_halt(self):
+        self.go_stuck()
+        record = self.store().get("T-2")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        mine = [f for f in record["findings"] if f["class"] == contracts.CARD_LEFT_IN_REVIEW]
+        self.assertEqual(len(mine), 1, record["findings"])
+        self.assertEqual(mine[0]["return_to"], "todo")
+        self.assertEqual(mine[0]["card_status"], self.manifest.tracker.in_review_status)
+
+    def test_the_run_end_audit_names_every_stale_card_and_the_terminal_line_counts_them(self):
+        self.go_stuck()
+        card_audit = self.store().audit()
+        self.assertEqual(card_audit["count"], 3)
+        self.assertEqual({f["class"] for f in card_audit["findings"]},
+                         {contracts.AUDIT_STALE_IN_REVIEW})
+        self.assertIn("`todo`", card_audit["findings"][0]["text"])
+        last = self.seen[-1]
+        self.assertTrue(last.startswith("run %s" % contracts.RUN_COMPLETED), last)
+        self.assertIn("3 stale card(s)", last)
+
+    def test_the_summary_lists_the_return_and_the_audit_as_checks_by_hand(self):
+        self.go_stuck()
+        data = summary_module.build(self.manifest, self.store())
+        kinds = sorted({check["kind"] for check in data["pending_checks"]})
+        self.assertIn("card_left_in_review", kinds)
+        self.assertIn(contracts.AUDIT_STALE_IN_REVIEW, kinds)
+
+
+class AuditUnderMarkdown(RunCase):
+    """The default adapter: no in review status, so nothing is returned and nothing is stale
+    after a run that landed two tasks and blocked one."""
+
+    def test_a_complete_run_writes_an_audit_that_agrees_and_no_return_finding(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        seen = []
+        outcome = self.go(notifier=seen.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().audit()["count"], 0)
+        blocked = self.store().get("T-2")
+        self.assertNotIn(contracts.CARD_LEFT_IN_REVIEW,
+                         [f["class"] for f in blocked["findings"]])
+        self.assertNotIn("stale", seen[-1])

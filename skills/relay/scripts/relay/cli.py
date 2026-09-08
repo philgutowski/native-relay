@@ -1,4 +1,4 @@
-"""The operator interface (U10, R45): seven verbs, no prompts.
+"""The operator interface (U10, R45): eight verbs, no prompts.
 
 Every verb is a subcommand and none of them asks a question, because the `/relay` skill drives
 them and a skill session cannot answer one either. There is no operation that exists only inside
@@ -15,8 +15,8 @@ import shutil
 import subprocess
 import sys
 
-from . import (adapters, contracts, manifest as manifest_module, notify, progress,
-               run as run_module, state, summary, tail as tail_module, verify)
+from . import (adapters, audit as audit_module, contracts, manifest as manifest_module, notify,
+               progress, run as run_module, state, summary, tail as tail_module, verify)
 
 EXIT_OK = run_module.EXIT_OK
 EXIT_CONFIG = run_module.EXIT_CONFIG
@@ -80,6 +80,10 @@ def build_parser():
     summary_verb = verbs.add_parser("summary", help="print the run summary")
     summary_verb.add_argument("manifest")
     summary_verb.add_argument("--json", action="store_true", dest="as_json")
+
+    audit_verb = verbs.add_parser("audit", help="list the cards that disagree with the "
+                                                "record and with git; never takes the lease")
+    audit_verb.add_argument("manifest")
 
     verify_verb = verbs.add_parser("verify", help="re-run the landing verdict for one task")
     verify_verb.add_argument("manifest")
@@ -269,6 +273,14 @@ def cmd_status(args, env, out):
         if terminal.get("halt_task"):
             out.write("halted on %s with class %s\n"
                       % (terminal.get("halt_task"), terminal.get("halt_class")))
+    card_audit = raw.get("audit")
+    if card_audit:
+        # The last run end audit, as the state file carries it. `status` reads state and
+        # nothing else, so this is what the runner found when it finished, not a fresh read;
+        # `relay audit` is the fresh one.
+        for line in audit_module.lines(card_audit.get("findings") or [],
+                                       at=card_audit.get("at")):
+            out.write(line + "\n")
     # Manifest order, then whatever the state directory still holds from a different list, which
     # is the ordering `summary.build` already uses for the same inputs. Sorting by id put the
     # tasks in an order the run never followed.
@@ -346,6 +358,26 @@ def cmd_tail(args, env, out):
     return _follow(args, manifest, store, out)
 
 
+def cmd_audit(args, env, out):
+    """The card audit on demand (stale cards, R7). Reads the tracker, the state file, and git,
+    and prints which cards disagree. Takes no lease and writes nothing, so it is safe beside a
+    live run; under one, a record in flight is a process at work rather than a stale card. The
+    runner performs the same audit at run end and writes that one, which `status` and
+    `summary` then show."""
+    manifest, failure = _load(args.manifest, out)
+    if failure:
+        return failure
+    adapter, failure = _adapter_for(manifest, env, out)
+    if failure:
+        return failure
+    store = _store_for(manifest, env)
+    live = store.status_word() == "running"
+    findings = audit_module.build(manifest, store, adapter, env=env, live=live)
+    for line in audit_module.lines(findings):
+        out.write(line + "\n")
+    return EXIT_OK
+
+
 def cmd_summary(args, env, out):
     manifest, failure = _load(args.manifest, out)
     if failure:
@@ -403,6 +435,7 @@ VERBS = {
     "status": cmd_status,
     "tail": cmd_tail,
     "summary": cmd_summary,
+    "audit": cmd_audit,
     "verify": cmd_verify,
     "lease": cmd_lease,
 }

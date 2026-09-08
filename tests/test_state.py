@@ -615,3 +615,33 @@ class Layout(StateCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardAudit(StateCase):
+    """Stale cards, R5 and KTD4: the run end audit lives in the state file, written whole."""
+
+    def test_a_fresh_store_carries_no_audit(self):
+        store = self.store()
+        store.acquire()
+        self.assertIsNone(store.audit())
+        self.assertIn("audit", store.read())
+        store.release()
+
+    def test_write_audit_round_trips_with_a_stamp_and_a_count(self):
+        store = self.store()
+        store.acquire()
+        record = store.write_audit([{"class": contracts.AUDIT_REOPENED, "task": "T-1",
+                                     "text": "T-1 was reopened"}])
+        self.assertEqual(record["count"], 1)
+        self.assertTrue(record["at"])
+        self.assertEqual(store.audit()["findings"][0]["task"], "T-1")
+        store.release()
+
+    def test_a_second_audit_replaces_the_first_outright(self):
+        store = self.store()
+        store.acquire()
+        store.write_audit([{"class": contracts.AUDIT_REOPENED, "task": "T-1", "text": "x"}])
+        store.write_audit([])
+        self.assertEqual(store.audit()["count"], 0)
+        self.assertEqual(store.audit()["findings"], [])
+        store.release()

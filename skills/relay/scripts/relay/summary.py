@@ -15,7 +15,7 @@ at a machine readable file the operator would have to parse to learn anything.
 """
 import string
 
-from . import contracts
+from . import audit, contracts
 
 SCHEMA_VERSION = 1
 
@@ -102,9 +102,13 @@ def _task_entry(store, record):
     }
 
 
-def _pending_checks(entries, run_status, halt_task, halt_class, state_dir):
+def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_audit=None):
     """R36's last column: what a human still has to do. Each entry is a kind and a sentence, so
-    the skill can group them and the text can print them as a list."""
+    the skill can group them and the text can print them as a list.
+
+    `card_audit` is the run end card audit the state file carries (stale cards, R8). Each of its
+    findings is copied in as it is: `audit.build` already wrote the sentence, and rewriting it
+    here would be a second place for the words to drift."""
     checks = []
     for entry in entries:
         task_id = entry["id"]
@@ -145,6 +149,12 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir):
                                "text": "%s: %s" % (
                                    task_id,
                                    finding.get("detail") or contracts.PATH_GATE_CLAUDE_DIR)})
+            elif finding["class"] == contracts.CARD_LEFT_IN_REVIEW:
+                checks.append({"kind": "card_left_in_review", "task": task_id,
+                               "text": "%s: %s" % (task_id, finding["line"])})
+    for finding in (card_audit or {}).get("findings") or []:
+        checks.append({"kind": finding.get("class"), "task": finding.get("task"),
+                       "text": finding.get("text") or ""})
     if run_status == contracts.RUN_HALTED:
         checks.append({"kind": "halted", "task": halt_task,
                        "text": "the run halted on %s with class %s. Repair by hand, then run "
@@ -175,9 +185,13 @@ def build(manifest, store):
         "cursor": raw.get("cursor", 0),
         "counts": _counts(entries),
         "tasks": entries,
+        # The last run end card audit as the state file carries it, or None. Additive to the
+        # schema: a reader of version 1 that never asks for it sees nothing new.
+        "audit": raw.get("audit"),
     }
     data["pending_checks"] = _pending_checks(entries, run_status, data["halt_task"],
-                                             data["halt_class"], store.dir)
+                                             data["halt_class"], store.dir,
+                                             card_audit=data["audit"])
     return data
 
 
@@ -205,6 +219,10 @@ def lines(data):
     if data["halt_class"]:
         out.append(("halted on %s with class %s" % (data["halt_task"], data["halt_class"]),
                     "halt_class"))
+    if data.get("audit"):
+        # The count only. Each finding's own sentence is already a pending check below.
+        out.append((audit.lines(data["audit"].get("findings") or [],
+                                at=data["audit"].get("at"))[0], "audit.count"))
     out.append(("", "run_status"))
     for index, entry in enumerate(data["tasks"]):
         source = "tasks[%d]" % index

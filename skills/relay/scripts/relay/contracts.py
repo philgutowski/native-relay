@@ -401,6 +401,22 @@ REVIEW_SKIPPED = "review_skipped"
 # record's `halt_class` is untouched, and summary deliberately keeps it off the pending checks
 # list, because a move the operator asked for is not a chore they owe.
 BACKEND_REASSIGNED = "backend_reassigned"
+# Stale cards, 2026-09-08. The Closeout for a blocked or halted Task was told to return the card
+# to the status it read before the run, and the card still reads the in review status when the
+# Runner reads it back. Finding only, the same shape as BLOCKED_UNRECORDED: the Runner never
+# writes to a tracker, so a card it could not get moved is a check by hand, not a stop.
+CARD_LEFT_IN_REVIEW = "card_left_in_review"
+
+# The audit's own classes (stale cards, 2026-09-08). These belong to a run rather than to a
+# record, so they are not in LINE_CLASSES and have no HALT_LINES template: `audit.build` writes
+# each finding's sentence itself, and `summary` copies it into the pending checks as it is.
+AUDIT_STALE_IN_REVIEW = "card_stale_in_review"
+AUDIT_REOPENED = "card_reopened"
+AUDIT_CLOSED_UNLANDED = "card_closed_unlanded"
+AUDIT_UNREADABLE = "card_unreadable"
+AUDIT_FAILED = "audit_failed"
+AUDIT_CLASSES = (AUDIT_STALE_IN_REVIEW, AUDIT_REOPENED, AUDIT_CLOSED_UNLANDED,
+                 AUDIT_UNREADABLE, AUDIT_FAILED)
 
 # The .claude/ backstop's operator sentence. HALT_LINES[path_gate] is {detail}; this
 # raiser and classify's path_gate promotion fill it so the Cause line stays true.
@@ -463,6 +479,7 @@ FINDING_CLASSES = (
     CANCELLED_TOOL_CALL,
     REVIEW_SKIPPED,
     BACKEND_REASSIGNED,
+    CARD_LEFT_IN_REVIEW,
 )
 
 # Every class that can reach a summary line: the closed halt class set of KTD6, plus the
@@ -470,6 +487,7 @@ FINDING_CLASSES = (
 LINE_CLASSES = HALT_CLASSES + (
     CLOSEOUT_UNFINISHED, BLOCKED_UNRECORDED, UNENFORCED_DISALLOWED, RUNNER_SELF_KILL,
     WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, REVIEW_SKIPPED, BACKEND_REASSIGNED,
+    CARD_LEFT_IN_REVIEW,
 )
 
 HALT_LINES = {
@@ -503,6 +521,8 @@ HALT_LINES = {
     # move is still intent, and writes it onto the record afterwards, where it is history.
     BACKEND_REASSIGNED: ("{to_backend} {to_model}, reassigned from "
                          "{from_backend} {from_model}"),
+    CARD_LEFT_IN_REVIEW: ("the card still reads {card_status} after the closeout; move {task} "
+                          "to {return_to} by hand"),
 }
 
 # The digest classify.classify() (U7) guarantees, read by run.py and closeout.py via

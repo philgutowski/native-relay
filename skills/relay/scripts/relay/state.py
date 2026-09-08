@@ -125,6 +125,7 @@ class StateStore:
             "tasks": {},
             "terminal": None,
             "git_ops": [],
+            "audit": None,
         }
 
     def read(self):
@@ -511,6 +512,22 @@ class StateStore:
 
     def terminal(self):
         return (self.read() or {}).get("terminal")
+
+    def write_audit(self, findings):
+        """The run end card audit (stale cards, 2026-09-08): the findings `audit.build` returned
+        and when they were taken. Written by the Runner under its Lease; the `audit` verb prints
+        the same view and never writes it, because a reader beside a live run would race the
+        Runner for the file. Replaces the previous audit outright, since an older list would
+        describe a board that has since moved."""
+        record = {"at": _iso(self.now()), "findings": list(findings),
+                  "count": len(findings)}
+        self._mutate(lambda state: state.update(audit=record))
+        return record
+
+    def audit(self):
+        """The last run end audit, or None when no run has written one. A state file written
+        before the key existed reads as None too, which is the honest answer for it."""
+        return (self.read() or {}).get("audit")
 
     def status_word(self):
         """What `relay status` reports: `running` under a live lease, the terminal record's

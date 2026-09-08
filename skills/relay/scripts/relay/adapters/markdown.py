@@ -150,7 +150,9 @@ class MarkdownAdapter:
     def closeout_allowed_tools(self):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome):
+    def closeout_instructions(self, outcome, return_to=None):
+        """`return_to` is accepted for the interface and ignored: a markdown tracker has only an
+        open box and a checked one, and the task process never moves it."""
         if outcome == OUTCOME_LANDED:
             return ("Edit the task's line in %s: change `[ ]` to `[x]` and append the landing "
                     "reference below in parentheses at the end of the line. Commit that file and "

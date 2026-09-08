@@ -159,13 +159,20 @@ class GitHubAdapter:
     def closeout_allowed_tools(self):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome):
+    def closeout_instructions(self, outcome, return_to=None):
+        """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
+        supplied for a blocked or halted outcome when the runner wants the card returned there.
+        The task process moved the item to the in review status at its first step, so without
+        the return every blocked or halted card sits in progress with nobody on it."""
         if outcome == OUTCOME_LANDED:
             return ("Close the issue with `gh issue close <number>` and add one comment naming the "
                     "landing reference below, or move its project item to the terminal status.")
+        move = ("Do not close the issue and do not move its project item" if not return_to else
+                "Do not close the issue. Move its project item back to `%s`, the status it read "
+                "before this run, since no process is working on it now; use `gh project "
+                "item-edit` with the board's Status field" % return_to)
         if outcome == OUTCOME_HALTED:
             return ("Add one comment naming the halt class and the cause line below with `gh issue "
-                    "comment`. Do not close the issue and do not move its project item: a halted "
-                    "task is not finished.")
-        return ("Add one comment carrying the blocker digest below with `gh issue comment`. Do not "
-                "close the issue and do not move its project item: a blocked task stays open.")
+                    "comment`. %s: a halted task is not finished." % move)
+        return ("Add one comment carrying the blocker digest below with `gh issue comment`. %s: a "
+                "blocked task stays open." % move)

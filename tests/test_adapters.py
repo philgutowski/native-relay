@@ -192,6 +192,43 @@ class SharedContract(AdapterCase):
             self.assertNotIn("`[x]`", text, "%s halted instructions check the box" % name)
 
 
+class ReturnTo(SharedContract):
+    """Stale cards, R1 to R3: the move sentence each adapter renders when the runner asks for
+    a blocked or halted card back, and the two that never move anything."""
+
+    def test_github_and_jira_move_the_card_back_and_stop_saying_not_to(self):
+        for name, adapter in self.each():
+            if name == "markdown":
+                continue
+            for outcome in ("blocked", "halted"):
+                text = adapter.closeout_instructions(outcome, return_to="Todo")
+                self.assertIn("`Todo`", text, "%s %s names no destination" % (name, outcome))
+                self.assertIn("before this run", text, name)
+                self.assertNotIn("Do not transition the card", text, name)
+                self.assertNotIn("do not move its project item", text, name)
+                self.assertNotEqual(text, adapter.closeout_instructions(outcome), name)
+
+    def test_without_a_destination_the_sentences_are_unchanged(self):
+        for name, adapter in self.each():
+            for outcome in ("landed", "blocked", "halted"):
+                self.assertEqual(adapter.closeout_instructions(outcome),
+                                 adapter.closeout_instructions(outcome, return_to=None), name)
+
+    def test_a_landed_outcome_ignores_the_destination(self):
+        for name, adapter in self.each():
+            self.assertEqual(adapter.closeout_instructions("landed"),
+                             adapter.closeout_instructions("landed", return_to="Todo"), name)
+
+    def test_markdown_has_no_status_to_return_to(self):
+        adapter = self.markdown()
+        for outcome in ("blocked", "halted"):
+            self.assertEqual(adapter.closeout_instructions(outcome),
+                             adapter.closeout_instructions(outcome, return_to="Todo"))
+
+    def test_the_interface_is_still_eight_methods(self):
+        self.assertEqual(len(adapters.INTERFACE), 8)
+
+
 class Jira(AdapterCase):
     def opener(self, **routes):
         return FakeOpener(routes or {"/issue/": "jira_issue_done.json", "search": "jira_search.json"})
