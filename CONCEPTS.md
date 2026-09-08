@@ -96,7 +96,11 @@ empty context, knows nothing of any other Task, and its report of its own succes
 It creates and stays on a branch named the Manifest's `project.branch_prefix` plus the Task id.
 The prefix defaults to `relay/` when the Manifest omits the key. An empty prefix is the Task id
 alone, which is not the same as omitting the key. Retry of a blocked Task looks at the branch
-name stored on that Task's record, so a later prefix edit cannot hide stranded commits.
+name stored on that Task's record, so a later prefix edit cannot hide stranded commits. A branch
+of that name left behind by a halted or timed out attempt is also in the way: pre flight refuses
+to launch the Task while it exists, the Runner never deletes it, and the check is on the name
+alone, so the operator moves the branch aside and puts any resume instruction on the card, which
+is the only thing a fresh Task process reads.
 
 A Task process owns whatever it spawns. Subagents and gate commands run underneath it and can
 outlive it, so the Runner bounds the whole group rather than the one invocation, and a Task
