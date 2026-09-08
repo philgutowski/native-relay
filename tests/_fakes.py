@@ -80,8 +80,12 @@ class FakeAdapter:
     def closeout_allowed_tools(self):
         return tuple(self._closeout_tools)
 
-    def closeout_instructions(self, outcome):
-        return self._instructions.get(outcome, "record the %s outcome on the card" % outcome)
+    def closeout_instructions(self, outcome, return_to=None):
+        self.calls.append(("closeout_instructions", outcome, return_to))
+        text = self._instructions.get(outcome, "record the %s outcome on the card" % outcome)
+        if return_to:
+            text += " Return the card to `%s` first." % return_to
+        return text
 
 
 class FakeRun:

@@ -31,7 +31,7 @@ Resolve `<runner>` once, from this skill's own directory as the harness gave it 
 Read the file at `<rubric>` before proposing a backend. That path is under this skill's own
 directory, not the target repo. If the file cannot be opened, stop rather than inventing routing.
 
-The seven verbs, with the follower options on the two that follow:
+The eight verbs, with the follower options on the two that follow:
 
 ```bash
 python3 <runner> validate <manifest>            # check the manifest and its target repo
@@ -45,6 +45,7 @@ python3 <runner> status <manifest>              # what the run is doing and how 
 python3 <runner> tail <manifest>                # follow the tasks' activity decoded; never takes the lease
 python3 <runner> summary <manifest>             # the run summary as text
 python3 <runner> summary <manifest> --json      # the same summary as data
+python3 <runner> audit <manifest>               # the cards that disagree with the record and git; never takes the lease
 python3 <runner> verify <manifest> <task-id>    # re-run the landing verdict for one task
 python3 <runner> lease <manifest>               # who holds the lease
 python3 <runner> lease <manifest> --break       # clear it; operator's explicit call only
@@ -71,6 +72,24 @@ along it is, as the progress bar, the landed, running, halted, and todo counts, 
 task and in total, and a rough estimate of what is left drawn from the mean of the tasks that
 have landed. The estimate says it has none rather than guessing when no landed task carries a
 duration.
+
+`audit` reads every task's card and says which ones disagree with the record and with git. The
+runner performs the same audit at the end of every run and writes it to the state file, where
+`status` and `summary` show it, so the verb is for a fresh look between runs. It takes no lease
+and writes nothing, so it is safe beside a live run. Four disagreements, each a report and never
+a repair, because the runner never moves a card:
+
+- `card_stale_in_review`: the card reads the in review status and no process is working on it.
+  The line names the status to move it back to.
+- `card_reopened`: the record landed and the card is no longer terminal.
+- `card_closed_unlanded`: the card is terminal, nothing landed, and no commit on the default
+  branch since the record's baseline names the task. The next run will skip it.
+- `card_unreadable`: the tracker could not be read for that card.
+
+Behind the audit, a Closeout for a blocked or halted task returns the card to the status it read
+before the run, since the task process moved it to in review at its first step and nobody is on
+it any more. When the card still reads in review after that Closeout, the record carries a
+`card_left_in_review` finding and the summary lists the card to move by hand.
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease. Under `on_halt.continue_past_task_halt`, 0
@@ -228,7 +247,8 @@ python3 <runner> status <manifest>
 python3 <runner> summary <manifest> --json
 ```
 
-Everything you need is in those two outputs. Do not open a session transcript: the runner already
+Everything you need is in those two outputs, including the run end card audit, which lists
+under check by hand every card that disagrees with its record. Do not open a session transcript: the runner already
 classified the exit into a halt class with its evidence, and the summary carries the cause line
 and the checks a human still has to make. Explain the class in plain words, name the evidence,
 and say what the operator has to do. If `status` prints `no state for <manifest> yet` and a python
@@ -248,6 +268,7 @@ The classes and what they mean for the operator:
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
 | `unclean_exit` | the process left a dirty tree, or claimed to finish and left nothing to merge | inspect the tree, clean it, resume |
 | `review_skipped` (a finding, never a halt) | the task claimed complete without a `/code-review` call in its transcript; it landed if the gate passed | review the diff of the landing commit by hand |
+| `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review | move the card back by hand to the status the line names |
 | `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
 | `unexpected_error` | the run loop hit something it did not anticipate: a defect, a library error, a task process that could not be launched, or a manifest naming an unimplemented shipping mode | read the error text in the cause line and the runner log; the fault is in the runner or the manifest, not the task, so fix that before resuming |
 | `ci_undecided` | reserved for `pr_terminal` mode, which `validate` refuses; no run can reach it today | not applicable |

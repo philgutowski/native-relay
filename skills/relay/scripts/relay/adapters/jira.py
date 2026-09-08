@@ -171,15 +171,25 @@ class JiraAdapter:
     def closeout_allowed_tools(self):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome):
+    def closeout_instructions(self, outcome, return_to=None):
+        """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
+        supplied for a blocked or halted outcome when the runner wants the card returned there.
+        The task process transitioned the card to the in review status at its first step, so
+        without the return every blocked or halted card sits in progress with nobody on it."""
         if outcome == OUTCOME_LANDED:
             text = ("Transition the card to its terminal status, then add one comment naming the "
                     "landing reference below. Use the Jira tools on your allowlist and nothing else.")
         elif outcome == OUTCOME_HALTED:
-            text = ("Add one comment naming the halt class and the cause line below. Do not "
-                    "transition the card: a halted task keeps its current status.")
+            move = ("Do not transition the card: a halted task keeps its current status."
+                    if not return_to else
+                    "Transition the card back to `%s`, the status it read before this run, since "
+                    "no process is working on it now; a halted task is not finished." % return_to)
+            text = "Add one comment naming the halt class and the cause line below. %s" % move
         else:
-            text = ("Add one comment carrying the blocker digest below. Do not transition the card: a "
-                    "blocked task keeps its current status so the board still shows it as open.")
+            move = ("Do not transition the card: a blocked task keeps its current status so the "
+                    "board still shows it as open." if not return_to else
+                    "Transition the card back to `%s`, the status it read before this run, since "
+                    "no process is working on it now; a blocked task stays open." % return_to)
+            text = "Add one comment carrying the blocker digest below. %s" % move
         return text + (" Pass %s as cloudId on every Atlassian call. Never call "
                        "getAccessibleAtlassianResources." % self._site)

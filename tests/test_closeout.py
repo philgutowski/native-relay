@@ -594,3 +594,68 @@ class CloseoutCannotPush(RunTheProcess):
         disallowed = seen["args"][seen["args"].index("--disallowedTools") + 1]
         for pattern in contracts.CLOSEOUT_DISALLOWED_EXTRA:
             self.assertIn(pattern, disallowed)
+
+
+class ReturnTo(CloseoutCase):
+    """Stale cards, R1 and R2: where a blocked or halted card goes back to, and when nothing
+    should move."""
+
+    def test_the_baseline_status_is_the_destination(self):
+        self.assertEqual(closeout.return_to_for(self.manifest,
+                                                {"baseline_tracker_status": "Todo"}), "Todo")
+
+    def test_no_baseline_means_nowhere_to_return_to(self):
+        self.assertIsNone(closeout.return_to_for(self.manifest, {}))
+        self.assertIsNone(closeout.return_to_for(self.manifest, {"baseline_tracker_status": None}))
+
+    def test_a_baseline_already_at_in_review_is_the_operators_placement_and_stays(self):
+        in_review = self.manifest.tracker.in_review_status
+        self.assertIsNone(closeout.return_to_for(
+            self.manifest, {"baseline_tracker_status": in_review.upper()}))
+
+    def test_a_record_with_a_landing_reference_never_moves_back(self):
+        """A halt after a landing: the landed Closeout already closed the card, and returning
+        it to todo would undo a landing."""
+        self.assertIsNone(closeout.return_to_for(
+            self.manifest, {"baseline_tracker_status": "Todo", "landing_ref": "a" * 40}))
+
+    def test_the_brief_asks_the_adapter_for_the_move_and_carries_its_sentence(self):
+        text = self.render("blocked", return_to="Todo")
+        self.assertIn("Return the card to `Todo` first.", text)
+        self.assertIn(("closeout_instructions", "blocked", "Todo"), self.adapter.calls)
+
+    def test_a_landed_brief_asks_for_no_move(self):
+        self.render("landed")
+        self.assertIn(("closeout_instructions", "landed", None), self.adapter.calls)
+
+
+class ConfirmCardReturned(CloseoutCase):
+    """Stale cards, R4: the read after the Closeout. Same shape as `confirm_blocked_comment`."""
+
+    def confirm(self, statuses):
+        adapter = FakeAdapter(statuses=statuses)
+        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", "Todo")
+
+    def test_a_card_back_at_its_status_confirms(self):
+        self.assertIsNone(self.confirm({"T-1": {"status": "Todo"}}))
+
+    def test_a_card_still_in_review_is_a_finding_naming_the_destination(self):
+        in_review = self.manifest.tracker.in_review_status
+        finding = self.confirm({"T-1": {"status": in_review.title()}})
+        self.assertEqual(finding["class"], contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual(finding["return_to"], "Todo")
+        self.assertEqual(finding["card_status"], in_review.title())
+
+    def test_an_unreadable_card_is_a_finding_rather_than_a_confirmation(self):
+        finding = self.confirm({})
+        self.assertEqual(finding["class"], contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual(finding["card_status"], "unreadable")
+
+    def test_an_adapter_that_raises_is_a_finding_rather_than_an_exception(self):
+        class Exploding(FakeAdapter):
+            def status(self, task_id):
+                raise RuntimeError("down")
+
+        finding = closeout.confirm_card_returned(Exploding(), self.manifest, "T-1", "Todo")
+        self.assertEqual(finding["class"], contracts.CARD_LEFT_IN_REVIEW)
+        self.assertIn("down", finding["evidence"])

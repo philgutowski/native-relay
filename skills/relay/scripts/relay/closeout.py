@@ -137,7 +137,8 @@ def learnings_dir(manifest):
 
 def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, backend,
            landing_ref=None, branch=None, commit_range=None, gate=None,
-           wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None):
+           wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None,
+           return_to=None):
     """The closeout brief. Deterministic from its inputs, like the task brief, and it never
     receives the task process transcript (R27), only the digest the runner composed from it.
 
@@ -150,7 +151,9 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
     or forge a runner instruction (R56). `landing_ref` is also passed for `OUTCOME_HALTED` when
     the task's own landed closeout already ran before this halt (a mirror push refusal or a
     failing final verify), naming it keeps the comment from reading as an undifferentiated halt
-    on a card the runner already moved to a terminal status."""
+    on a card the runner already moved to a terminal status. `return_to` (stale cards,
+    2026-09-08) is the status the runner wants a blocked or halted card returned to, or None;
+    the adapter renders the move sentence, so the brief and the adapter cannot disagree."""
     task_id = card.get("id")
     envelope = (digest or {}).get("envelope") or {}
     landing_line = ""
@@ -185,7 +188,7 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
         "title": brief.defang(str(card.get("title") or "")).strip(),
         "description": brief.defang(str(card.get("description") or "")).strip(),
         "comments": brief.defang(_bullets(_comment_lines(comments))),
-        "duty_one": adapter.closeout_instructions(outcome),
+        "duty_one": adapter.closeout_instructions(outcome, return_to=return_to),
         "learnings_dir": learnings_dir(manifest),
         "allowed_paths": _bullets(allowed_paths),
         "complete_line": contracts.CLOSEOUT_COMPLETE_LINE,
@@ -242,7 +245,7 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
         backend, task_model=None,
         landing_ref=None, branch=None, commit_range=None, gate=None,
         wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None,
-        timeout_seconds=None,
+        timeout_seconds=None, return_to=None,
         **launch_kwargs):
     """Render, launch, and read the ending. Returns what happened; it changes no git state and
     writes nothing to the tracker itself. The caller runs the scope check and the push.
@@ -253,7 +256,8 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
     text = render(manifest, card, outcome, digest, comments, adapter, allowed_paths, backend,
                   landing_ref=landing_ref, branch=branch, commit_range=commit_range,
                   gate=gate, wall_seconds=wall_seconds,
-                  active_seconds=active_seconds, halt_class=halt_class, cause_line=cause_line)
+                  active_seconds=active_seconds, halt_class=halt_class, cause_line=cause_line,
+                  return_to=return_to)
     brief_path = store.path("briefs", task_id + ".closeout.md")
     with open(brief_path, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -299,3 +303,45 @@ def confirm_blocked_comment(adapter, task_id, baseline_comment_id):
         return None
     return {"class": contracts.BLOCKED_UNRECORDED, "task": task_id,
             "evidence": "no comment newer than %r after the closeout" % baseline_comment_id}
+
+
+def return_to_for(manifest, record):
+    """The status a blocked or halted card goes back to, or None when nothing should move
+    (stale cards, 2026-09-08). Three refusals, each a reason rather than a gap. No baseline: the
+    card could not be read before the run, so there is nowhere known to return it to. Baseline
+    equal to the in review status: the operator placed it there before the run, and the runner
+    does not second guess that placement. A landing reference on the record: the halt came after
+    a landing whose own Closeout already closed the card, and moving a closed card back to todo
+    would undo a landing."""
+    baseline = record.get("baseline_tracker_status")
+    in_review = manifest.tracker.in_review_status
+    if not baseline or record.get("landing_ref"):
+        return None
+    if in_review and str(baseline).lower() == str(in_review).lower():
+        return None
+    return baseline
+
+
+def confirm_card_returned(adapter, manifest, task_id, return_to):
+    """R4 of the stale cards plan: after a Closeout told to return the card, read it back. A
+    finding when it still reads the in review status, or when the read failed, so the summary
+    lists the card to move by hand. Never a halt: the run continues, and the runner never moves
+    the card itself."""
+    in_review = manifest.tracker.in_review_status
+    try:
+        card = adapter.status(task_id) or {}
+    except Exception as exc:
+        return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
+                "card_status": "unreadable", "return_to": return_to,
+                "evidence": "the tracker could not be read to confirm the return: %s" % exc}
+    if card.get("skipped"):
+        return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
+                "card_status": "unreadable", "return_to": return_to,
+                "evidence": "the tracker could not be read to confirm the return: %s"
+                            % card["skipped"]}
+    status = card.get("status")
+    if in_review and status and str(status).lower() == str(in_review).lower():
+        return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
+                "card_status": status, "return_to": return_to,
+                "evidence": "the card reads %s after the closeout" % status}
+    return None

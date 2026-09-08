@@ -208,6 +208,14 @@ when Landed, a comment carrying the Runner's blocker digest when Blocked), then 
 judgment. It exists because the Runner never writes to the Tracker and the Task process exits
 before the landing commit exists, so neither can name it.
 
+For a Blocked or halted Task the first duty also returns the card to the status the record read
+before the run, decided 2026-09-08. The Task process moves the card to the in review status at
+its first step, so without the return every Task that did not land leaves a card in progress
+with nobody on it. The Runner reads the card back afterwards and attaches a `card_left_in_review`
+finding when it did not move; it never moves the card itself. No return is asked for when the
+status before the run is unknown, when it was already the in review status, or when the record
+carries a landing reference, since that card was closed by a landing.
+
 Its ending is a contract: the final line of its last message says whether the Learning judgment
 wrote a learning or skipped one, and the Runner reads that line from the end of the message, not
 the start. A Closeout process that ends any other way is recorded as unfinished, which is a
@@ -289,6 +297,16 @@ Tracker, and the Runner never does: it reads the Tracker afterwards to confirm a
 and reports a Blocked Task whose card carries none as a check for the operator to make by hand. So a
 Blocked Task the Closeout failed to record is visible in the run summary rather than on the board,
 which is the accepted cost of the Runner holding no write path at all.
+
+### Card audit
+The Runner's pass over every Task's card at the end of a run, comparing each with its record
+and with git, and the `audit` verb that performs the same pass on demand. It names four
+disagreements: a card at the in review status with no process on it, a Landed record whose card
+is no longer terminal, a terminal card nothing landed for, and a card that could not be read. It
+reports and never repairs, because the Runner holds no way to move a card; each finding says
+what to move and where, and the summary lists it as a check by hand. The run end pass writes
+under the Lease; the verb takes none and writes nothing, so it is safe beside a live run, where a
+record in flight is a process at work rather than a stale card.
 
 ### Shipping mode
 The per-project choice of what landing means: a merge to the default branch performed outside the

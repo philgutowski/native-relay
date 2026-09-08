@@ -131,6 +131,7 @@ python3 skills/relay/scripts/relay_cli.py run <manifest> --follow --phases --bar
 python3 skills/relay/scripts/relay_cli.py status <manifest>
 python3 skills/relay/scripts/relay_cli.py tail <manifest> --bar
 python3 skills/relay/scripts/relay_cli.py summary <manifest>
+python3 skills/relay/scripts/relay_cli.py audit <manifest>
 python3 skills/relay/scripts/relay_cli.py verify <manifest> <task-id>
 python3 skills/relay/scripts/relay_cli.py lease <manifest>
 ```
@@ -155,6 +156,14 @@ keeps notifying after you stop following.
 settled; 2 landed, 1 running, 5 todo; T-3 running 4m 12s; roughly 40m left`, whenever the counts
 move and once a minute in between. It is a new line each time rather than one that redraws, so it
 reads the same in a terminal, in a session's tool output, and in `runner.log`. It never notifies.
+
+A board stays honest across a run. The task process moves a card to the in review status at its
+first step, and a Closeout for a blocked or halted task returns it to the status it read before
+the run, since nobody is on it any more. At the end of every run the runner audits every card
+against its record and git, writes the result to the state file, and names the count on the
+terminal notification; `audit <manifest>` is the same pass on demand, taking no lease and
+writing nothing. It reports and never repairs: a card in review with no process on it, a landed
+card that was reopened, a closed card nothing landed for, and a card that could not be read.
 
 `status` is the one screen answer to how far along a run is: the same bar, the landed, running,
 halted, and todo counts, the elapsed per task and in total, and a rough estimate of what is left drawn from

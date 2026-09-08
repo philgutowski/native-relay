@@ -179,6 +179,11 @@ FINDING_ROWS = {
          "to_backend": "claude", "to_model": "sonnet"},
         "run._reassignment, when the manifest routes a relaunch away from the recorded backend",
     ),
+    contracts.CARD_LEFT_IN_REVIEW: (
+        {"task": "T-1", "card_status": "In Progress", "return_to": "Todo",
+         "evidence": "the card reads In Progress after the closeout"},
+        "closeout.confirm_card_returned, after a Closeout told to return a blocked or halted card",
+    ),
 }
 
 
@@ -472,3 +477,54 @@ class ContinuedPastChecks(CauseLineTable):
         self.store.write_terminal(contracts.RUN_COMPLETED)
         _, kinds = self.kinds(["T-1", "T-2"])
         self.assertEqual(kinds, [("stranded_branch", "T-2")])
+
+
+class CardAuditChecks(CauseLineTable):
+    """Stale cards, R8: the run end audit reaches the summary as data, as checks by hand, and
+    as one count line, with each finding's sentence copied as `audit.build` wrote it."""
+
+    def finding(self, klass, task_id, text):
+        return {"class": klass, "task": task_id, "text": text,
+                "card_status": None, "record_status": None}
+
+    def test_no_audit_means_no_key_value_and_no_line(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise([])
+        self.assertIsNone(data["audit"])
+        self.assertNotIn("cards:", summary.render(data))
+
+    def test_each_finding_is_a_check_by_hand_with_its_own_sentence(self):
+        self.store.write_audit([
+            self.finding(contracts.AUDIT_STALE_IN_REVIEW, "T-2",
+                         "T-2's card reads In Progress but its record reads blocked"),
+            self.finding(contracts.AUDIT_REOPENED, "T-1", "T-1 landed but its card reads Todo"),
+        ])
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise([])
+        kinds = [(check["kind"], check["task"]) for check in data["pending_checks"]]
+        self.assertEqual(kinds, [(contracts.AUDIT_STALE_IN_REVIEW, "T-2"),
+                                 (contracts.AUDIT_REOPENED, "T-1")])
+        text = summary.render(data)
+        self.assertIn("cards: 2 stale card(s)", text)
+        self.assertIn("  T-2's card reads In Progress but its record reads blocked", text)
+        self.assertEqual(data["audit"]["count"], 2)
+
+    def test_an_empty_audit_still_prints_that_every_card_agreed(self):
+        self.store.write_audit([])
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise([])
+        self.assertEqual(data["pending_checks"], [])
+        self.assertIn("cards: every card agrees", summary.render(data))
+
+    def test_a_card_left_in_review_finding_on_a_record_is_a_check_by_hand(self):
+        self.store.upsert("T-2", status=contracts.STATUS_BLOCKED,
+                          halt_class=contracts.HALT_BLOCKED_ENVELOPE, branch=None,
+                          halt_evidence={"blocker": "x"}, wall_seconds=1.0, active_seconds=1.0,
+                          findings=[{"class": contracts.CARD_LEFT_IN_REVIEW, "task": "T-2",
+                                     "card_status": "In Progress", "return_to": "Todo",
+                                     "evidence": "the card reads In Progress after the closeout"}])
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise(["T-2"])
+        kinds = [(check["kind"], check["task"]) for check in data["pending_checks"]]
+        self.assertEqual(kinds, [("card_left_in_review", "T-2")])
+        self.assertIn("move T-2 to Todo by hand", data["pending_checks"][0]["text"])

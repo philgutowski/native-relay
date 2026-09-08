@@ -23,8 +23,8 @@ closeout process the runner launched; the runner reads the result back and decid
 import time
 from dataclasses import dataclass, field
 
-from . import (adapters, backends, brief, classify, closeout, contracts, gitread, gitwrite,
-               launch, manifest as manifest_module, progress, state, summary, verify)
+from . import (adapters, audit, backends, brief, classify, closeout, contracts, gitread,
+               gitwrite, launch, manifest as manifest_module, progress, state, summary, verify)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -181,7 +181,36 @@ def _counts_line(store, run_status):
             continue
         counts[status] = counts.get(status, 0) + 1
     tally = progress.format_counts(counts)
-    return "run %s: %s" % (run_status, tally) if tally else "run %s" % run_status
+    line = "run %s: %s" % (run_status, tally) if tally else "run %s" % run_status
+    # Stale cards, R9: the one notification that ends a run says the board needs a hand. Read
+    # from the store, where `_audit_cards` wrote it just before the terminal record.
+    stale = ((store.audit() or {}).get("count") or 0) if hasattr(store, "audit") else 0
+    if stale:
+        line += "; %d stale card(s)" % stale
+    return line
+
+
+def _audit_cards(cfg):
+    """The run end card audit (stale cards, R5). Reads every Manifest Task's card once and
+    writes the findings under the Lease. Nothing here may stop the run: a failure inside the
+    audit is one finding on the run, and a failure writing it costs the record and not the
+    terminal record that follows."""
+    try:
+        findings = audit.build(cfg.manifest, cfg.store, cfg.adapter, env=cfg.env, live=False)
+    except Exception as exc:
+        findings = [{"class": contracts.AUDIT_FAILED, "task": None,
+                     "text": "the card audit failed: %s" % exc,
+                     "card_status": None, "record_status": None}]
+    try:
+        cfg.store.write_audit(findings)
+    except Exception:
+        pass
+    if cfg.stream is not None:
+        for line in audit.lines(findings):
+            try:
+                cfg.stream(line)
+            except Exception:
+                pass
 
 
 def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
@@ -286,11 +315,13 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
                            % (halt.task_id, halt.halt_class))
                 store.set_cursor(index + 1)
                 continue
+            _audit_cards(config)
             _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
                             config.used_backends, announce=announce)
             wrote_terminal = True
             return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
                               store, store.records())
+        _audit_cards(config)
         _write_terminal(store, env, contracts.RUN_COMPLETED,
                         used_backends=config.used_backends, announce=announce)
         wrote_terminal = True
@@ -824,11 +855,19 @@ def _blocked_route(ctx, halt_class):
     and the run continues. A blocked task is a normal outcome (R23)."""
     stranded = gitwrite.blocked_path(ctx.repo, ctx.default, ctx.branch, ops=ctx.store,
                                      task_id=ctx.task.id)
-    _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"])
+    # Stale cards, R1: the task process moved the card to in review at its first step, and a
+    # blocked task leaves nobody on it. The Closeout is told where the card came from; the
+    # runner reads it back below and never moves it itself.
+    return_to = closeout.return_to_for(ctx.manifest, ctx.store.get(ctx.task.id) or {})
+    _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"], return_to=return_to)
 
     finding = closeout.confirm_blocked_comment(ctx.adapter, ctx.task.id, ctx.baseline_comment_id)
     if finding:
         ctx.findings.append(finding)
+    if return_to:
+        finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, ctx.task.id, return_to)
+        if finding:
+            ctx.findings.append(finding)
     # The class arrives from the digest, so the evidence has to cover every class that can
     # reach here: blocked_envelope wants the blocker, no_envelope the last message, timeout the
     # tree and the minutes. Recording only the stranded head left each of them a placeholder.
@@ -856,7 +895,7 @@ def _blocked_route(ctx, halt_class):
 
 
 def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None, gate=None,
-                  halt_class=None, cause_line=None):
+                  halt_class=None, cause_line=None, return_to=None):
     """Launch the closeout, then bound what it committed before anything is pushed (R53).
 
     The order matters: the check runs against the local head before the push, so a commit
@@ -878,7 +917,7 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         landing_ref=landing_ref, branch=branch or ctx.branch,
         commit_range=commit_range, gate=gate,
         wall_seconds=ctx.launched.wall_seconds, active_seconds=ctx.launched.active_seconds,
-        halt_class=halt_class, cause_line=cause_line,
+        halt_class=halt_class, cause_line=cause_line, return_to=return_to,
         timeout_seconds=ctx.overrides.get("closeout_seconds"),
         home=ctx.home, base_env=ctx.base_env, stream=ctx.stream, heartbeat=ctx.store.heartbeat,
         on_release=ctx.store.release, **ctx.launch_kwargs)
@@ -980,8 +1019,18 @@ def _note_halt(ctx, halt):
         gitwrite.blocked_path(ctx.repo, ctx.default, ctx.branch, ops=ctx.store,
                               task_id=halt.task_id, env=ctx.env)
         record = ctx.store.get(halt.task_id) or {}
+        # Stale cards, R1 and R2. `return_to_for` refuses when the record carries a landing
+        # reference, which is exactly the halt-after-landing case the docstring above names:
+        # that card is closed, and moving it back would undo a landing.
+        return_to = closeout.return_to_for(ctx.manifest, record)
         _run_closeout(ctx, closeout.OUTCOME_HALTED, landing_ref=record.get("landing_ref"),
-                     halt_class=halt.halt_class, cause_line=halt.message)
+                     halt_class=halt.halt_class, cause_line=halt.message, return_to=return_to)
+        if return_to:
+            finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, halt.task_id,
+                                                     return_to)
+            if finding:
+                ctx.findings.append(finding)
+                ctx.store.upsert(halt.task_id, findings=ctx.findings)
     except Exception as exc:
         if ctx.stream is not None:
             ctx.stream("%s: could not comment halt %s on the tracker: %s"

@@ -667,6 +667,40 @@ class StatusBar(CliCase):
             [line for line in lines if line.startswith("progress:")][0]))
 
 
+class AuditVerb(CliCase):
+    """Stale cards, R7 and R8: the verb on demand, and `status` showing the run end audit."""
+
+    def test_audit_after_a_complete_run_finds_every_card_in_agreement(self):
+        """Under the markdown adapter a landed card is checked and a blocked one is not, so a
+        run that landed two and blocked one leaves a board that agrees with the records."""
+        self.complete_run()
+        code, out = self.call("audit", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("every card agrees", out)
+
+    def test_audit_takes_no_lease_and_writes_nothing(self):
+        self.complete_run()
+        holder = self.store()
+        self.assertTrue(holder.acquire().ok)
+        before = json.dumps(holder.read(), sort_keys=True)
+        code, out = self.call("audit", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertEqual(json.dumps(self.store().read(), sort_keys=True), before)
+        holder.release()
+
+    def test_status_prints_the_run_end_audit_the_runner_wrote(self):
+        self.complete_run()
+        self.assertEqual(self.store().audit()["count"], 0)
+        _, out = self.call("status", self.manifest_path)
+        self.assertIn("cards: every card agrees", out)
+        self.assertIn("audited", out)
+
+    def test_summary_json_carries_the_audit(self):
+        self.complete_run()
+        _, out = self.call("summary", self.manifest_path, "--json")
+        self.assertEqual(json.loads(out)["audit"]["count"], 0)
+
+
 class StatusAgainstAShrunkManifest(CliCase):
     """U5: the state directory is keyed on the manifest's real path, so editing the manifest in
     place keeps everything the previous, longer run left behind."""
