@@ -35,7 +35,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _add_follow_options(parser):
-    """The three options both following paths share, added in one place so `run --follow` and
+    """The four options both following paths share, added in one place so `run --follow` and
     `tail` cannot drift apart. `--for` names its destination because `for` is a Python keyword
     and argparse's default destination would be unreachable."""
     parser.add_argument("--phases", action="store_true",
@@ -45,6 +45,9 @@ def _add_follow_options(parser):
     parser.add_argument("--notify", action="store_true",
                         help="fire a macOS notification on each phase event, from the runner "
                              "itself on `run` and from the follower on `tail`")
+    parser.add_argument("--bar", action="store_true",
+                        help="print a progress bar line whenever the counts move, and once a "
+                             "minute in between; never notifies")
 
 
 def build_parser():
@@ -305,7 +308,8 @@ def _follow(args, manifest, store, out, floor=None, proc=None):
             deadline_seconds=getattr(args, "for_seconds", None),
             phases_only=getattr(args, "phases", False),
             notifier=notify.build(getattr(args, "notify", False) and not launched),
-            runner_alive=(lambda: proc.poll() is None) if launched else None)
+            runner_alive=(lambda: proc.poll() is None) if launched else None,
+            bar=getattr(args, "bar", False))
     except KeyboardInterrupt:
         # The operator stopping a follower is an ordinary ending, not a fault, and the runner is
         # in its own session so this never reached it (R49).

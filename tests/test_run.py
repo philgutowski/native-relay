@@ -1849,6 +1849,13 @@ class UnenforcedRun(RunCase):
         self.assertEqual(gitread.rev_parse(self.repo, "origin/main"), origin)
 
 
+def _announced(lines, prefix):
+    """Whether one of the announced lines is this event. Prefix rather than equality: a status
+    move carries the progress phrase after a semicolon, and these cases pin the event, not the
+    counts beside it."""
+    return any(line.startswith(prefix) for line in lines)
+
+
 class PhaseEvents(RunCase):
     """Issue #44, U2: the Runner's own phase events, and their isolation from the run.
 
@@ -1874,14 +1881,27 @@ class PhaseEvents(RunCase):
         outcome = self.go(notifier=self.notifier)
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
         moves = [line for line in self.seen if " is now " in line]
-        self.assertEqual(moves[0], "T-1 is now running")
-        self.assertIn("T-1 is now landed", moves)
-        self.assertIn("T-2 is now blocked", moves)
-        self.assertIn("T-3 is now landed", moves)
+        self.assertTrue(moves[0].startswith("T-1 is now running"), moves[0])
+        self.assertTrue(_announced(moves, "T-1 is now landed"))
+        self.assertTrue(_announced(moves, "T-2 is now blocked"))
+        self.assertTrue(_announced(moves, "T-3 is now landed"))
         # Per task, in the order the runner wrote them, never interleaved: the runner is serial.
         for task_id in ("T-1", "T-2", "T-3"):
             mine = [line for line in moves if line.startswith(task_id)]
-            self.assertEqual(mine[0], "%s is now running" % task_id)
+            self.assertTrue(mine[0].startswith("%s is now running" % task_id), mine[0])
+
+    def test_a_status_move_carries_the_progress_phrase(self):
+        """The half of a notification an operator who walked away actually wants: not only
+        which card moved but how far along the run is. Read from the store after the move was
+        written, so the landed task counts itself."""
+        self.go(notifier=self.notifier)
+        moves = [line for line in self.seen if " is now " in line]
+        first = [line for line in moves if line.startswith("T-1 is now running")][0]
+        self.assertEqual(first, "T-1 is now running; 0 of 3 settled")
+        last = [line for line in moves if line.startswith("T-3 is now landed")][0]
+        self.assertTrue(last.startswith("T-3 is now landed; 3 of 3 settled"), last)
+        # Nothing is left, so no estimate rides on the sentence, least of all a zero.
+        self.assertNotIn("roughly", last)
 
     def test_the_last_announcement_names_the_run_status_and_its_counts(self):
         self.go(notifier=self.notifier)
@@ -1894,8 +1914,8 @@ class PhaseEvents(RunCase):
         lines = []
         outcome = self.go(stream=lines.append)
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
-        self.assertIn("T-1 is now running", lines)
-        self.assertIn("T-3 is now landed", lines)
+        self.assertTrue(_announced(lines, "T-1 is now running"))
+        self.assertTrue(_announced(lines, "T-3 is now landed"))
 
     def test_a_notifier_that_always_raises_changes_nothing_about_the_run(self):
         """KTD5's first half. The runner is unattended: a desktop that refuses a notification
@@ -1923,7 +1943,7 @@ class PhaseEvents(RunCase):
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
         self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
         # The stream failing does not cost the notification.
-        self.assertIn("T-1 is now running", self.seen)
+        self.assertTrue(_announced(self.seen, "T-1 is now running"))
 
     def test_a_none_stream_still_notifies_and_raises_nothing(self):
         """`run.run` guards `stream is not None` at six call sites, so None is a supported
@@ -1931,12 +1951,12 @@ class PhaseEvents(RunCase):
         which would swallow the notification along with the TypeError."""
         outcome = self.go(stream=None, notifier=self.notifier)
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
-        self.assertIn("T-1 is now running", self.seen)
+        self.assertTrue(_announced(self.seen, "T-1 is now running"))
 
     def test_a_caller_supplied_store_still_emits(self):
         store = self.store()
         self.go(store=store, notifier=self.notifier)
-        self.assertIn("T-1 is now running", self.seen)
+        self.assertTrue(_announced(self.seen, "T-1 is now running"))
 
     def test_no_notifier_fires_nothing(self):
         self.go()
@@ -1958,7 +1978,7 @@ class PhaseEventsOnReclaim(RunCase):
         self.closeout_landed("T-3")
         seen = []
         self.go(store=self.reclaiming_store(), notifier=seen.append)
-        self.assertIn("T-1 is now halted", seen)
+        self.assertTrue(_announced(seen, "T-1 is now halted"))
 
 
 class PhaseEventsOnHalt(RunCase):

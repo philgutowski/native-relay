@@ -73,6 +73,11 @@ diminished, only unobserved. A Follower launched beside a run starts from a floo
 that run began, because the state directory outlives any one run and its Task logs are appended to
 rather than replaced.
 
+A Follower's progress bar is not a phase event. It reports counts, how many Tasks the run is done
+with out of how many it has, rather than a moment, so it prints on the Follower's own output and
+never notifies. The phrase a status move carries beside it, the settled count and the estimate,
+is the same report in one clause, and it rides on the phase event rather than being one.
+
 A Follower notifies only for a run somebody else started. One that launched its own run has
 already passed the request for notifications down to that Runner, which outlives it, so it prints
 its lines and stays quiet on the desktop. That is what keeps one phase event to one notification

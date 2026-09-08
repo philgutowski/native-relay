@@ -712,7 +712,8 @@ class Notifications(FollowCase):
             lambda: self.terminal(),
         ])
         self.assertIn("== T-1 %s ==" % tail.PHASE_TASK, fired)
-        self.assertIn("T-1 is now %s" % contracts.STATUS_LANDED, fired)
+        self.assertTrue(any(body.startswith("T-1 is now %s" % contracts.STATUS_LANDED)
+                            for body in fired), fired)
         self.assertIn("run %s" % contracts.RUN_COMPLETED, fired)
         self.assertFalse([body for body in fired if "decoded activity" in body])
 
@@ -871,3 +872,56 @@ class TailAStubRun(CliCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgressBar(FollowCase):
+    """`--bar`: the bar is a line on the stream, printed when its shape moves and on an
+    interval, and never a notification."""
+
+    def bars(self):
+        return [line for line in self.lines if line.startswith("[")]
+
+    def move(self, task_id, status):
+        return lambda: self.store.upsert(task_id, status=status)
+
+    def test_off_by_default(self):
+        self.go(script=[self.move("T-1", contracts.STATUS_LANDED), lambda: self.terminal()])
+        self.assertEqual(self.bars(), [])
+
+    def test_a_bar_prints_when_the_shape_moves_and_not_on_a_quiet_poll(self):
+        """Frozen clock, so the interval never elapses and only a change in the counts or the
+        task in flight can print one: the first poll, running, landed."""
+        self.go(bar=True, clock=lambda: 0.0, script=[
+            self.move("T-1", contracts.STATUS_RUNNING),
+            lambda: None,
+            lambda: None,
+            self.move("T-1", contracts.STATUS_LANDED),
+            lambda: self.terminal(),
+        ])
+        bars = self.bars()
+        self.assertEqual(len(bars), 3, bars)
+        self.assertIn("0 of 3 settled", bars[0])
+        self.assertIn("T-1 running", bars[1])
+        self.assertIn("1 of 3 settled", bars[2])
+
+    def test_a_quiet_run_still_prints_one_per_interval(self):
+        ticks = {"t": 0.0}
+
+        def clock():
+            ticks["t"] += 61.0
+            return ticks["t"]
+
+        self.go(bar=True, clock=clock, bar_every_seconds=60, script=[
+            lambda: None, lambda: None, lambda: self.terminal()])
+        self.assertGreaterEqual(len(self.bars()), 3)
+
+    def test_the_bar_never_notifies(self):
+        fired = []
+        self.go(bar=True, notifier=fired.append, clock=lambda: 0.0, script=[
+            self.move("T-1", contracts.STATUS_LANDED), lambda: self.terminal()])
+        self.assertTrue(self.bars())
+        self.assertFalse([body for body in fired if body.startswith("[")], fired)
+
+    def test_a_status_move_carries_the_progress_phrase(self):
+        self.go(script=[self.move("T-1", contracts.STATUS_LANDED), lambda: self.terminal()])
+        self.assertIn("T-1 is now %s; 1 of 3 settled" % contracts.STATUS_LANDED, self.text)
