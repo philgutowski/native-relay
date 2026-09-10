@@ -8,19 +8,22 @@ component: runner
 severity: high
 root_cause: missing_workflow_step
 resolution_type: workflow_improvement
-last_updated: 2026-08-28
-related_components: [manifest, task-process, permission-mode]
+last_updated: 2026-09-10
+related_components: [manifest, task-process, permission-mode, classify, gitwrite, summary]
 applies_when:
   - "launching claude -p with --permission-mode dontAsk (Claude backend only, see the Scope note)"
   - "a task's plan touches a path under .claude/ (skill, hook, or settings file)"
   - "the allowlist explicitly names Edit and Write"
   - "the run has no human present to approve a permission prompt"
+  - "reading a path_gate halt in a run summary, where the class can come from the transcript scan or from the post run branch diff"
 symptoms:
   - "Edit denied with: Permission to use Edit has been denied because Claude Code is running in don't ask mode"
   - "every other Edit and Write in the same run succeeds; only the .claude/ path is refused"
   - "the run halts asking for an approval nobody can give, then exits clean and zero without merging"
   - "the tracker card carries no blocker comment, so the board looks untouched"
-tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run]
+  - "the summary lists .claude/ edit denials for a task whose own envelope reads status: complete"
+  - "a record carries halt class path_gate while its branch holds finished commits and a clean tree"
+tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run, claude-dir-backstop, evidence-provenance, halt-class-vs-finding]
 ---
 
 # Headless dontAsk mode blocks edits under .claude/ regardless of allowlist
@@ -174,6 +177,52 @@ fi
 Feed that into R37, which already asks the runner to detect a denied tool call in the transcript
 stream. A denial on a `.claude/` path becomes a named, expected shape rather than an unexplained log
 line, so the summary can say what to do about it instead of only reporting it.
+
+### Built 2026-09-10, and its evidence reads like the failure it is not
+
+That backstop exists now. `gitwrite.claude_dir_backstop`
+(`skills/relay/scripts/relay/gitwrite.py:289`) diffs the task branch against the R17 baseline, and
+`local_merge_tail` calls it after checkout and before the gate, so a hit returns `HALT_PATH_GATE`
+with stage `backstop` and leaves the branch in place. It works. What it also does is create a second
+source of `path_gate` evidence that the summary prints in the same words as the first, so a run can
+now halt for the opposite reason to the one this doc was written about and read identically.
+
+One regex, `contracts.CLAUDE_DIR_PATH_REGEX` at `contracts.py:56`, is read at two places:
+
+- **`classify.py:392`, the transcript scan.** A denied `Edit` or `Write` whose `file_path` matches
+  has its finding promoted from `denied_tool` to `path_gate`, with the detail set to
+  `contracts.PATH_GATE_CLAUDE_DIR`. This is the wall from the task's side, work the process tried to
+  do and was refused. It reads the tool input's `file_path` or `notebook_path` only, so a `.claude/`
+  path reached through `Bash` stays a plain `denied_tool` finding and never promotes.
+- **`gitwrite.py:289`, the post run branch diff.** Any `.claude/` path in the diff refuses the merge
+  outright. This is the wall from the runner's side, work the process did do that the runner will
+  not land.
+
+Neither is manifest configurable. There is no allowlist entry, no per task opt out, and no target
+repo exemption, so every task in every repo gets both.
+
+Both fill the same sentence, `contracts.PATH_GATE_CLAUDE_DIR`, which `summary.py:151` renders as a
+check line and `HALT_LINES[path_gate]` renders as the record's Cause line. Word for word identical,
+and neither says which of the two points raised it.
+
+**Findings and halt class have different provenance, and the summary does not say so.** Precedence
+in `classify.py:456` gives a `COMPLETE` envelope `routable = True` and assigns no halt class at all;
+a `path_gate` finding only becomes the halt class on a blocked or absent envelope. So a record
+carrying both a complete envelope and a `path_gate` class did not get that class from the transcript
+scan. It was assigned minutes later by the merge tail from git evidence, while transcript derived
+findings from an earlier phase of the same task rode along on the same record. Reading the findings
+list as an account of why the run stopped is reading two different phases as one event.
+
+**The repair for a backstop refusal is the opposite of the repair for a write denial.**
+
+- A write denial means the work is **unfinished**. The process asked for something the harness would
+  not give and stopped short of doing it. An attended session has to do the work.
+- A backstop refusal means the work is **finished**. The branch carries good commits the runner
+  declined to merge because of what they touch. An attended session has to merge it.
+
+Tell them apart by reading the task process's own return envelope in the stdout log, not by reading
+the findings list. `status: complete` with commits named and a clean tree is a backstop refusal
+whatever the findings say. A blocked envelope, or none at all, is the real stop and ask.
 
 ### Two secondary rules from the same run
 
@@ -350,6 +399,31 @@ The difference between the two versions is not the outcome of the skill edit. A 
 going to make that edit. The difference is whether the runner found that out in the first second or
 the last, and whether the tracker said so.
 
+### IW-179, the backstop firing and the summary reading wrong
+
+2026-09-10, a native mode run against support-workbench. The run halted with class `path_gate`. The
+summary listed four denials: two `.claude/` edit denials, a `Bash` denial on
+`git checkout -- .claude/skills/itg-brief/SKILL.md`, and a `Monitor` denial on a sleep loop. Read
+alone, that says the task died mid work and needs re-running attended.
+
+It did not die. From the stdout log and the transcript:
+
+1. The task ran 169 turns over 36 minutes and spawned 8 review subagents.
+2. It exited `terminal_reason=completed`, `subtype=success`.
+3. It printed an envelope reading `status: complete`, with three commits on its branch and a clean
+   tree.
+4. The two `.claude/` edit denials were a trailing newline probe write and the task's own attempt to
+   revert that probe. Neither was the task's work.
+5. What actually stopped the run was `claude_dir_backstop` refusing a branch that legitimately
+   changed `.claude/skills/itg-brief/SKILL.md`, before the gate ever ran.
+
+The correct repair was the merge repair, not the do-the-work repair: review the branch, run
+`scripts/test.sh`, merge, move the card, then `relay verify` to promote the record from `halted` to
+`landed`. That was done. The merge is `c5c5b11` on support-workbench, and every verify check passed
+including `closing_reference`.
+
+The tell was in the envelope the whole time. The findings list never carried it.
+
 ## Related
 
 - `docs/solutions/workflow-issues/grok-accepts-dontask-then-cancels-every-tool-call.md`: the direct
@@ -358,6 +432,14 @@ the last, and whether the tracker said so.
   work at all. This doc generalizes that an allowlist is a claim about tools and not about paths;
   that one generalizes that a permission mode is a claim about vocabulary and not about behavior.
   Same family, one term further out, and the pair is worth reading together.
+- `docs/solutions/workflow-issues/on-halt-continue-past-task-halt-is-not-the-quota-switch-and-the-path-a-quota-death-takes-decides-whether-the-manifest-votes.md`:
+  the same shape of point from another angle. There, a halt class reaching a record by one route is
+  mistaken for the same class raised by another, and the route decides what the operator should do
+  next. Here it is `path_gate` arriving from the transcript scan or from the branch diff. In both
+  cases the class name is not the whole fact, and the record does not carry the route.
+- `docs/solutions/workflow-issues/a-headless-relay-session-cannot-edit-its-own-permission-gates.md`
+  in support-workbench, not in this repo: it owns the same wall from the task's side and was updated
+  with IW-179 on the same day. Read it there rather than restating it here.
 - `docs/brainstorms/2026-08-25-1240-feat-relay-outer-loop-plan.md`: R5 (exclude a task from
   unattended runs with a reason) is the mechanism this learning reuses; R4, R7, R10, R11, R17, R19,
   R23, R37, and AE2 are the requirements it sharpens.
