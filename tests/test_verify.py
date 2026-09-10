@@ -355,6 +355,59 @@ class AgainstTheRealMarkdownAdapter(VerifyCase):
         self.assertTrue(verdict.checks["card_terminal"]["blocking"])
 
 
+class NoPush(VerifyCase):
+    """Issue #15. Under shipping.push = false the landing is the local default branch, so the
+    verdict comes from local git and the tracker, and the remote is neither fetched nor
+    consulted."""
+
+    def no_push_manifest(self):
+        return self.manifest(self.toml.replace('mode = "local_merge"',
+                                               'mode = "local_merge"\npush = false'))
+
+    def land_locally(self):
+        return commit_on_branch(self.repo, "main", {"src/feature.py": "value = 1\n"}, "task work")
+
+    def test_head_equals_remote_is_a_non_blocking_skip_carrying_its_reason_and_both_shas(self):
+        sha = self.land_locally()
+        verdict = verify.verify(self.no_push_manifest(), self.record(landing_ref=sha),
+                                FakeAdapter(), scope=verify.SCOPE_CODE)
+        check = verdict.checks["head_equals_remote"]
+        self.assertEqual(check["result"], verify.SKIPPED)
+        self.assertFalse(check["blocking"])
+        self.assertIn("shipping.push is false", check["evidence"]["reason"])
+        self.assertEqual(check["evidence"]["local_sha"], sha)
+        self.assertEqual(check["evidence"]["remote_sha"], self.baseline)
+        self.assertEqual(verdict.checks["new_commit_since_baseline"]["result"], verify.PASS)
+
+    def test_a_local_merge_and_a_terminal_card_is_landed_with_the_remote_untouched(self):
+        sha = self.land_locally()
+        verdict = verify.verify(self.no_push_manifest(), self.record(landing_ref=sha),
+                                self.landed_adapter(sha))
+        self.assertTrue(verdict.landed, verdict.checks)
+        self.assertEqual(gitread.rev_parse(self.repo, "origin/main"), self.baseline)
+
+    def test_the_same_local_merge_under_push_true_is_not_landed(self):
+        sha = self.land_locally()
+        verdict = verify.verify(self.manifest(), self.record(landing_ref=sha),
+                                self.landed_adapter(sha))
+        self.assertFalse(verdict.landed)
+
+    def test_do_fetch_is_not_honoured(self):
+        from unittest import mock
+        sha = self.land_locally()
+        with mock.patch.object(verify.gitread, "fetch") as fetch:
+            verify.verify(self.no_push_manifest(), self.record(landing_ref=sha),
+                          self.landed_adapter(sha), do_fetch=True)
+        fetch.assert_not_called()
+
+    def test_a_repo_with_no_remote_lands(self):
+        _repo.git(self.repo, "remote", "remove", "origin")
+        sha = self.land_locally()
+        verdict = verify.verify(self.no_push_manifest(), self.record(landing_ref=sha),
+                                self.landed_adapter(sha))
+        self.assertTrue(verdict.landed, verdict.checks)
+
+
 class StartupReverify(VerifyCase):
     def store_for(self, manifest):
         return state.StateStore(manifest.path, manifest.project.repo,

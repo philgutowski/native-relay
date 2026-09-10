@@ -5,7 +5,9 @@ product. The sequence after a task process exits is not negotiable and not condi
 that process said about itself: classify the exit from the transcript, gate the branch head,
 merge, push, verify the code scope, run the closeout, check what it committed, push that, mirror,
 verify the full scope, and only then delete the branch and move on. A task is landed when the
-runner's own verify says so and never before (R20).
+runner's own verify says so and never before (R20). Under `shipping.push = false` (issue #15)
+every push in that sequence is skipped and the landing is the local default branch; each site
+reads `manifest.pushes`, and the no push plan's read site table names them.
 
 Three properties of the loop are worth naming because they are easy to lose in a refactor.
 
@@ -398,7 +400,8 @@ def _continue_past(cfg, halt):
         return False
     try:
         result = gitwrite.resume_disposition(cfg.repo, cfg.default, ops=cfg.store,
-                                             task_id=halt.task_id, env=cfg.env)
+                                             task_id=halt.task_id, env=cfg.env,
+                                             pushes=manifest_module.pushes(cfg.manifest))
     except gitread.GitError as exc:
         halt.evidence["resume"] = {"check": "git_error", **_git_error_fields(exc)}
         return False
@@ -551,7 +554,8 @@ def _one_task(cfg, task):
 
     # Pre-flight (R16). A failure here is a halt: the repo is not in the state a task process
     # can start from, and no launch may happen until the operator has looked.
-    preflight = gitwrite.preflight(repo, default, branch, env=env)
+    preflight = gitwrite.preflight(repo, default, branch, env=env,
+                                   pushes=manifest_module.pushes(manifest))
     if not preflight.ok:
         raise _Halt(task.id, contracts.HALT_UNCLEAN_EXIT,
                     "pre flight refused before launching %s on check %s"
@@ -795,7 +799,7 @@ def _merge_route(ctx):
             ctx.store.path("gate", ctx.task.id + ".log"), ops=ctx.store, env=ctx.env,
             gate_timeout_seconds=ctx.overrides.get("gate_seconds"),
             still_ours=lambda: not beat.lost,
-            branch=ctx.branch)
+            branch=ctx.branch, pushes=manifest_module.pushes(ctx.manifest))
     finally:
         beat.stop()
     if not tail.ok:
@@ -822,7 +826,9 @@ def _merge_route(ctx):
                   commit_range="%s..%s" % (ctx.baseline_sha[:7], (tail.merge_sha or "")[:7]),
                   gate=gate_summary)
 
-    if ctx.manifest.project.mirror:
+    # A mirror is a push by another name. validate refuses a mirror under shipping.push = false;
+    # this is the backstop for a manifest built by hand past validate (KTD4 of the no push plan).
+    if ctx.manifest.project.mirror and manifest_module.pushes(ctx.manifest):
         pushed = gitwrite.mirror_push(ctx.repo, list(ctx.manifest.project.mirror), ops=ctx.store,
                                       task_id=ctx.task.id, env=ctx.env,
                                       timeout=ctx.overrides.get("gate_seconds"))
@@ -944,7 +950,10 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         raise _Halt(ctx.task.id, scope.halt_class,
                     summary.cause_line(scope.halt_class, evidence), evidence)
 
-    if gitread.rev_parse(ctx.repo, "HEAD") != pre_closeout_head:
+    # Under shipping.push = false the closeout's commit stays on the local default branch with
+    # the landing it records; the scope check above still bounded it.
+    if (manifest_module.pushes(ctx.manifest)
+            and gitread.rev_parse(ctx.repo, "HEAD") != pre_closeout_head):
         pushed = gitwrite.push(ctx.repo, ["origin", ctx.default], ops=ctx.store,
                                task_id=ctx.task.id, env=ctx.env,
                                timeout=ctx.overrides.get("gate_seconds"))
@@ -988,6 +997,9 @@ def _note_halt(ctx, halt):
        the same check pre-flight and the resume disposition already share): `local_merge_tail`'s
        push step can fail after the merge already applied locally, and a commit the halted
        closeout makes on top would otherwise carry that unverified merge to origin alongside it.
+       Under `shipping.push = false` nothing is carried anywhere and local runs ahead by design,
+       so the same seam, `gitwrite.default_in_sync`, asks only that the remote not have
+       diverged, which is what pre flight and the resume disposition ask too.
     4. The lease can no longer be confirmed as this runner's: the same freshness check
        `_continue_past` already applies before its own repository mutation.
 
@@ -1006,7 +1018,9 @@ def _note_halt(ctx, halt):
                 ctx.stream("%s: tree left dirty on %s; skipping the halt comment"
                            % (halt.task_id, gitread.current_branch(ctx.repo)))
             return
-        if not gitwrite.head_equals_remote(ctx.repo, ctx.default, {}):
+        in_sync, _check = gitwrite.default_in_sync(ctx.repo, ctx.default,
+                                                   manifest_module.pushes(ctx.manifest), {})
+        if not in_sync:
             if ctx.stream is not None:
                 ctx.stream("%s: %s is not in sync with origin/%s; skipping the halt comment"
                            % (halt.task_id, ctx.default, ctx.default))

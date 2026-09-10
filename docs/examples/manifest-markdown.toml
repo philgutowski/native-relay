@@ -8,7 +8,8 @@
 #   - [x] T-2 Wire the loop (abc1234) a closed task and its landing reference
 #
 # The closeout process edits the line and commits it; the runner pushes that commit under the
-# gate and then confirms the close by reading the file at the remote default branch.
+# gate and then confirms the close by reading the file at the remote default branch. Under
+# push = false nothing is pushed, and the file is read at the local default branch instead.
 
 [project]
 repo = "~/code/example-tool"
@@ -28,6 +29,10 @@ in_review_status = "in review"
 
 [shipping]
 mode = "local_merge"
+# true pushes the merge, the closeout's commit, and any mirror. false merges each task locally
+# and pushes nothing: the repo needs no origin, mirror must be empty, and the summary ends with
+# the one git push that ships the default branch.
+push = true
 
 [permissions]
 allowed = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "TodoWrite"]

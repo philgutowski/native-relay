@@ -161,6 +161,11 @@ class Manifest:
     tasks: tuple
     raw: dict = field(repr=False, compare=False)
     defaults_applied: tuple = ()
+    # `[shipping] push`. False merges each Task to the default branch locally and never pushes
+    # anything. Read it through pushes(), which is also the enumeration point for every site
+    # that pushes, fetches, or compares against origin (docs/plans/2026-09-10-feat-no-push-
+    # shipping-plan.md, the read site table). Appended last so no positional constructor moves.
+    shipping_push: bool = True
 
 
 @dataclass
@@ -301,6 +306,8 @@ def load(path):
         on_halt=on_halt,
         tasks=tasks,
         raw=raw,
+        # Not coerced with bool(): validate refuses a non boolean, and bool("false") is True.
+        shipping_push=pick(raw["shipping"], "shipping", "push", True),
         defaults_applied=tuple(defaults),
     )
 
@@ -333,6 +340,15 @@ def task_allowed_paths(manifest):
     and the tracker file. That set would refuse every code Task's own commit.
     """
     return tuple(manifest.permissions.task_allowed_paths) or None
+
+
+def pushes(manifest):
+    """Whether the Runner pushes: the merge, the closeout commit, and any mirror.
+
+    Anything but a literal False pushes, so a value validate would refuse never turns pushing
+    off by accident. Every site that pushes, fetches, or compares against origin reads this, and
+    the plan's read site table names each one."""
+    return manifest.shipping_push is not False
 
 
 def _backend_readiness_errors(manifest, env):
@@ -386,6 +402,15 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         if pattern not in disallowed:
             disallowed.append(pattern)
             warn("permissions.disallowed was missing %s; added" % pattern)
+    if not pushes(manifest):
+        # R2: under push false the Task process gets the closeout's refusal of every push
+        # spelling, so a push of its own branch is refused at the permission layer and not only
+        # by the brief's instruction.
+        for pattern in contracts.CLOSEOUT_DISALLOWED_EXTRA:
+            if pattern not in disallowed:
+                disallowed.append(pattern)
+                warn("permissions.disallowed was missing %s, which shipping.push = false "
+                     "requires; added" % pattern)
     result.disallowed = disallowed
     # R21, KTD13. Unset is the common case and means the whole repository, so only a set value is
     # checked. An entry is a directory prefix ending in `/` or an exact file path, and a leading
@@ -420,6 +445,12 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         err("shipping.mode %s is not implemented: the run loop has no pull request sequence, so "
             "every task would halt without one being opened or checked. Use local_merge."
             % manifest.shipping_mode)
+    if not isinstance(manifest.shipping_push, bool):
+        err("shipping.push must be true or false, not %r" % (manifest.shipping_push,))
+    elif not manifest.shipping_push and manifest.project.mirror:
+        # R8. A mirror is a push by another name, so the pair cannot mean anything coherent.
+        err("project.mirror is set but shipping.push is false; a mirror is a push, so remove "
+            "the mirror or turn push on")
     adapter = manifest.tracker.adapter
     if adapter not in ADAPTERS:
         err("tracker.adapter must be one of %s" % ", ".join(ADAPTERS))
@@ -440,8 +471,8 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         err("tracker.in_review_status is required in local_merge mode (KTD6 uses it to route a missing envelope)")
     elif manifest.shipping_mode == "local_merge" and adapter == "markdown":
         # Finding 20, decided 2026-08-26. The markdown line has two states, open and closed, and
-        # the adapter reads it at the remote default branch head, which a task branch never
-        # reaches before the merge. KTD6's rescue route for a missing envelope therefore cannot
+        # the adapter reads it at the default branch head (the remote's, or the local one under
+        # shipping.push = false), which a task branch never reaches before the merge. KTD6's rescue route for a missing envelope therefore cannot
         # fire under this adapter, and the manifest field only names the status the brief tells
         # the task to write. Say so rather than let an operator wait for a route that never comes.
         warn("tracker.in_review_status is %r, but the markdown adapter reports only open or closed, "
@@ -534,8 +565,12 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         check_repo = False
     if check_repo:
         remotes = gitread.remotes(repo)
-        if manifest.shipping_mode == "local_merge" and "origin" not in remotes:
-            err("shipping.mode local_merge requires an origin remote to push to")
+        # R3. A no push run never talks to origin except for a best effort fetch, so a repo with
+        # no remote configured is a legitimate target.
+        if (manifest.shipping_mode == "local_merge" and pushes(manifest)
+                and "origin" not in remotes):
+            err("shipping.mode local_merge requires an origin remote to push to; set "
+                "shipping.push = false to merge locally without one")
         for key in ("user.name", "user.email"):
             if not gitread.config_get(repo, key, env):
                 err("git config %s does not resolve in %s; the runner's merge authors a commit" % (key, repo))

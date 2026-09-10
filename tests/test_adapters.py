@@ -5,6 +5,7 @@ git read wrapper for markdown), so no test here touches a network or invokes `gh
 be absent from the machine entirely. The shared contract runs against all three.
 """
 import os
+import re
 import tempfile
 import unittest
 
@@ -482,6 +483,42 @@ class Markdown(AdapterCase):
         result = self.markdown().status("T-1")
         self.assertIsNotNone(result["skipped"])
         self.assertEqual(self.markdown().candidates(), [])
+
+
+class MarkdownWithoutPush(AdapterCase):
+    """Issue #15. Under shipping.push = false the closeout's commit never reaches origin, so the
+    adapter reads the local default branch head, and still never the working tree."""
+
+    def no_push(self):
+        text = self.toml.replace('mode = "local_merge"', 'mode = "local_merge"\npush = false')
+        return md_adapter.MarkdownAdapter(self.manifest(text, name="no-push.toml"))
+
+    def close_t1(self, commit=True):
+        path = os.path.join(self.repo, "tracker.md")
+        with open(path) as handle:
+            text = handle.read()
+        with open(path, "w") as handle:
+            handle.write(re.sub(r"^- \[ \] T-1 (.*)$", r"- [x] T-1 \1 (cafe123)", text,
+                                count=1, flags=re.M))
+        if commit:
+            _repo.git(self.repo, "commit", "-qam", "close T-1 locally")
+
+    def test_the_file_is_read_at_the_local_default_branch_head(self):
+        self.close_t1()
+        self.assertTrue(self.no_push().status("T-1")["terminal"])
+        self.assertFalse(self.markdown().status("T-1")["terminal"],
+                         "push true must still read origin/main")
+
+    def test_the_working_tree_is_still_not_read(self):
+        self.close_t1(commit=False)
+        self.assertFalse(self.no_push().status("T-1")["terminal"])
+
+    def test_the_landed_instruction_does_not_promise_a_push(self):
+        local = self.no_push().closeout_instructions(md_adapter.OUTCOME_LANDED)
+        self.assertIn("do not push", local)
+        self.assertNotIn("runner pushes", local)
+        self.assertIn("runner pushes",
+                      self.markdown().closeout_instructions(md_adapter.OUTCOME_LANDED))
 
 
 class Factory(AdapterCase):

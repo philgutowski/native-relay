@@ -129,8 +129,9 @@ def cmd_validate(args, env, out):
     if not result.ok:
         out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(result.errors)))
         return EXIT_CONFIG
-    out.write("%s is valid: %d task(s), %s adapter, %s mode\n"
-              % (args.manifest, len(manifest.tasks), manifest.tracker.adapter, manifest.shipping_mode))
+    out.write("%s is valid: %d task(s), %s adapter, %s mode%s\n"
+              % (args.manifest, len(manifest.tasks), manifest.tracker.adapter, manifest.shipping_mode,
+                 "" if manifest_module.pushes(manifest) else ", push off: nothing will be pushed"))
     out.write("closeout may touch: %s\n" % ", ".join(result.allowed_paths))
     if args.list_candidates:
         adapter, failure = _adapter_for(manifest, env, out)

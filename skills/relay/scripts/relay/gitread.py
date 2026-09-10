@@ -85,6 +85,17 @@ def fetch(repo, remote="origin", env=None):
     run(repo, ["fetch", "--quiet", remote], env=env)
 
 
+def is_ancestor(repo, ancestor, descendant):
+    """True when `ancestor` is reachable from `descendant`, equal included. `merge-base
+    --is-ancestor` answers with its exit code, 0 yes and 1 no; anything else means git could not
+    answer, which raises rather than reading as either."""
+    args = ["merge-base", "--is-ancestor", ancestor, descendant]
+    proc = run(repo, args, check=False)
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitError(["git", "-C", repo] + args, proc.returncode, proc.stderr)
+
+
 def branch_exists(repo, name):
     proc = run(repo, ["show-ref", "--verify", "--quiet", "refs/heads/" + name], check=False)
     return proc.returncode == 0

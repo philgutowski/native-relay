@@ -87,12 +87,16 @@ effort = "low"
 """
 
 HELPER = '''
+import os
 import subprocess
 import sys
 
 
 def sha():
-    proc = subprocess.run(["git", "rev-parse", "origin/main"], capture_output=True, text=True)
+    # The landing the closeout records. origin/main after the runner's push; under
+    # shipping.push = false nothing is pushed, so the no push cases point this at main.
+    ref = os.environ.get("RELAY_HELPER_REF", "origin/main")
+    proc = subprocess.run(["git", "rev-parse", ref], capture_output=True, text=True)
     return proc.stdout.strip()
 
 
@@ -1614,7 +1618,7 @@ class ContinuePastGuards(RunCase):
         store = self.store()
         store.acquire()
 
-        def explode(repo, default_branch, ops=None, task_id=None, env=None):
+        def explode(repo, default_branch, ops=None, task_id=None, env=None, pushes=True):
             raise gitread.GitError(["git", "checkout", "main"], 128, "bad ref main")
 
         original = gitwrite.resume_disposition
@@ -1632,7 +1636,7 @@ class ContinuePastGuards(RunCase):
         store = self.store()
         store.acquire()
 
-        def explode(repo, default_branch, ops=None, task_id=None, env=None):
+        def explode(repo, default_branch, ops=None, task_id=None, env=None, pushes=True):
             raise RuntimeError("the disposition blew up")
 
         original = gitwrite.resume_disposition
@@ -2088,3 +2092,131 @@ class AuditUnderMarkdown(RunCase):
         self.assertNotIn(contracts.CARD_LEFT_IN_REVIEW,
                          [f["class"] for f in blocked["findings"]])
         self.assertNotIn("stale", seen[-1])
+
+
+NO_PUSH_MANIFEST = MANIFEST.replace('mode = "local_merge"', 'mode = "local_merge"\npush = false')
+
+
+class NoPushRun(RunCase):
+    """Issue #15, end to end. Under shipping.push = false the bare origin must hold exactly the
+    refs it held before the run, and the store's git op log must hold no push of any kind: that
+    log is the one place every site the plan's read site table names would have to show up, so a
+    site that forgot the flag fails here rather than in a real run."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_manifest(NO_PUSH_MANIFEST)
+
+    def write_manifest(self, text, **replacements):
+        text = text.replace("__REPO__", self.repo)
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text)
+        self.manifest = mf.load(self.manifest_path)
+
+    def base_env(self):
+        return dict(super().base_env(), RELAY_HELPER_REF="main")
+
+    def bare_refs(self):
+        return _repo.git(self.repo + ".git", "show-ref").stdout
+
+    def pushes_recorded(self):
+        ops = (self.store().read() or {}).get("git_ops") or []
+        return [entry for entry in ops if entry["op"] in ("push", "mirror_push")]
+
+    def tracker_at_local_main(self):
+        return gitread.show(self.repo, "main", "tracker.md") or ""
+
+    def queue_land_block_land(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+
+    def test_three_tasks_land_block_and_land_and_nothing_reaches_the_remote(self):
+        before = self.bare_refs()
+        origin_before = gitread.rev_parse(self.repo, "origin/main")
+        self.queue_land_block_land()
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+
+        records = self.store().records()
+        self.assertEqual(records["T-1"]["status"], contracts.STATUS_LANDED)
+        self.assertEqual(records["T-2"]["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(records["T-3"]["status"], contracts.STATUS_LANDED)
+        self.assertEqual(records["T-3"]["verify"]["checks"]["head_equals_remote"]["result"],
+                         verify.SKIPPED)
+
+        self.assertEqual(self.bare_refs(), before)
+        self.assertEqual(gitread.rev_parse(self.repo, "origin/main"), origin_before)
+        self.assertEqual(self.pushes_recorded(), [])
+
+        tracker = self.tracker_at_local_main()
+        self.assertIn("- [x] T-1 Add the brief renderer (", tracker)
+        self.assertIn("  - 2026-08-25 blocked on the design question", tracker)
+        self.assertIn("- [x] T-3 Write the summary (", tracker)
+        self.assertEqual(self.relay_branches(), ["relay/T-2"])
+        self.assertEqual(gitread.current_branch(self.repo), "main")
+
+        data = summary_module.build(self.manifest, self.store())
+        self.assertEqual(data["pending_checks"][-1]["kind"], "unpushed")
+        self.assertIn("push origin main", data["pending_checks"][-1]["text"])
+
+    def test_a_repo_with_no_remote_runs_end_to_end(self):
+        _repo.git(self.repo, "remote", "remove", "origin")
+        self.queue_land_block_land()
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        records = self.store().records()
+        self.assertEqual(records["T-1"]["status"], contracts.STATUS_LANDED)
+        self.assertEqual(records["T-3"]["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.pushes_recorded(), [])
+
+    def test_a_halted_task_is_commented_and_continued_past_with_main_ahead_of_origin(self):
+        """Three seams at once. The halt comment guard and the resume disposition both run with
+        local main already ahead of origin from T-1, which push true would refuse at both, and
+        T-3's pre flight runs with it further ahead still."""
+        self.write_manifest(NO_PUSH_MANIFEST + "\n[on_halt]\ncontinue_past_task_halt = true\n",
+                            **{'command = ["true"]': "command = %s" % json.dumps(
+                                ["bash", "-c", GATE_REFUSES_SH % "src/t_2.py"])})
+        before = self.bare_refs()
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_success("T-2")
+        self.closeout_halted("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        records = self.store().records()
+        self.assertEqual(records["T-2"]["halt_class"], contracts.HALT_GATE_REFUSED)
+        self.assertTrue(records["T-2"]["continued_past"])
+        self.assertEqual(records["T-3"]["status"], contracts.STATUS_LANDED)
+        self.assertIn("  - 2026-08-25 blocked on the design question",
+                      self.tracker_at_local_main(), "the halt comment guard skipped the comment")
+        self.assertEqual(self.bare_refs(), before)
+        self.assertEqual(self.pushes_recorded(), [])
+
+    def test_the_task_process_launches_with_every_push_spelling_refused(self):
+        self.queue_land_block_land()
+        self.go()
+        args = self.store().get("T-1")["args"]
+        disallowed = args[args.index("--disallowedTools") + 1]
+        for pattern in contracts.CLOSEOUT_DISALLOWED_EXTRA:
+            self.assertIn(pattern, disallowed)
+
+    def test_a_mirror_built_past_validate_is_never_pushed(self):
+        """KTD4's backstop. validate refuses this manifest; a caller that builds one by hand
+        still cannot reach a push through the mirror."""
+        self.manifest = replace(self.manifest, project=replace(
+            self.manifest.project, mirror=("origin", "main:release")))
+        before = self.bare_refs()
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.go()
+        self.assertEqual(self.pushes_recorded(), [])
+        self.assertEqual(self.bare_refs(), before)

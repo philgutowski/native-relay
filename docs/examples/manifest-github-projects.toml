@@ -25,6 +25,10 @@ in_review_status = "In review"
 
 [shipping]
 mode = "local_merge"
+# true pushes the merge, the closeout's commit, and any mirror. false merges each task locally
+# and pushes nothing: the repo needs no origin, mirror must be empty, and the summary ends with
+# the one git push that ships the default branch.
+push = true
 
 [permissions]
 allowed = ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "Agent", "TodoWrite"]
