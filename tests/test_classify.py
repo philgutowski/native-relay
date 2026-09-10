@@ -121,6 +121,10 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(gates[0]["tool"], "Edit")
         self.assertTrue(gates[0]["target"].endswith(".claude/skills/example-brief/SKILL.md"))
         self.assertEqual(gates[0]["detail"], contracts.PATH_GATE_CLAUDE_DIR)
+        self.assertNotEqual(contracts.PATH_GATE_CLAUDE_DIR,
+                            contracts.PATH_GATE_CLAUDE_DIR_BACKSTOP,
+                            "issue #8: the transcript raiser and the backstop must not share "
+                            "a sentence, because their repairs are opposites")
         self.assertIsNotNone(gates[0]["tool_use_line"])
         self.assertEqual(r["halt_class"], contracts.HALT_PATH_GATE)
         self.assertIn(contracts.HALT_NO_ENVELOPE, classes(r), "the missing envelope stays visible")
@@ -226,7 +230,12 @@ class Fixtures(unittest.TestCase):
 class DenialTargets(unittest.TestCase):
     def test_bash_command_naming_claude_dir_stays_denied_tool(self):
         """KTD6 promotes to path_gate from input.file_path only; a denied Bash command that
-        merely mentions the directory is a plain denial with the command as its target."""
+        merely mentions the directory is a plain denial with the command as its target.
+
+        Issue #8 asked whether that should change and the answer is no, which this pins. A Bash
+        denial comes from the command allowlist rather than from the path gate, so promoting it
+        would assert an unobserved cause, hand the record a halt class through classify's
+        precedence, and print the attended edit repair for a write nobody attempted."""
         import json
         import tempfile
         lines = [

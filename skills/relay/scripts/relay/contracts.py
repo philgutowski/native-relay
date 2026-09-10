@@ -420,12 +420,36 @@ AUDIT_FAILED = "audit_failed"
 AUDIT_CLASSES = (AUDIT_STALE_IN_REVIEW, AUDIT_REOPENED, AUDIT_CLOSED_UNLANDED,
                  AUDIT_UNREADABLE, AUDIT_FAILED)
 
-# The .claude/ backstop's operator sentence. HALT_LINES[path_gate] is {detail}; this
-# raiser and classify's path_gate promotion fill it so the Cause line stays true.
+# The two .claude/ operator sentences, one per raiser of HALT_PATH_GATE from
+# CLAUDE_DIR_PATH_REGEX (issue #8). HALT_LINES[path_gate] is {detail}, so the raiser writes the
+# whole sentence and the Cause line says which wall was hit. They are separate because the
+# repairs are opposites: one task's work is unfinished, the other's is finished and unmerged.
+# docs/solutions/workflow-issues/headless-dontask-blocks-claude-dir-edits.md carries the
+# evidence, under the Examples heading for the run this split came from.
+#
+# Both are written in the third person, describing a state rather than instructing a reader.
+# They are Cause lines, and a Cause line reaches the Closeout process's brief through
+# classify.finding_line, where a second person imperative would be an instruction to an agent
+# whose whole brief is to record the outcome and touch nothing. The operator's imperative lives
+# in summary's checks by hand, which no process but the operator ever reads.
+#
+# classify's transcript promotion. The task asked the harness for a write and was refused, so
+# the work never happened.
 PATH_GATE_CLAUDE_DIR = (
-    "edit under .claude/ denied by the task's permission posture; "
-    "apply attended, see solutions doc"
+    "edit under .claude/ denied by the task's permission posture; the work is unfinished and "
+    "needs an attended session to do it, see solutions doc"
 )
+# gitwrite.local_merge_tail's backstop. The task did the work and the runner declined to land
+# it, so the branch holds finished commits. Formatted at the raise site, not here: a {field}
+# inside a filled {detail} is never expanded a second time.
+PATH_GATE_CLAUDE_DIR_BACKSTOP = (
+    "the merge tail refused {branch} because its diff touches {paths}; the work is finished and "
+    "needs an attended gate and merge, not a rerun, see solutions doc"
+)
+# The one merge tail stage name read outside gitwrite: `summary` groups the backstop refusal's
+# check line by it, because that check names the opposite repair to the transcript raiser's.
+# Every other stage stays a literal at its own TailResult, since nothing else reads them.
+TAIL_STAGE_BACKSTOP = "backstop"
 
 HALT_CLASSES = (
     HALT_LANDED,

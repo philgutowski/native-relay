@@ -354,7 +354,11 @@ def startup_reverify(manifest, store, adapter, pr_probe=None, env=None, now=time
         if not verdict.landed:
             store.upsert(task_id, verify=verdict.as_dict())
             continue
+        # `halt_stage` clears with the class it qualifies (issue #8). This promotion is the
+        # repair the backstop refusal's own Cause line asks for, so leaving the stage behind
+        # would print "refused at the backstop step" under a record that has now landed.
         store.upsert(task_id, status=contracts.STATUS_LANDED, halt_class=contracts.HALT_LANDED,
+                     halt_stage=None,
                      landing_ref=record.get("landing_ref") or verdict.evidence.get("landing_ref"),
                      verify=verdict.as_dict(), continued_past=False)
         promoted.append(task_id)

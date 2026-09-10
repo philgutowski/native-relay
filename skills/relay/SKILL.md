@@ -268,7 +268,7 @@ The classes and what they mean for the operator:
 | `remote_advanced` | the default branch moved during the task, locally or at the remote (the evidence's `reason` says which), or the merge conflicted | rebase or redo the task branch by hand, resume |
 | `partial_landing` | the code is on the remote but the card did not move | move the card by hand, then run `verify` for that task |
 | `tracker_write_denied` | a tracker write was refused, so the card stayed put | check the tracker credentials, move the card, then `verify` |
-| `path_gate` | the task needs an edit under `.claude/`, which the task's backend permission posture refuses whatever the allowlist says | apply that edit attended, then resume |
+| `path_gate` | one of two walls around `.claude/`, and the record's `halt_stage` says which. No stage: the task asked for an edit there and its permission posture refused it whatever the allowlist says, so the work is unfinished. Stage `backstop`: the task finished and the merge tail refused a branch whose diff touches `.claude/` | read the cause line, which names the repair its own raiser implies. Unfinished work needs an attended session to do it, then a resume. A refused branch needs an attended gate and merge, then `verify` for that task, never a rerun |
 | `closeout_out_of_scope` | the closeout committed outside its allowed paths; the runner reset it | look at what it tried to write, then resume |
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
 | `unclean_exit` | the process left a dirty tree, or claimed to finish and left nothing to merge | inspect the tree, clean it, resume |

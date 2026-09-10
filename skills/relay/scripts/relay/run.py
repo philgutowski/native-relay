@@ -616,7 +616,7 @@ def _one_task(cfg, task):
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
-                 brief_sha256=brief_sha, halt_class=None,
+                 brief_sha256=brief_sha, halt_class=None, halt_stage=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
                  unenforced_restrictions=unenforced)
@@ -803,7 +803,11 @@ def _merge_route(ctx):
     finally:
         beat.stop()
     if not tail.ok:
-        ctx.store.upsert(ctx.task.id, halt_evidence=tail.evidence)
+        # `halt_stage` alongside the evidence (issue #8). Two tail refusals can carry the same
+        # halt class and mean different repairs, path_gate being the pair the record could not
+        # tell apart: the backstop stage is a finished branch the Runner declined to land, while
+        # the same class from classify's transcript scan is work that never happened.
+        ctx.store.upsert(ctx.task.id, halt_evidence=tail.evidence, halt_stage=tail.stage)
         raise _Halt(ctx.task.id, tail.halt_class,
                     summary.cause_line(tail.halt_class, tail.evidence),
                     tail.evidence)

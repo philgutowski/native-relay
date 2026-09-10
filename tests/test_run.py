@@ -491,6 +491,63 @@ class BlockedByPathGate(RunCase):
         self.assertEqual(records["T-3"]["status"], contracts.STATUS_LANDED)
 
 
+class PathGateBackstopHalt(RunCase):
+    """Issue #8, the other raiser. The card never names a `.claude/` path, so the pre-flight
+    scan lets the task launch, the process finishes its work, and the merge tail's backstop
+    refuses the branch. The record must say the refusal came from the backstop, and its Cause
+    line must ask for the merge rather than for the work."""
+
+    BRANCH_TOUCHES_CLAUDE_DIR_SH = """set -e
+git checkout -q -b relay/T-1 main
+mkdir -p src .claude/skills/x
+echo "value = 1" > src/t_1.py
+echo "# skill" > .claude/skills/x/SKILL.md
+git add -A
+git commit -q -m "T-1 work"
+"""
+
+    def test_the_record_names_the_backstop_and_asks_for_an_attended_merge(self):
+        self.queue_entry("success.jsonl", self.BRANCH_TOUCHES_CLAUDE_DIR_SH)
+        self.closeout_halted("T-1")
+
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_HALTED, outcome.message)
+        record = self.store().get("T-1")
+        self.assertEqual(record["halt_class"], contracts.HALT_PATH_GATE)
+        self.assertEqual(record["halt_stage"], contracts.TAIL_STAGE_BACKSTOP)
+        self.assertIn(".claude/skills/x/SKILL.md", record["halt_evidence"]["paths"])
+        cause = record["halt_message"]
+        self.assertNotEqual(cause, contracts.PATH_GATE_CLAUDE_DIR)
+        self.assertIn("needs an attended gate and merge", cause)
+        self.assertIn("relay/T-1", cause)
+        self.assertTrue(gitread.branch_exists(self.repo, "relay/T-1"),
+                        "the branch the operator has to merge must survive the halt")
+
+    def test_the_backstop_sentence_reaches_the_closeout_brief(self):
+        """The contract this change crosses: `HALT_LINES` is shared, so the sentence goes to
+        the process that writes the tracker card, not only to the run summary."""
+        self.queue_entry("success.jsonl", self.BRANCH_TOUCHES_CLAUDE_DIR_SH)
+        self.closeout_halted("T-1")
+
+        self.go()
+        with open(self.store().path("briefs", "T-1.closeout.md")) as handle:
+            brief_text = handle.read()
+        self.assertIn("needs an attended gate and merge", brief_text)
+        self.assertNotIn("the work is unfinished", brief_text)
+
+    def test_the_summary_check_line_asks_for_the_merge(self):
+        self.queue_entry("success.jsonl", self.BRANCH_TOUCHES_CLAUDE_DIR_SH)
+        self.closeout_halted("T-1")
+
+        self.go()
+        data = summary_module.build(self.manifest, self.store())
+        kinds = [check["kind"] for check in data["pending_checks"]]
+        self.assertIn("path_gate_backstop", kinds)
+        self.assertNotIn("path_gate_denial", kinds)
+        self.assertIn("refused at the backstop step of the merge tail",
+                      summary_module.render(data))
+
+
 class UnreadableEvidenceNeverRescues(RunCase):
     """R20, KTD5. The no envelope rescue route merges on commits plus a card in the in review
     status. Evidence the runner could not read used to arrive at that route wearing the

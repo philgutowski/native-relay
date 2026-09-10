@@ -426,9 +426,13 @@ def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, 
 
     hits = claude_dir_backstop(repo, baseline_sha, branch)
     if hits:
-        return TailResult(False, contracts.HALT_PATH_GATE, "backstop",
+        # Its own sentence, not classify's (issue #8). The Task finished and the Runner is the
+        # one refusing, so this Cause line names the merge repair; `stage` is what run.py
+        # persists so the record says which raiser fired.
+        return TailResult(False, contracts.HALT_PATH_GATE, contracts.TAIL_STAGE_BACKSTOP,
                           evidence={"paths": hits, "branch": branch,
-                                    "detail": contracts.PATH_GATE_CLAUDE_DIR})
+                                    "detail": contracts.PATH_GATE_CLAUDE_DIR_BACKSTOP.format(
+                                        branch=branch, paths=", ".join(hits))})
 
     gate = run_gate(repo, gate_command, gate_log_path, gate_timeout_seconds, env=env)
     if not gate.ok:

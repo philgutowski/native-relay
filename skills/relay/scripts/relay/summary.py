@@ -77,6 +77,9 @@ def _task_entry(store, record):
         "id": task_id,
         "status": record.get("status"),
         "class": record.get("halt_class"),
+        # Issue #8: which step of the merge tail refused, on a record whose class alone cannot
+        # say. Reset with `halt_class` at every launch, so a stage here describes this attempt.
+        "halt_stage": record.get("halt_stage"),
         # Weakest source first. The record carries fields a template may also name, most
         # of them written after the halt, so the evidence the raiser recorded has to win.
         "cause": cause_line(record.get("halt_class"), record, landing, evidence),
@@ -132,6 +135,15 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
             checks.append({"kind": "stranded_branch", "task": task_id,
                            "text": "%s left %s in place. Keep or delete it by hand."
                                    % (task_id, entry["branch"])})
+        if (entry["class"] == contracts.HALT_PATH_GATE
+                and entry["halt_stage"] == contracts.TAIL_STAGE_BACKSTOP):
+            # Issue #8. The other raiser of this class, and the opposite repair: the Task's work
+            # is done and the Runner would not land it, so this asks for a merge rather than for
+            # the work. The cause line is reused verbatim rather than restated, because it
+            # already names the branch and the paths its raiser recorded.
+            checks.append({"kind": "path_gate_backstop", "task": task_id,
+                           "text": "%s: %s" % (task_id, entry["cause"]
+                                               or contracts.PATH_GATE_CLAUDE_DIR_BACKSTOP)})
         for finding in entry["findings"]:
             if finding["class"] == contracts.BLOCKED_UNRECORDED:
                 checks.append({"kind": "unrecorded_blocker", "task": task_id,
@@ -146,10 +158,15 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
                                "text": "%s: the closeout did not print a terminal line. Its "
                                        "tracker write may be incomplete." % task_id})
             elif finding["class"] == contracts.HALT_PATH_GATE:
-                checks.append({"kind": "path_gate", "task": task_id,
-                               "text": "%s: %s" % (
-                                   task_id,
-                                   finding.get("detail") or contracts.PATH_GATE_CLAUDE_DIR)})
+                # The transcript raiser, named as such (issue #8). A finding is what the Task
+                # met while working, so this line can appear on a record whose halt class came
+                # from the merge tail minutes later; saying which raiser it is keeps the two
+                # provenances apart. `line`, not `detail`: `_task_entry` keeps a finding's
+                # class and its rendered line only, so `detail` was always the fallback here.
+                checks.append({"kind": "path_gate_denial", "task": task_id,
+                               "text": "%s: in the transcript, %s"
+                                       % (task_id, finding["line"]
+                                          or contracts.PATH_GATE_CLAUDE_DIR)})
             elif finding["class"] == contracts.CARD_LEFT_IN_REVIEW:
                 checks.append({"kind": "card_left_in_review", "task": task_id,
                                "text": "%s: %s" % (task_id, finding["line"])})
@@ -276,6 +293,12 @@ def lines(data):
         out.append((head, source + ".status"))
         if entry["cause"]:
             out.append(("    %s" % entry["cause"], source + ".cause"))
+        # Directly under the cause, because the cause is the sentence it qualifies. Named rather
+        # than silent (issue #8), so a class with two raisers cannot reach an operator
+        # unattributed.
+        if entry["halt_stage"]:
+            out.append(("    refused at the %s step of the merge tail" % entry["halt_stage"],
+                        source + ".halt_stage"))
         if entry["halt_message"] and entry["halt_message"] != entry["cause"]:
             out.append(("    %s" % entry["halt_message"], source + ".halt_message"))
         if entry["excluded_reason"]:

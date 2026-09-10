@@ -389,6 +389,14 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
                     finding = _finding_base(contracts.HALT_DENIED_TOOL, use,
                                             use.get("name") or match.group(1), number)
                     file_path = str((use.get("input") or {}).get("file_path") or (use.get("input") or {}).get("notebook_path") or "") if isinstance(use.get("input"), dict) else ""
+                    # The tool input's own path, never a command string. Issue #8 asked whether
+                    # a denied Bash naming a .claude/ path should promote too, and the answer is
+                    # no: a Bash denial comes from the command allowlist rather than from the
+                    # path gate, so the promotion would assert a cause nobody observed, hand the
+                    # record a halt class through the precedence below, and print the attended
+                    # edit repair for a write that was never attempted. Matching a command
+                    # string would also catch reads, which the gate does not touch.
+                    # DenialTargets in tests/test_classify.py pins the non promotion.
                     if contracts.CLAUDE_DIR_PATH_REGEX.search(file_path):
                         finding["class"] = contracts.HALT_PATH_GATE
                         finding["detail"] = contracts.PATH_GATE_CLAUDE_DIR
