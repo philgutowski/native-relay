@@ -155,9 +155,21 @@ class PathGateBackstop(TailBase):
         self.assertFalse(result.ok)
         self.assertEqual(result.halt_class, contracts.HALT_PATH_GATE)
         self.assertIn(".claude/settings.json", result.evidence["paths"])
-        self.assertEqual(result.evidence["detail"], contracts.PATH_GATE_CLAUDE_DIR)
         self.assertFalse(os.path.exists(self.gate_log), "the gate ran despite the backstop")
         self.assertTrue(gitread.branch_exists(self.repo, self.branch))
+
+    def test_the_backstop_detail_is_its_own_sentence_naming_the_merge_repair(self):
+        """Issue #8. Same class as classify's transcript promotion, opposite repair, so the
+        two must not share a sentence. This one's work is finished and needs a merge."""
+        self.make_task_commit(files={".claude/settings.json": "{}\n"})
+        result = self.run_tail(gate=["bash", "-c", "echo the gate must not run; exit 1"])
+        detail = result.evidence["detail"]
+        self.assertEqual(result.stage, contracts.TAIL_STAGE_BACKSTOP)
+        self.assertNotEqual(detail, contracts.PATH_GATE_CLAUDE_DIR)
+        self.assertIn(self.branch, detail)
+        self.assertIn(".claude/settings.json", detail)
+        self.assertIn("merge", detail)
+        self.assertNotIn("{", detail, "the raiser must format its own template")
 
 
 class TaskScopeOffenders(TailBase):

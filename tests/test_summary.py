@@ -66,9 +66,13 @@ RECORD_ROWS = {
         "run._blocked_route, class from the digest",
     ),
     contracts.HALT_PATH_GATE: (
-        {"detail": contracts.PATH_GATE_CLAUDE_DIR, "branch": "relay/T-1",
-         "paths": ".claude/skills/x/SKILL.md"},
-        {"status": contracts.STATUS_BLOCKED, "branch": "relay/T-1"},
+        {"detail": contracts.PATH_GATE_CLAUDE_DIR_BACKSTOP.format(
+            branch="relay/T-1", paths=".claude/skills/x/SKILL.md"),
+         "branch": "relay/T-1", "paths": [".claude/skills/x/SKILL.md"]},
+        # Halted, not blocked: the tail's refusal reaches the record through run._Halt, which
+        # is also why the stage is here to be persisted at all.
+        {"status": contracts.STATUS_HALTED, "branch": "relay/T-1",
+         "halt_stage": contracts.TAIL_STAGE_BACKSTOP},
         "gitwrite.local_merge_tail, the backstop refusal",
     ),
     contracts.HALT_REMOTE_ADVANCED: (
@@ -528,3 +532,96 @@ class CardAuditChecks(CauseLineTable):
         kinds = [(check["kind"], check["task"]) for check in data["pending_checks"]]
         self.assertEqual(kinds, [("card_left_in_review", "T-2")])
         self.assertIn("move T-2 to Todo by hand", data["pending_checks"][0]["text"])
+
+
+class PathGateRaisers(CauseLineTable):
+    """Issue #8. One class, two raisers, opposite repairs. The record shape here is the one the
+    solutions doc's own example carries: a branch the backstop refused, plus transcript denials
+    from an earlier phase of the same task, the pair that used to render word for word
+    identically."""
+
+    BACKSTOP_DETAIL = contracts.PATH_GATE_CLAUDE_DIR_BACKSTOP.format(
+        branch="relay/T-1", paths=".claude/skills/x/SKILL.md")
+    DENIAL_FINDING = {"class": contracts.HALT_PATH_GATE,
+                      "detail": contracts.PATH_GATE_CLAUDE_DIR, "tool": "Edit",
+                      "target": ".claude/skills/x/SKILL.md", "line": 91, "tool_use_line": 88}
+
+    def backstop(self, findings=()):
+        self.store.upsert("T-1", status=contracts.STATUS_HALTED,
+                          halt_class=contracts.HALT_PATH_GATE,
+                          halt_stage=contracts.TAIL_STAGE_BACKSTOP,
+                          halt_evidence={"detail": self.BACKSTOP_DETAIL, "branch": "relay/T-1",
+                                         "paths": [".claude/skills/x/SKILL.md"]},
+                          branch="relay/T-1", wall_seconds=1.0, active_seconds=1.0,
+                          findings=list(findings))
+        self.store.write_terminal(contracts.RUN_HALTED, "T-1", contracts.HALT_PATH_GATE)
+        return self.summarise(["T-1"])
+
+    def denial(self):
+        """classify's promotion: the class comes from the digest, so no merge tail ran and the
+        record carries no stage. Blocked, not halted: run._blocked_route takes the class from
+        the digest and strands the branch."""
+        self.store.upsert("T-1", status=contracts.STATUS_BLOCKED,
+                          halt_class=contracts.HALT_PATH_GATE, halt_stage=None,
+                          halt_evidence=dict(self.DENIAL_FINDING),
+                          branch="relay/T-1", wall_seconds=1.0, active_seconds=1.0,
+                          findings=[dict(self.DENIAL_FINDING)])
+        self.store.write_terminal(contracts.RUN_HALTED, "T-1", contracts.HALT_PATH_GATE)
+        return self.summarise(["T-1"])
+
+    def test_the_two_raisers_render_different_cause_lines(self):
+        backstop = self.backstop()["tasks"][0]["cause"]
+        self.tearDown()
+        self.setUp()
+        denial = self.denial()["tasks"][0]["cause"]
+        self.assertNotEqual(backstop, denial)
+        self.assertIn("merge", backstop)
+        self.assertIn("relay/T-1", backstop)
+        self.assertIn("unfinished", denial)
+        self.assertNotIn("unfinished", backstop)
+
+    def test_the_backstop_check_line_asks_for_a_merge_and_names_the_branch(self):
+        data = self.backstop()
+        checks = [c for c in data["pending_checks"] if c["kind"] == "path_gate_backstop"]
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["task"], "T-1")
+        self.assertIn("needs an attended gate and merge", checks[0]["text"])
+        self.assertIn("relay/T-1", checks[0]["text"])
+        self.assertIn(checks[0]["text"], summary.render(data))
+
+    def test_the_transcript_check_line_names_its_raiser_and_asks_for_the_work(self):
+        data = self.denial()
+        checks = [c for c in data["pending_checks"] if c["kind"] == "path_gate_denial"]
+        self.assertEqual(len(checks), 1)
+        self.assertIn("in the transcript", checks[0]["text"])
+        self.assertIn("needs an attended session", checks[0]["text"])
+        self.assertNotIn("merge", checks[0]["text"])
+        self.assertEqual([c for c in data["pending_checks"]
+                          if c["kind"] == "path_gate_backstop"], [])
+
+    def test_a_backstopped_record_keeps_both_provenances_apart(self):
+        """The shape the split was built for. The class came from the merge tail, the findings
+        from the transcript, and the operator gets one check line per raiser rather than three
+        copies of one sentence."""
+        data = self.backstop(findings=[dict(self.DENIAL_FINDING), dict(self.DENIAL_FINDING)])
+        kinds = [check["kind"] for check in data["pending_checks"]]
+        self.assertEqual(kinds, ["path_gate_backstop", "path_gate_denial", "path_gate_denial",
+                                 "halted"])
+        self.assertEqual(data["pending_checks"][0]["task"], "T-1")
+        backstop = data["pending_checks"][0]["text"]
+        denial = data["pending_checks"][1]["text"]
+        self.assertNotEqual(backstop, denial)
+
+    def test_the_stage_is_a_named_line_under_the_cause(self):
+        data = self.backstop()
+        lines = summary.lines(data)
+        sources = [source for _, source in lines]
+        self.assertIn("tasks[0].halt_stage", sources)
+        self.assertEqual(sources[sources.index("tasks[0].cause") + 1], "tasks[0].halt_stage")
+        self.assertIn("    refused at the backstop step of the merge tail",
+                      [line for line, _ in lines])
+
+    def test_a_record_with_no_stage_prints_no_stage_line(self):
+        data = self.denial()
+        self.assertIsNone(data["tasks"][0]["halt_stage"])
+        self.assertNotIn("tasks[0].halt_stage", [source for _, source in summary.lines(data)])

@@ -273,6 +273,14 @@ evidence and the Task's own record both carry a field of that name, the evidence
 record acquired most of its fields after the stop and would otherwise describe the aftermath rather
 than the cause.
 
+One Halt class can have more than one raiser, and where two raisers ask the operator for opposite
+repairs they write different sentences rather than sharing the class's one. `path_gate` is the case
+that established this: the transcript scan raises it for a write the harness refused, where the work
+never happened, and the merge tail's `.claude/` backstop raises it for a finished branch the Runner
+declined to land. The record carries the merge tail step that refused beside its class, so a reader
+can tell which raiser fired without inferring it from the findings, whose provenance is the
+transcript and whose phase is earlier than the tail's.
+
 A Cause line is a derived form, and the record keeps the raw sentence it was derived from beside
 it: the words the code that stopped the run actually wrote. The summary prints that sentence under
 the Cause line whenever the two differ, so a template that fits the class loosely, such as a
