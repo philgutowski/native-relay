@@ -398,6 +398,16 @@ class Unpushed(unittest.TestCase):
         self.assertIn("has no origin remote", data["pending_checks"][-1]["text"])
         self.assertIn("push origin main", data["pending_checks"][-1]["text"])
 
+    def test_with_nothing_landed_it_says_so_and_names_no_command(self):
+        """The first live run: T-1 halted before its merge, and the line still said every
+        landing above was on local main and told the operator how to ship it."""
+        self.store.upsert("T-1", status=contracts.STATUS_HALTED,
+                          halt_class=contracts.HALT_UNCLEAN_EXIT, landing_ref=None)
+        last = summary.build(self.manifest, self.store)["pending_checks"][-1]
+        self.assertEqual(last["kind"], "unpushed")
+        self.assertIn("nothing to ship", last["text"])
+        self.assertNotIn("git -C", last["text"])
+
     def test_push_true_carries_no_unpushed_check(self):
         self.manifest.shipping_push = True
         data = summary.build(self.manifest, self.store)

@@ -202,10 +202,15 @@ def _shipping(manifest):
             "command": "git -C %s push origin %s" % (shlex.quote(repo), shlex.quote(default))}
 
 
-def _unpushed_check(shipping):
+def _unpushed_check(shipping, landed):
     """The last check by hand of a push false run. Last on purpose: everything above it
-    describes what the run did, and this is the one decision left to the operator."""
-    if shipping["remote"]:
+    describes what the run did, and this is the one decision left to the operator. With nothing
+    landed there is nothing to ship, and a command would imply there was: the first live run
+    halted before its merge and this line still told the operator to ship its landings."""
+    if not landed:
+        text = ("nothing was pushed: shipping.push is false, and no task has landed on the local "
+                "%s yet, so there is nothing to ship" % shipping["default_branch"])
+    elif shipping["remote"]:
         text = ("nothing was pushed: shipping.push is false, so every landing above is on the "
                 "local %s only. To ship it: %s" % (shipping["default_branch"], shipping["command"]))
     else:
@@ -248,7 +253,8 @@ def build(manifest, store):
     # Additive to schema version 1, like `audit`.
     data["shipping"] = _shipping(manifest)
     if not data["shipping"]["push"]:
-        data["pending_checks"].append(_unpushed_check(data["shipping"]))
+        data["pending_checks"].append(_unpushed_check(
+            data["shipping"], data["counts"].get(contracts.STATUS_LANDED, 0)))
     return data
 
 

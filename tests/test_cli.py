@@ -119,6 +119,20 @@ class Validate(CliCase):
         self.assertIn("3 task(s)", text)
         self.assertIn("tracker.md", text)
 
+    def test_a_push_false_manifest_says_nothing_will_be_pushed(self):
+        """Issue #15. The operator's last look before launch has to say the run pushes nothing,
+        and a push true manifest's line has to stay as it was."""
+        code, text = self.call("validate", self.manifest_path)
+        self.assertNotIn("push off", text)
+        with open(self.manifest_path) as handle:
+            manifest = handle.read()
+        with open(self.manifest_path, "w") as handle:
+            handle.write(manifest.replace('mode = "local_merge"',
+                                          'mode = "local_merge"\npush = false'))
+        code, text = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, text)
+        self.assertIn("push off: nothing will be pushed", text)
+
     def test_a_manifest_with_a_broken_rule_exits_config_and_names_the_field(self):
         with open(self.manifest_path) as handle:
             text = handle.read()

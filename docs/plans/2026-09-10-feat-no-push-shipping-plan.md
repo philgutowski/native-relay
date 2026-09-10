@@ -254,3 +254,33 @@ the unpushed line.
 
 `pr_terminal`, which stays refused. Changing either brief template. Pushing on the operator's
 behalf at the end of a run. A no push variant of the mirror.
+
+## Amendments made while executing, 2026-09-10
+
+- The gitwrite keyword is `pushes`, not `push`. A `push` parameter on `local_merge_tail`
+  shadowed the module's own `push()` function, and every push true tail call raised
+  `TypeError: 'bool' object is not callable`. `manifest.pushes()` is the one reader of the field;
+  `preflight`, `resume_disposition`, `default_in_sync`, and `local_merge_tail` take `pushes=`.
+- Built in a separate worktree off `069d808` because a concurrent session held uncommitted work
+  in the same modules. Issue #8 landed on main meanwhile (`674accb`) and merged into this branch
+  without conflicts. Its `halt_stage` now carries this plan's two new tail stages, so a no push
+  refusal prints "refused at the baseline step" or "refused at the fetch step" under its Cause
+  line.
+- R9 narrowed. The unpushed line names the command only when a task has landed; with nothing
+  landed it says there is nothing to ship. The first live attempt halted before its merge and the
+  line still told the operator to ship "every landing above".
+- The first live attempt halted `unclean_exit` at the gate step because the throwaway target had
+  no `.gitignore` and the runner's own gate wrote `__pycache__/`. A target defect, not this
+  feature's: the bare origin was untouched and the refusal was the right one.
+- Two existing `ContinuePastGuards` fakes of `resume_disposition` grew the `pushes` keyword, and
+  the summary test fake grew `shipping_push`. No other existing test changed.
+- The live run (U7), after the target gained a `.gitignore`, landed in 37 seconds on `sonnet`
+  with local main already one commit ahead of origin: plan, build, `/code-review` through the
+  Skill tool, the target's own suite, gate, merge `6fec1c1`, closeout closing the `tasks.md` line
+  on local main. The bare origin's refs matched the pre run snapshot byte for byte, the git op
+  log held `checkout`, `delete_branch`, `fetch`, and `merge` and no push, and the summary ended on
+  the unpushed line naming `git -C <target> push origin main`.
+- The same run showed a landed record still printing the first attempt's halt message ("left the
+  tree dirty on relay/T-1"): the running upsert resets `halt_class` and `halt_stage` but not
+  `halt_message`. Present on main before this work and unrelated to pushing, so it is captured
+  in `docs/backlog.md` rather than fixed here.
