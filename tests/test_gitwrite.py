@@ -608,3 +608,161 @@ class ResumeDisposition(TailBase):
         _repo.git(self.repo, "checkout", "-q", "main")
         result = self.disposition()
         self.assertTrue(result.ok, result.evidence)
+
+
+class NoPushBase(TailBase):
+    """`shipping.push = false`, issue #15. The bare origin at `<repo>.git` is the thing that
+    must not change, so every case can read its refs before and after."""
+
+    def bare_refs(self):
+        return _repo.git(self.repo + ".git", "show-ref").stdout
+
+    def advance_remote(self, content="from elsewhere\n"):
+        """A third party's commit on the bare origin's main, pushed from a separate clone. The
+        repo under test does not know about it until something fetches."""
+        clone = os.path.join(self.tmp.name, "elsewhere")
+        if not os.path.isdir(clone):
+            _repo.git(self.tmp.name, "clone", "-q", self.repo + ".git", clone)
+            _repo.git(clone, "config", "user.name", "Relay Test")
+            _repo.git(clone, "config", "user.email", "relay@example.invalid")
+        sha = commit_on_branch(clone, "main", {"elsewhere.txt": content}, "a third party's commit")
+        _repo.git(clone, "push", "-q", "origin", "main")
+        return sha
+
+    def ops_named(self, name):
+        return [entry for entry in self.ops.entries if entry["op"] == name]
+
+
+class NoPushPreFlight(NoPushBase):
+    def preflight(self):
+        return gitwrite.preflight(self.repo, "main", self.branch, pushes=False)
+
+    def test_an_equal_remote_passes(self):
+        result = self.preflight()
+        self.assertTrue(result.ok, result.evidence)
+
+    def test_a_remote_behind_the_local_default_passes_where_push_true_refuses(self):
+        commit_on_branch(self.repo, "main", {"ahead.txt": "landed locally\n"}, "a local landing")
+        self.assertEqual(gitwrite.preflight(self.repo, "main", self.branch).failed,
+                         "head_equals_remote")
+        result = self.preflight()
+        self.assertTrue(result.ok, result.evidence)
+
+    def test_a_diverged_remote_fails_on_remote_is_ancestor_naming_both_shas(self):
+        local = commit_on_branch(self.repo, "main", {"ahead.txt": "landed locally\n"}, "local")
+        remote = self.advance_remote()
+        _repo.git(self.repo, "fetch", "-q", "origin")
+        result = self.preflight()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failed, "remote_is_ancestor")
+        self.assertEqual(result.evidence["local_sha"], local)
+        self.assertEqual(result.evidence["remote_sha"], remote)
+
+    def test_a_local_default_behind_the_remote_fails(self):
+        self.advance_remote()
+        _repo.git(self.repo, "fetch", "-q", "origin")
+        self.assertEqual(self.preflight().failed, "remote_is_ancestor")
+
+    def test_a_repo_with_no_origin_passes_and_says_why(self):
+        _repo.git(self.repo, "remote", "remove", "origin")
+        commit_on_branch(self.repo, "main", {"ahead.txt": "landed locally\n"}, "local")
+        result = self.preflight()
+        self.assertTrue(result.ok, result.evidence)
+        self.assertIsNone(result.evidence["remote_sha"])
+        self.assertIn("does not resolve", result.evidence["reason"])
+
+    def test_an_unreadable_local_default_fails_rather_than_passing(self):
+        evidence = {}
+        self.assertFalse(gitwrite.remote_is_ancestor(self.repo, "no-such-branch", evidence))
+        self.assertIsNone(evidence["local_sha"])
+
+    def test_is_ancestor_raises_when_git_cannot_answer(self):
+        with self.assertRaises(gitread.GitError):
+            gitread.is_ancestor(self.repo, "0" * 40, "main")
+
+
+class NoPushTail(NoPushBase):
+    def test_the_merge_lands_on_the_local_default_and_nothing_reaches_the_remote(self):
+        before = self.bare_refs()
+        head = self.make_task_commit()
+        result = self.run_tail(pushes=False)
+        self.assertTrue(result.ok, result.evidence)
+        self.assertEqual(result.stage, "merged")
+        self.assertIs(result.evidence["pushed"], False)
+        self.assertEqual(result.merge_sha, gitread.rev_parse(self.repo, "main"))
+        self.assertTrue(gitread.is_ancestor(self.repo, head, "main"))
+        self.assertEqual(gitread.rev_parse(self.repo, "origin/main"), self.baseline)
+        self.assertEqual(self.bare_refs(), before)
+        self.assertEqual(self.ops_named("push"), [])
+
+    def test_a_second_task_lands_on_the_first_without_either_pushing(self):
+        before = self.bare_refs()
+        self.make_task_commit()
+        self.assertTrue(self.run_tail(pushes=False).ok)
+        second = gitwrite.task_branch_for("T-2")
+        commit_on_branch(self.repo, second, {"src/second.py": "value = 2\n"}, "T-2 work",
+                         base="main")
+        result = gitwrite.local_merge_tail(
+            self.repo, "T-2", "main", gitread.rev_parse(self.repo, "main"), ["true"],
+            self.gate_log, ops=self.ops, branch=second, pushes=False)
+        self.assertTrue(result.ok, result.evidence)
+        self.assertEqual(self.bare_refs(), before)
+
+    def test_a_local_default_that_moved_during_the_task_refuses_before_the_merge(self):
+        self.make_task_commit()
+        _repo.git(self.repo, "checkout", "-q", "main")
+        moved = commit_on_branch(self.repo, "main", {"other.txt": "another session\n"}, "other")
+        result = self.run_tail(pushes=False)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.halt_class, contracts.HALT_REMOTE_ADVANCED)
+        self.assertEqual(result.stage, "baseline")
+        self.assertIn("local main moved", result.evidence["reason"])
+        self.assertEqual(gitread.rev_parse(self.repo, "main"), moved)
+        self.assertTrue(gitread.branch_exists(self.repo, self.branch))
+        self.assertEqual(self.ops_named("merge"), [])
+
+    def test_a_remote_that_moved_on_refuses_after_a_fetch(self):
+        self.make_task_commit()
+        remote = self.advance_remote()
+        result = self.run_tail(pushes=False)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.halt_class, contracts.HALT_REMOTE_ADVANCED)
+        self.assertEqual(result.stage, "fetch")
+        self.assertEqual(result.evidence["remote_sha"], remote)
+        self.assertIn("diverged", result.evidence["reason"])
+        self.assertTrue(self.ops_named("fetch"))
+        self.assertEqual(gitread.rev_parse(self.repo, "main"), self.baseline)
+
+    def test_a_repo_with_no_origin_merges_without_fetching(self):
+        _repo.git(self.repo, "remote", "remove", "origin")
+        self.make_task_commit()
+        result = self.run_tail(pushes=False)
+        self.assertTrue(result.ok, result.evidence)
+        self.assertEqual(self.ops_named("fetch"), [])
+
+    def test_an_unreachable_origin_does_not_stop_the_merge(self):
+        _repo.git(self.repo, "remote", "set-url", "origin",
+                  os.path.join(self.tmp.name, "gone.git"))
+        self.make_task_commit()
+        result = self.run_tail(pushes=False)
+        self.assertTrue(result.ok, result.evidence)
+        fetches = [e for e in self.ops_named("fetch") if e["phase"] == "result"]
+        self.assertTrue(fetches)
+        self.assertNotEqual(fetches[0]["detail"]["returncode"], 0)
+
+
+class NoPushResumeDisposition(NoPushBase):
+    def disposition(self):
+        return gitwrite.resume_disposition(self.repo, "main", ops=self.ops, task_id=self.task_id,
+                                           pushes=False)
+
+    def test_a_default_ahead_of_the_remote_is_allowed(self):
+        commit_on_branch(self.repo, "main", {"ahead.txt": "landed locally\n"}, "a local landing")
+        result = self.disposition()
+        self.assertTrue(result.ok, result.evidence)
+
+    def test_a_diverged_default_refuses_naming_the_check(self):
+        commit_on_branch(self.repo, "main", {"ahead.txt": "landed locally\n"}, "local")
+        self.advance_remote()
+        _repo.git(self.repo, "fetch", "-q", "origin")
+        self.assertEqual(self.disposition().failed, "remote_is_ancestor")

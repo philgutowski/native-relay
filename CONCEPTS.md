@@ -247,7 +247,8 @@ Three classes are run scoped and always stop the run, named in `contracts.RUN_SC
 each puts something outside the failing Task in question, the remote, the Lease, or the Runner
 itself. Any other halt can be continued past when the Manifest opts in with
 `on_halt.continue_past_task_halt` and the repository, after the Runner returns it to the default
-branch, is one the next Task could start from: a clean tree at the remote's head. The Runner checks
+branch, is one the next Task could start from: a clean tree at the remote's head, or, under a
+Manifest that does not push, a clean tree whose remote has not diverged from it. The Runner checks
 that rather than inferring it from the class, because one class can leave the repository usable or
 not. A Task continued past stays halted, is listed by the summary as a check by hand, and is retried
 on the next run like any other halt.
@@ -330,6 +331,13 @@ The per-project choice of what landing means: a merge to the default branch perf
 Task process, or a pull request whose checks have decided. The Manifest names one, and Verify-landed
 applies the matching checks. Only the merge mode is implemented; the pull request mode is named in
 the schema and refused before a run starts, so no Task can be driven under it today.
+
+Beside the mode, the Manifest says whether the Runner pushes. Pushing is the default. A Manifest
+that turns it off keeps the merge mode's whole sequence and drops every push from it, so a landing
+is the local default branch and nothing any process in the run does reaches a remote. That changes
+what agreement with the remote means rather than removing it: the local default branch runs ahead
+by design, and only a remote that has diverged from it stops the run. Such a run's summary ends on
+the one command that would ship it, because a run that pushed nothing has to say so.
 
 ## Surroundings
 

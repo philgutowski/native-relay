@@ -6,6 +6,10 @@ line and commits it, the runner pushes that commit, and the runner then confirms
 reading what actually reached the remote. Reading the working tree would confirm a local edit
 nobody else can see.
 
+Under `shipping.push = false` (issue #15) nothing reaches the remote, so the landing and the
+closeout's commit both live on the local default branch, and the adapter reads the file at that
+branch's head instead. Still a committed state and never the working tree.
+
 The grammar, from the plan:
 
     - [ ] T-1 Add the brief renderer            an open task
@@ -26,7 +30,7 @@ unclosed card.
 """
 import re
 
-from .. import gitread
+from .. import gitread, manifest as manifest_module
 from . import OUTCOME_HALTED, OUTCOME_LANDED, reference_hit, skipped
 
 TASK_RE = re.compile(r"^-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\S+)\s*(?P<rest>.*?)\s*$")
@@ -75,20 +79,23 @@ class MarkdownAdapter:
         self._default_branch = (manifest.project.default_branch
                                 or gitread.default_branch(self._repo)
                                 or "main")
+        self._pushes = manifest_module.pushes(manifest)
+        self._ref = ("origin/" + self._default_branch if self._pushes
+                     else self._default_branch)
         self._read = read or self._show
 
     def _show(self):
-        return gitread.show(self._repo, "origin/" + self._default_branch, self._file)
+        return gitread.show(self._repo, self._ref, self._file)
 
     def _tasks(self):
-        """Returns (tasks, None) or ({}, reason). A file that is not on the remote default
-        branch is a reason, not a crash: the operator may not have pushed it yet."""
+        """Returns (tasks, None) or ({}, reason). A file that is not on the default branch the
+        adapter reads is a reason, not a crash: the operator may not have pushed it yet."""
         try:
             text = self._read()
         except gitread.GitError as exc:
-            return {}, "could not read %s at origin/%s: %s" % (self._file, self._default_branch, exc)
+            return {}, "could not read %s at %s: %s" % (self._file, self._ref, exc)
         if text is None:
-            return {}, "%s does not exist at origin/%s" % (self._file, self._default_branch)
+            return {}, "%s does not exist at %s" % (self._file, self._ref)
         return parse(text), None
 
     # Interface.
@@ -154,9 +161,13 @@ class MarkdownAdapter:
         """`return_to` is accepted for the interface and ignored: a markdown tracker has only an
         open box and a checked one, and the task process never moves it."""
         if outcome == OUTCOME_LANDED:
+            # Under shipping.push = false the runner pushes nothing, so the instruction does not
+            # promise that it will.
+            after = ("do not push; the runner pushes it under the gate." if self._pushes
+                     else "do not push.")
             return ("Edit the task's line in %s: change `[ ]` to `[x]` and append the landing "
                     "reference below in parentheses at the end of the line. Commit that file and "
-                    "do not push; the runner pushes it under the gate." % self._file)
+                    "%s" % (self._file, after))
         if outcome == OUTCOME_HALTED:
             return ("Append one indented comment line under the task's line in %s naming the halt "
                     "class and the cause line below, in the form `  - <date> <text>`. Leave the "

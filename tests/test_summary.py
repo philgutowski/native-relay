@@ -42,6 +42,8 @@ class _Manifest:
     def __init__(self, path, repo, task_ids):
         self.path = path
         self.project = _Project(repo)
+        # Push true reads nothing else, so these rows stay free of a repository (issue #15).
+        self.shipping_push = True
         self.tasks = [_Task(*task_id) if isinstance(task_id, tuple) else _Task(task_id)
                       for task_id in task_ids]
 
@@ -349,6 +351,68 @@ class CauseLineTable(unittest.TestCase):
         finally:
             contracts.HALT_LINES[contracts.HALT_UNEXPECTED_ERROR] = original
         self.assertEqual(line, "grok: failed")
+
+
+class Unpushed(unittest.TestCase):
+    """Issue #15, R9 of the no push plan: a push false run's summary ends by saying nothing was
+    pushed and naming the one command that ships it."""
+
+    def setUp(self):
+        import _repo
+        from types import SimpleNamespace
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = _repo.make_repo(self.tmp.name)
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        self.manifest_path = os.path.join(self.tmp.name, "manifest.toml")
+        with open(self.manifest_path, "w", encoding="utf-8") as handle:
+            handle.write("# not loaded\n")
+        self.store = state.StateStore(self.manifest_path, self.repo, home=self.home)
+        self.store.upsert("T-1", status=contracts.STATUS_LANDED, halt_class=contracts.HALT_LANDED,
+                          landing_ref="b" * 40, findings=[])
+        self.manifest = SimpleNamespace(
+            path=self.manifest_path, tasks=[_Task("T-1")], shipping_push=False,
+            project=SimpleNamespace(repo=self.repo, default_branch="main"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_last_check_by_hand_says_nothing_was_pushed_and_names_the_command(self):
+        data = summary.build(self.manifest, self.store)
+        command = "git -C %s push origin main" % self.repo
+        self.assertEqual(data["shipping"], {"push": False, "remote": "origin",
+                                            "default_branch": "main", "command": command})
+        last = data["pending_checks"][-1]
+        self.assertEqual(last["kind"], "unpushed")
+        self.assertIn("nothing was pushed", last["text"])
+        self.assertIn(command, last["text"])
+        self.assertTrue(summary.render(data).rstrip().endswith(command))
+
+    def test_a_repo_with_no_origin_says_so_and_still_names_the_command(self):
+        import _repo
+
+        _repo.git(self.repo, "remote", "remove", "origin")
+        data = summary.build(self.manifest, self.store)
+        self.assertIsNone(data["shipping"]["remote"])
+        self.assertIn("has no origin remote", data["pending_checks"][-1]["text"])
+        self.assertIn("push origin main", data["pending_checks"][-1]["text"])
+
+    def test_with_nothing_landed_it_says_so_and_names_no_command(self):
+        """The first live run: T-1 halted before its merge, and the line still said every
+        landing above was on local main and told the operator how to ship it."""
+        self.store.upsert("T-1", status=contracts.STATUS_HALTED,
+                          halt_class=contracts.HALT_UNCLEAN_EXIT, landing_ref=None)
+        last = summary.build(self.manifest, self.store)["pending_checks"][-1]
+        self.assertEqual(last["kind"], "unpushed")
+        self.assertIn("nothing to ship", last["text"])
+        self.assertNotIn("git -C", last["text"])
+
+    def test_push_true_carries_no_unpushed_check(self):
+        self.manifest.shipping_push = True
+        data = summary.build(self.manifest, self.store)
+        self.assertEqual(data["shipping"], {"push": True})
+        self.assertNotIn("unpushed", [check["kind"] for check in data["pending_checks"]])
 
 
 class CauseLinesFromARealRun(RunCase):

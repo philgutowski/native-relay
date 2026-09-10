@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import contracts, gitread, gitwrite
+from . import contracts, gitread, gitwrite, manifest as manifest_module
 
 SCOPE_CODE = "code"
 SCOPE_FULL = "full"
@@ -125,8 +125,12 @@ def verify(manifest, record, adapter, scope=SCOPE_FULL, pr_probe=None, do_fetch=
     prefix = manifest.project.branch_prefix
     branch = gitwrite.task_branch_for(task_id, prefix) if task_id else None
     checks = {}
+    # Issue #15. Under shipping.push = false the landing is the local default branch, so the
+    # verdict comes from local git and the tracker, and no caller's fetch is honoured: the
+    # remote cannot decide a landing it was never sent.
+    pushes = manifest_module.pushes(manifest)
 
-    if do_fetch:
+    if do_fetch and pushes:
         try:
             gitread.fetch(repo, env=env)
         except gitread.GitError:
@@ -150,7 +154,13 @@ def verify(manifest, record, adapter, scope=SCOPE_FULL, pr_probe=None, do_fetch=
     local_sha = gitread.rev_parse(repo, default)
     remote_sha = gitread.rev_parse(repo, "origin/" + default)
     evidence = {"local_sha": local_sha, "remote_sha": remote_sha}
-    if remote_sha is None:
+    if not pushes:
+        # Not applicable rather than unreadable, so not blocking: the same shape the pr_terminal
+        # skip of new_commit_since_baseline below has. Both shas stay on the record.
+        checks["head_equals_remote"] = _check(SKIPPED, dict(
+            evidence, reason="shipping.push is false; the landing is the local %s and the remote "
+                             "is not consulted" % default))
+    elif remote_sha is None:
         checks["head_equals_remote"] = _skip("origin/%s does not resolve" % default, blocking=True)
     else:
         checks["head_equals_remote"] = _check(PASS if local_sha == remote_sha else FAIL, evidence)

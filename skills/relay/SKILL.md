@@ -120,7 +120,12 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    so several halts in a row surface only in the summary; off, the first halt stops the run.
    A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
    recommendation for an answer they already gave, including timeouts and status names. The shipping mode is
-   `local_merge`, where the runner merges and pushes. `pr_terminal` is named in the schema and
+   `local_merge`, where the runner merges each task to the default branch. Then ask whether the
+   runner pushes. `shipping.push` true, the default, pushes the merge, the closeout's commit,
+   and any mirror. False merges locally and pushes nothing, so the whole run stays on the
+   machine and the operator ships by hand afterwards; the repo then needs no `origin`, a mirror
+   is refused, and the summary ends with the one command that ships it. Write `push = false`
+   only when the operator chooses it. `pr_terminal` is named in the schema and
    refused by `validate`: the run loop has no pull request sequence, so every task under it
    would halt without one being opened or checked.
 3. If a chosen backend does not enforce tool restrictions at launch (`codex`, which native
@@ -171,9 +176,9 @@ naming a backend with no verified native review step. See Backend readiness belo
 
 ## Confirm before launch
 
-Launching starts an unattended process that will merge and push to the operator's repository.
-After validate passes, show the manifest path, the task list with model, effort, and backend,
-the gate command, and `project.branch_prefix` (name the default when the key was omitted) with
+Launching starts an unattended process that will merge to the operator's repository and, unless
+`shipping.push` is false, push. After validate passes, show the manifest path, the task list with
+model, effort, and backend, the gate command, whether the run pushes, and `project.branch_prefix` (name the default when the key was omitted) with
 one example branch, prefix plus the first Task id, then ask for an explicit go. Do not launch on the strength of the manifest being
 valid, and do not launch when the operator has said to stop before launch.
 
@@ -260,7 +265,7 @@ The classes and what they mean for the operator:
 | Class | What happened | What the operator does |
 |---|---|---|
 | `gate_refused` | the project's gate refused the branch, or a push was rejected | read the gate log the summary names, fix, resume |
-| `remote_advanced` | the default branch moved during the task, or the merge conflicted | rebase or redo the task branch by hand, resume |
+| `remote_advanced` | the default branch moved during the task, locally or at the remote (the evidence's `reason` says which), or the merge conflicted | rebase or redo the task branch by hand, resume |
 | `partial_landing` | the code is on the remote but the card did not move | move the card by hand, then run `verify` for that task |
 | `tracker_write_denied` | a tracker write was refused, so the card stayed put | check the tracker credentials, move the card, then `verify` |
 | `path_gate` | one of two walls around `.claude/`, and the record's `halt_stage` says which. No stage: the task asked for an edit there and its permission posture refused it whatever the allowlist says, so the work is unfinished. Stage `backstop`: the task finished and the merge tail refused a branch whose diff touches `.claude/` | read the cause line, which names the repair its own raiser implies. Unfinished work needs an attended session to do it, then a resume. A refused branch needs an attended gate and merge, then `verify` for that task, never a rerun |
@@ -278,6 +283,10 @@ After a repair, confirm before resuming:
 ```bash
 python3 <runner> verify <manifest> <task-id>
 ```
+
+Under `shipping.push = false` the summary's check by hand list always ends with an `unpushed`
+line: nothing was pushed, and the one `git push` command that ships the default branch. Hand that
+command to the operator as it stands. Running it is their decision, never this skill's.
 
 ## Backend readiness
 

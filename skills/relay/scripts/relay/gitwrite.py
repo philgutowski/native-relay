@@ -11,7 +11,9 @@ The tail is the part of the pipeline the task process does not own (KTD5). In lo
 the task process exits on the Task branch (the Manifest prefix plus the Task id, default
 `relay/<task-id>`), and the runner then runs the project's gate on that branch head, merges to
 the default branch, and pushes. A gate refusal strands the branch instead of diverging the
-default branch, which is the whole reason the merge lives here.
+default branch, which is the whole reason the merge lives here. Under `shipping.push = false`
+the tail ends at the merge and nothing here pushes; `default_in_sync` is the one place the two
+settings' remote checks differ.
 
 Nothing here writes to a tracker (R19), and nothing here decides whether a task landed. That
 verdict is verify.py, from git and the tracker alone.
@@ -164,8 +166,8 @@ class TailResult:
 
 # Mutating wrappers.
 
-def fetch(repo, remote="origin", ops=None, task_id=None, env=None):
-    return _mutate(repo, "fetch", ["fetch", "--quiet", remote], ops, task_id, env, check=True)
+def fetch(repo, remote="origin", ops=None, task_id=None, env=None, check=True):
+    return _mutate(repo, "fetch", ["fetch", "--quiet", remote], ops, task_id, env, check=check)
 
 
 def checkout(repo, ref, ops=None, task_id=None, env=None):
@@ -238,7 +240,8 @@ def reset_hard(repo, ref, ops=None, task_id=None, env=None):
 
 # Pre-flight (R16).
 
-PREFLIGHT_CHECKS = ("tree_clean", "on_default", "head_equals_remote", "no_task_branch")
+PREFLIGHT_CHECKS = ("tree_clean", "on_default", "head_equals_remote", "remote_is_ancestor",
+                    "no_task_branch")
 
 
 def _tree_is_clean(repo, evidence):
@@ -260,10 +263,41 @@ def head_equals_remote(repo, default_branch, evidence):
     return local is not None and remote is not None and local == remote
 
 
-def preflight(repo, default_branch, task_branch, env=None):
+def remote_is_ancestor(repo, default_branch, evidence):
+    """The `shipping.push = false` counterpart of `head_equals_remote`. Local runs ahead of the
+    remote by design there, so ahead and equal pass, while behind and diverged fail: the check
+    still catches a remote that moved under the run, and permits the state the run creates.
+
+    A remote tracking ref that does not resolve passes, whether the repo has no origin at all or
+    has never fetched this branch, because there is no known remote state to have diverged from
+    and nothing will be pushed to it. An unreadable local ref fails, never passes."""
+    local = gitread.rev_parse(repo, default_branch)
+    remote = gitread.rev_parse(repo, "origin/" + default_branch)
+    evidence.update(local_sha=local, remote_sha=remote)
+    if local is None:
+        return False
+    if remote is None:
+        evidence["reason"] = ("origin/%s does not resolve, so there is no remote state to have "
+                              "diverged from" % default_branch)
+        return True
+    return gitread.is_ancestor(repo, remote, local)
+
+
+def default_in_sync(repo, default_branch, pushes, evidence):
+    """Whether the default branch agrees with the remote, as the shipping setting defines
+    agreement, and the name of the check that answered. Pre flight, the resume disposition, and
+    `run._note_halt`'s R6a guard all ask through here, so the three cannot disagree about which
+    rule applies."""
+    if pushes:
+        return head_equals_remote(repo, default_branch, evidence), "head_equals_remote"
+    return remote_is_ancestor(repo, default_branch, evidence), "remote_is_ancestor"
+
+
+def preflight(repo, default_branch, task_branch, env=None, pushes=True):
     """R16: a task process starts from a clean tree on the default branch, in sync with the
     remote, with no pre-existing task branch. Returns the name of the first check that failed,
-    which is what the summary prints and what the halted record carries."""
+    which is what the summary prints and what the halted record carries. `pushes` picks the remote
+    check through `default_in_sync`."""
     evidence = {}
     if not _tree_is_clean(repo, evidence):
         return PreflightResult(False, "tree_clean", evidence)
@@ -271,8 +305,9 @@ def preflight(repo, default_branch, task_branch, env=None):
     evidence["branch"] = branch
     if branch != default_branch:
         return PreflightResult(False, "on_default", evidence)
-    if not head_equals_remote(repo, default_branch, evidence):
-        return PreflightResult(False, "head_equals_remote", evidence)
+    in_sync, check = default_in_sync(repo, default_branch, pushes, evidence)
+    if not in_sync:
+        return PreflightResult(False, check, evidence)
     if gitread.branch_exists(repo, task_branch):
         evidence["task_branch"] = task_branch
         return PreflightResult(False, "no_task_branch", evidence)
@@ -331,12 +366,49 @@ def run_gate(repo, command, log_path, timeout_seconds=contracts.DEFAULT_GATE_TIM
 
 # The tail.
 
+def _unpushed_base_refusal(repo, default_branch, baseline_sha, branch, gate, ops, task_id, env):
+    """The tail's remote check under `shipping.push = false` (KTD3 of the no push plan), or None
+    when the merge may go ahead.
+
+    Two movers, both `remote_advanced` because both are the landing base moving under the task.
+    The local default branch is the landing target here, so it has to sit where the Task started;
+    a concurrent session committing to it is the first mover. The remote is the second: fetched
+    when an origin exists, and a fetch that fails or hangs is ignored, because an offline machine
+    is a legitimate place for a run that pushes nothing. The ancestor check then reads whatever
+    `origin/<default>` the repo knows. `reason` says which mover it was, since the class's Cause
+    line names both."""
+    local_sha = gitread.rev_parse(repo, default_branch)
+    if local_sha != baseline_sha:
+        return TailResult(False, contracts.HALT_REMOTE_ADVANCED, "baseline", gate=gate,
+                          evidence={"sha": local_sha, "local_sha": local_sha,
+                                    "baseline_sha": baseline_sha, "branch": branch,
+                                    "reason": "the local %s moved from the baseline during the "
+                                              "task" % default_branch})
+    if "origin" in gitread.remotes(repo):
+        try:
+            fetch(repo, ops=ops, task_id=task_id, env=env, check=False)
+        except subprocess.TimeoutExpired:
+            pass
+    evidence = {}
+    if not remote_is_ancestor(repo, default_branch, evidence):
+        remote_sha = evidence.get("remote_sha")
+        return TailResult(False, contracts.HALT_REMOTE_ADVANCED, "fetch", gate=gate,
+                          evidence={"sha": remote_sha, "remote_sha": remote_sha,
+                                    "baseline_sha": baseline_sha, "branch": branch,
+                                    "reason": "origin/%s has diverged from the local %s"
+                                              % (default_branch, default_branch)})
+    return None
+
+
 def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, gate_log_path,
                      ops=None, env=None, gate_timeout_seconds=None, still_ours=None,
-                     branch=None):
+                     branch=None, pushes=True):
     """The fixed local merge sequence of R50, from the task process's exit to a pushed default
     branch. Stops at the first refusal and names the halt class; every stop leaves the task
     branch in place so the operator can repair by hand and resume.
+
+    `pushes` false ends the sequence at the merge, with stage `merged` and `pushed` false in the
+    evidence, and swaps the fetch and remote compare for `_unpushed_base_refusal`.
     """
     if branch is None:
         branch = task_branch_for(task_id, None)
@@ -377,12 +449,19 @@ def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, 
                           evidence={"branch": branch, "status_before": contracts.STATUS_MERGING,
                                     "reason": "the lease was lost while the gate ran"})
 
-    fetch(repo, ops=ops, task_id=task_id, env=env)
-    remote_sha = gitread.rev_parse(repo, "origin/" + default_branch)
-    if remote_sha != baseline_sha:
-        return TailResult(False, contracts.HALT_REMOTE_ADVANCED, "fetch", gate=gate,
-                          evidence={"remote_sha": remote_sha, "baseline_sha": baseline_sha,
-                                    "sha": remote_sha, "branch": branch})
+    if pushes:
+        fetch(repo, ops=ops, task_id=task_id, env=env)
+        remote_sha = gitread.rev_parse(repo, "origin/" + default_branch)
+        if remote_sha != baseline_sha:
+            return TailResult(False, contracts.HALT_REMOTE_ADVANCED, "fetch", gate=gate,
+                              evidence={"remote_sha": remote_sha, "baseline_sha": baseline_sha,
+                                        "sha": remote_sha, "branch": branch})
+    else:
+        refused = _unpushed_base_refusal(repo, default_branch, baseline_sha, branch, gate, ops,
+                                         task_id, env)
+        if refused is not None:
+            return refused
+        remote_sha = gitread.rev_parse(repo, "origin/" + default_branch)
 
     checkout(repo, default_branch, ops=ops, task_id=task_id, env=env)
     merge = merge_no_ff(repo, branch, task_id, ops=ops, env=env)
@@ -394,6 +473,11 @@ def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, 
                                     "conflict": merge.conflict, "merge_output": merge.output,
                                     "branch": branch, "baseline_sha": baseline_sha,
                                     "remote_sha": remote_sha})
+
+    if not pushes:
+        # R2: the landing is the local default branch, and the sequence ends here.
+        return TailResult(True, None, "merged", merge_sha=merge.sha, gate=gate,
+                          evidence={"branch": default_branch, "sha": merge.sha, "pushed": False})
 
     if still_ours is not None and not still_ours():
         return TailResult(False, contracts.HALT_RUNNER_CRASHED, "lease", merge_sha=merge.sha,
@@ -430,7 +514,7 @@ def timeout_disposition(repo, default_branch, branch):
     return TimeoutDisposition("halt", tree, current)
 
 
-def resume_disposition(repo, default_branch, ops=None, task_id=None, env=None):
+def resume_disposition(repo, default_branch, ops=None, task_id=None, env=None, pushes=True):
     """Issue #15: after a halt the manifest may continue past, could the next task start from
     here? The same three reads pre-flight makes, in the order that keeps evidence intact: a
     dirty tree refuses before any checkout, so whatever the halted task left is exactly where
@@ -449,8 +533,9 @@ def resume_disposition(repo, default_branch, ops=None, task_id=None, env=None):
     if branch != default_branch:
         checkout(repo, default_branch, ops=ops, task_id=task_id, env=env)
         evidence["checked_out_from"] = branch
-    if not head_equals_remote(repo, default_branch, evidence):
-        return PreflightResult(False, "head_equals_remote", evidence)
+    in_sync, check = default_in_sync(repo, default_branch, pushes, evidence)
+    if not in_sync:
+        return PreflightResult(False, check, evidence)
     return PreflightResult(True, None, evidence)
 
 

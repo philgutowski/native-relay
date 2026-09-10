@@ -156,6 +156,15 @@ class Skill(unittest.TestCase):
         self.assertRegex(self.text, r"(?m)^description: .{40,}$")
         self.assertNotRegex(self.text, r"(?i)stub")
 
+    def test_the_skill_asks_whether_the_run_pushes_and_never_runs_the_push_itself(self):
+        """Issue #15. The skill authors manifests, so it has to ask about shipping.push rather
+        than leave the default to decide, and a push false run's closing command is the
+        operator's to run."""
+        self.assertIn("shipping.push", self.text)
+        self.assertRegex(self.text, r"(?i)ask whether the\s+runner pushes")
+        self.assertRegex(self.text, r"(?i)whether the run pushes")
+        self.assertRegex(self.text, r"(?i)never this skill's")
+
 
 class NoProjectLeakage(unittest.TestCase):
     def shipped_files(self):

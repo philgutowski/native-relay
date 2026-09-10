@@ -13,9 +13,10 @@ evidence on the record, and the checks a human still has to make by hand are lis
 rather than buried in prose. It points at a class, a cause, and the state directory, and never
 at a machine readable file the operator would have to parse to learn anything.
 """
+import shlex
 import string
 
-from . import audit, contracts
+from . import audit, contracts, gitread, manifest as manifest_module, verify
 
 SCHEMA_VERSION = 1
 
@@ -179,6 +180,46 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
     return checks
 
 
+def _shipping(manifest):
+    """What the run did with the remote (issue #15, R9 of the no push plan). Under push true it
+    is the one fact. Under push false it carries the command that ships the default branch, so
+    the summary can end on it: a run that pushed nothing has to say so, and say how, rather than
+    leave the operator to infer it from a remote that did not move.
+
+    Two git reads, both read only, and a failure in either costs the detail and not the summary."""
+    if manifest_module.pushes(manifest):
+        return {"push": True}
+    repo = manifest.project.repo
+    try:
+        default = verify.default_branch_of(manifest)
+    except Exception:
+        default = manifest.project.default_branch or "main"
+    try:
+        remote = "origin" if "origin" in gitread.remotes(repo) else None
+    except Exception:
+        remote = None
+    return {"push": False, "remote": remote, "default_branch": default,
+            "command": "git -C %s push origin %s" % (shlex.quote(repo), shlex.quote(default))}
+
+
+def _unpushed_check(shipping, landed):
+    """The last check by hand of a push false run. Last on purpose: everything above it
+    describes what the run did, and this is the one decision left to the operator. With nothing
+    landed there is nothing to ship, and a command would imply there was: the first live run
+    halted before its merge and this line still told the operator to ship its landings."""
+    if not landed:
+        text = ("nothing was pushed: shipping.push is false, and no task has landed on the local "
+                "%s yet, so there is nothing to ship" % shipping["default_branch"])
+    elif shipping["remote"]:
+        text = ("nothing was pushed: shipping.push is false, so every landing above is on the "
+                "local %s only. To ship it: %s" % (shipping["default_branch"], shipping["command"]))
+    else:
+        text = ("nothing was pushed: shipping.push is false, and the repo has no origin remote. "
+                "Add one, then ship the local %s with: %s"
+                % (shipping["default_branch"], shipping["command"]))
+    return {"kind": "unpushed", "task": None, "text": text}
+
+
 def build(manifest, store):
     """The summary as data. Reads state only; acquires nothing and changes nothing."""
     raw = store.read() or {}
@@ -209,6 +250,11 @@ def build(manifest, store):
     data["pending_checks"] = _pending_checks(entries, run_status, data["halt_task"],
                                              data["halt_class"], store.dir,
                                              card_audit=data["audit"])
+    # Additive to schema version 1, like `audit`.
+    data["shipping"] = _shipping(manifest)
+    if not data["shipping"]["push"]:
+        data["pending_checks"].append(_unpushed_check(
+            data["shipping"], data["counts"].get(contracts.STATUS_LANDED, 0)))
     return data
 
 

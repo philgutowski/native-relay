@@ -4,7 +4,8 @@ Run a list of pre-defined tasks through a native plan, build, review, verify, re
 one fresh headless process per task, serially and unattended. No plugin sits in the loop: the
 Task process plans in a message, builds, runs the CLI's built in code review, runs the project's
 own verification, records what the project's method says a unit records, and exits. The runner
-then runs the project gate, merges, pushes, verifies the landing, and launches a short Closeout
+then runs the project gate, merges, pushes unless the manifest turns pushing off, verifies the
+landing, and launches a short Closeout
 process that writes the outcome to the tracker and judges whether the task produced a learning
 worth keeping.
 
@@ -47,8 +48,9 @@ keeping, take the next one. Relay is that outer loop and nothing more.
   mode, any mirror rule, the disallow patterns, and the docs root the closeout may write a
   learning under. Everything project-specific is data here, never code in the runner. One
   shipping mode runs today, `local_merge`, where the runner runs the gate and owns the merge.
-  `pr_terminal` is named in the schema and refused by `validate` until its run loop sequence
-  exists.
+  `shipping.push = false` keeps every merge on the local default branch and pushes nothing, so a
+  whole run stays on the machine until the operator ships it by hand. `pr_terminal` is named in
+  the schema and refused by `validate` until its run loop sequence exists.
 - **Task process:** one headless invocation per task, reading a brief the runner renders from a
   template. Its steps are: move the card, branch, plan in a message, build, run the built in
   review, run the project's own verification, record, comment the card, print the return

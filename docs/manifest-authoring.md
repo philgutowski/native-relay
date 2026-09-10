@@ -24,12 +24,14 @@ mirror = []
 # branch_prefix = "relay/"
 ```
 
-- `repo` is the checkout the runner merges into. It must have an `origin` remote and a git
-  identity (`user.name`, `user.email`), because the runner's merge authors a commit.
+- `repo` is the checkout the runner merges into. It must have an `origin` remote, unless
+  `shipping.push` is false, and a git identity (`user.name`, `user.email`), because the runner's
+  merge authors a commit.
 - `default_branch` is where tasks land. Leave it unset only when `refs/remotes/origin/HEAD` is set
-  in the checkout.
+  in the checkout, so a repo with no remote always names it.
 - `mirror` is an optional argument list for `git push`, run after the closeout, for a project that
-  keeps a second remote. Empty means none. An argument list, never a shell string.
+  keeps a second remote. Empty means none. An argument list, never a shell string. It must be
+  empty under `shipping.push = false`, since a mirror is a push.
 - `branch_prefix` names task branches: the prefix plus the task id. The default is `relay/`. An
   empty string is the task id alone, which suits Jira keys that already read `ABC-12`. Write the
   key only when you want something other than the default.
@@ -49,7 +51,7 @@ in_review_status = "in review"
 
 - `markdown`: a checklist file in the repository. `- [ ] T-1 Title` is open, `- [x] T-1 Title
   (abc1234)` is closed with its landing reference. The closeout edits the line; the runner reads
-  it at the remote's default branch.
+  it at the remote's default branch, or at the local one under `shipping.push = false`.
 - `jira`: `site`, `project_key`, `done_statuses`, and the two environment variables the runner
   reads credentials from (`token_env`, `email_env`, default `JIRA_API_TOKEN` and `JIRA_EMAIL`).
 - `github`: `owner`, `project_number`, and `status_field` for a GitHub Project board, read
@@ -62,11 +64,23 @@ in_review_status = "in review"
 ```toml
 [shipping]
 mode = "local_merge"
+push = true
 ```
 
 `local_merge` is the one mode that runs: the runner runs the gate on the task branch, merges to
 the default branch, pushes, and verifies the landing from git and the tracker. `pr_terminal` is
 named in the schema and refused.
+
+`push` defaults to true. Set it false to merge every task to the default branch locally and push
+nothing at all, not the merge, not the closeout's commit, and not a task's own branch, so the
+whole run stays on the machine and you decide afterwards what reaches the remote. Under false:
+
+- the repo needs no `origin`, and `mirror` must be empty;
+- the local default branch may run ahead of `origin`, but a remote that has diverged from it, or
+  a local default branch that moves while a task runs, still stops the run;
+- the landing is verified from local git and the tracker, and a markdown tracker is read at the
+  local default branch;
+- the summary ends by saying nothing was pushed and naming the one `git push` that ships it.
 
 ## 4. Permissions
 

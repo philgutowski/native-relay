@@ -316,6 +316,8 @@ DESTRUCTIVE_TOOLS = (
 # would put a commit on the remote before the runner's scope check could bound it, and a local
 # reset cannot undo that, so the closeout's disallow list refuses every push spelling. The task
 # process keeps the ordinary list, because in pr_terminal mode it has to push its own branch.
+# Under shipping.push = false the runner pushes nothing for either process, and
+# manifest.resolved_disallowed adds these same patterns to the Task process's list (issue #15).
 CLOSEOUT_DISALLOWED_EXTRA = (
     "Bash(git push*)",
     "Bash(git -C * push*)",
@@ -521,7 +523,11 @@ HALT_LINES = {
     HALT_DENIED_TOOL: "{tool} denied by the task's permission posture on {target}",
     HALT_PATH_GATE: "{detail}",
     HALT_TRACKER_WRITE_DENIED: "code landed, card unmoved: {tool} denied",
-    HALT_REMOTE_ADVANCED: "remote moved during the task; merge aborted at {sha}",
+    # Names both movers. Under shipping.push = false the one that moved can be the local default
+    # branch, and run._merge_route raises with this line as its message, so a line naming only
+    # the remote would be the operator's sole and wrong account. Evidence `reason` says which.
+    HALT_REMOTE_ADVANCED: ("the default branch moved during the task, locally or at the remote; "
+                           "merge aborted at {sha}"),
     HALT_CLOSEOUT_OUT_OF_SCOPE: "closeout changed {path} outside {allowed}",
     # `status_before`, not `status`: the record is a rendering source too and carries its
     # own post crash `status`, which used to shadow the evidence and print "during halted"

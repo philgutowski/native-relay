@@ -739,5 +739,62 @@ class UnenforcedAcceptance(ManifestCase):
         self.assertTrue(any("unenforced_acceptance" in error for error in result.errors))
 
 
+class ShippingPush(ManifestCase):
+    """`[shipping] push`, issue #15. A boolean beside the mode rather than a third mode, so every
+    `shipping_mode == "local_merge"` comparison stays correct as written."""
+
+    def push_false(self, text=None):
+        new, n = re.subn(r'^mode = "local_merge"$', 'mode = "local_merge"\npush = false',
+                         text if text is not None else self.base, count=1, flags=re.M)
+        assert n == 1
+        return new
+
+    def test_push_defaults_true_and_the_default_is_named(self):
+        m = self.load()
+        self.assertIs(m.shipping_push, True)
+        self.assertTrue(mf.pushes(m))
+        result = mf.validate(m)
+        self.assertTrue(result.ok, result.errors)
+        self.assertIn("shipping.push = True", result.defaults_applied)
+
+    def test_push_false_loads_validates_and_is_not_a_default(self):
+        m = self.load(self.push_false())
+        self.assertIs(m.shipping_push, False)
+        self.assertFalse(mf.pushes(m))
+        result = mf.validate(m)
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(any(d.startswith("shipping.push") for d in result.defaults_applied))
+
+    def test_a_string_push_is_refused_and_never_turns_pushing_off(self):
+        text = self.edit(r'^mode = "local_merge"$', 'mode = "local_merge"\npush = "false"')
+        m = self.load(text)
+        self.assertTrue(mf.pushes(m), "a value validate refuses must not read as push off")
+        result = mf.validate(m)
+        self.assertTrue(any("shipping.push must be true or false" in e for e in result.errors),
+                        result.errors)
+
+    def test_a_mirror_with_push_false_is_refused(self):
+        text = self.push_false(self.edit(r"^mirror = \[\]", 'mirror = ["origin", "main:release"]'))
+        result = mf.validate(self.load(text))
+        self.assertTrue(any("a mirror is a push" in e for e in result.errors), result.errors)
+
+    def test_push_false_validates_against_a_repo_with_no_remote_and_push_true_does_not(self):
+        repo = _repo.make_repo(self.tmp.name, name="solo", origin=False)
+        text = self.base.replace(self.repo, repo)
+        refused = mf.validate(self.load(text))
+        self.assertTrue(any("requires an origin remote" in e for e in refused.errors))
+        allowed = mf.validate(self.load(self.push_false(text)))
+        self.assertTrue(allowed.ok, allowed.errors)
+
+    def test_push_false_puts_every_push_spelling_on_the_task_disallow_list(self):
+        pushing = mf.resolved_disallowed(self.load())
+        self.assertNotIn("Bash(git push*)", pushing)
+        local = mf.validate(self.load(self.push_false()))
+        for pattern in contracts.CLOSEOUT_DISALLOWED_EXTRA:
+            self.assertIn(pattern, local.disallowed)
+            self.assertTrue(any(pattern in w and "shipping.push" in w for w in local.warnings),
+                            local.warnings)
+
+
 if __name__ == "__main__":
     unittest.main()
