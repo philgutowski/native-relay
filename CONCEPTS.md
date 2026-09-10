@@ -252,6 +252,14 @@ that rather than inferring it from the class, because one class can leave the re
 not. A Task continued past stays halted, is listed by the summary as a check by hand, and is retried
 on the next run like any other halt.
 
+Continuation policy reaches only a Task whose process actually raised a halt. An outcome the Runner
+records without raising, a Blocked Task above all, is not a halt the Manifest gets to vote on, so
+the run continues past it unconditionally and no Manifest field changes that. Being run scoped is
+not what stops a run either, since that set is read only on the raised path. A class from it that
+reaches a record by the recording route is a label on the outcome and nothing more. The two routes
+look alike in a run summary, both naming a class and both saying the Task did not land, so the
+distinction is invisible exactly where an operator goes looking for it.
+
 ### Cause line
 The one sentence a run summary prints to say why a Task did not land, and the only diagnosis an
 operator who was not watching gets. Each is a fixed template belonging to a Halt class, filled from
@@ -289,7 +297,8 @@ landing, not a landing, and it halts the run.
 
 ### Blocked
 A Task whose process stopped deliberately without landing, leaving the repository as it found it. A
-Blocked Task is a normal outcome rather than a failure.
+Blocked Task is a normal outcome rather than a failure, and the run always continues to the next
+Task after one.
 
 A Blocked Task is only legible to an operator who was not watching if the blocker reaches somewhere
 outside the run's own transcript. The Closeout process writes that record, as a comment on the
@@ -300,12 +309,12 @@ which is the accepted cost of the Runner holding no write path at all.
 
 ### Card audit
 The Runner's pass over every Task's card at the end of a run, comparing each with its record
-and with git, and the `audit` verb that performs the same pass on demand. It names four
+and with git, and the same pass an operator can run between runs on demand. It names four
 disagreements: a card at the in review status with no process on it, a Landed record whose card
 is no longer terminal, a terminal card nothing landed for, and a card that could not be read. It
 reports and never repairs, because the Runner holds no way to move a card; each finding says
 what to move and where, and the summary lists it as a check by hand. The run end pass writes
-under the Lease; the verb takes none and writes nothing, so it is safe beside a live run, where a
+under the Lease; the on-demand pass takes none and writes nothing, so it is safe beside a live run, where a
 record in flight is a process at work rather than a stale card.
 
 ### Shipping mode
