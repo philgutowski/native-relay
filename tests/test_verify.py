@@ -374,6 +374,22 @@ class StartupReverify(VerifyCase):
         self.assertEqual(record["verify"]["scope"], verify.SCOPE_FULL)
         self.assertIsNotNone(record["verify"]["at"])
 
+    def test_promoting_a_backstop_halt_clears_the_stage_with_the_class(self):
+        """Issue #8. The attended merge this class's Cause line asks for ends here, so the
+        record must stop saying the merge tail refused it."""
+        manifest = self.manifest()
+        store = self.store_for(manifest)
+        sha = self.land_a_commit()
+        store.upsert(self.task_id, status=contracts.STATUS_HALTED,
+                     halt_class=contracts.HALT_PATH_GATE,
+                     halt_stage=contracts.TAIL_STAGE_BACKSTOP, baseline_sha=self.baseline,
+                     landing_ref=sha)
+        self.assertEqual(verify.startup_reverify(manifest, store, self.landed_adapter(sha)),
+                         [self.task_id])
+        record = store.get(self.task_id)
+        self.assertEqual(record["halt_class"], contracts.HALT_LANDED)
+        self.assertIsNone(record["halt_stage"])
+
     def test_a_task_landed_by_hand_is_promoted_and_its_landing_ref_recorded(self):
         manifest = self.manifest()
         store = self.store_for(manifest)

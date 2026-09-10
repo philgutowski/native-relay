@@ -15,7 +15,7 @@ applies_when:
   - "a task's plan touches a path under .claude/ (skill, hook, or settings file)"
   - "the allowlist explicitly names Edit and Write"
   - "the run has no human present to approve a permission prompt"
-  - "reading a path_gate halt in a run summary, where the class can come from the transcript scan or from the post run branch diff"
+  - "reading a path_gate halt in a run summary, where the class can come from the transcript scan or from the post run branch diff, and the record's halt_stage says which"
 symptoms:
   - "Edit denied with: Permission to use Edit has been denied because Claude Code is running in don't ask mode"
   - "every other Edit and Write in the same run succeeds; only the .claude/ path is refused"
@@ -23,7 +23,8 @@ symptoms:
   - "the tracker card carries no blocker comment, so the board looks untouched"
   - "the summary lists .claude/ edit denials for a task whose own envelope reads status: complete"
   - "a record carries halt class path_gate while its branch holds finished commits and a clean tree"
-tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run, claude-dir-backstop, evidence-provenance, halt-class-vs-finding]
+  - "two path_gate check lines in one summary, one asking for an attended merge and one for the work itself"
+tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run, claude-dir-backstop, evidence-provenance, halt-class-vs-finding, halt-stage]
 ---
 
 # Headless dontAsk mode blocks edits under .claude/ regardless of allowlist
@@ -201,12 +202,13 @@ One regex, `contracts.CLAUDE_DIR_PATH_REGEX` at `contracts.py:56`, is read at tw
 Neither is manifest configurable. There is no allowlist entry, no per task opt out, and no target
 repo exemption, so every task in every repo gets both.
 
-Both fill the same sentence, `contracts.PATH_GATE_CLAUDE_DIR`, which `summary.py:151` renders as a
-check line and `HALT_LINES[path_gate]` renders as the record's Cause line. Word for word identical,
-and neither says which of the two points raised it.
+Both filled the same sentence, `contracts.PATH_GATE_CLAUDE_DIR`, which `summary` rendered as a
+check line and `HALT_LINES[path_gate]` rendered as the record's Cause line. Word for word identical,
+and neither said which of the two points raised it. **Fixed by issue #8, 2026-09-10; see the section
+below.**
 
-**Findings and halt class have different provenance, and the summary does not say so.** Precedence
-in `classify.py:456` gives a `COMPLETE` envelope `routable = True` and assigns no halt class at all;
+**Findings and halt class have different provenance, and the summary did not say so.** Precedence
+in `classify` gives a `COMPLETE` envelope `routable = True` and assigns no halt class at all;
 a `path_gate` finding only becomes the halt class on a blocked or absent envelope. So a record
 carrying both a complete envelope and a `path_gate` class did not get that class from the transcript
 scan. It was assigned minutes later by the merge tail from git evidence, while transcript derived
@@ -223,6 +225,46 @@ list as an account of why the run stopped is reading two different phases as one
 Tell them apart by reading the task process's own return envelope in the stdout log, not by reading
 the findings list. `status: complete` with commits named and a clean tree is a backstop refusal
 whatever the findings say. A blocked envelope, or none at all, is the real stop and ask.
+
+### Fixed 2026-09-10, issue #8: the two raisers now read differently
+
+The distinguishing fact was being computed and thrown away. `TailResult.stage` already read
+`backstop` on the merge tail's refusal and `run.py` stored only `tail.evidence` before raising, so
+the record kept the class and lost the route. Four changes, no new halt class (the set is closed,
+KTD6):
+
+- `contracts` carries two sentences instead of one. `PATH_GATE_CLAUDE_DIR` stays with `classify`'s
+  transcript promotion and now says the work is unfinished and needs an attended session to do it.
+  `PATH_GATE_CLAUDE_DIR_BACKSTOP` belongs to the merge tail, names the branch and the offending
+  paths, and states the opposite repair: the work is finished and needs an attended gate and merge,
+  not a rerun. It is a template the raiser formats itself, because `HALT_LINES[path_gate]` is
+  `{detail}` and a field inside a filled `{detail}` is never expanded a second time. Both are
+  written in the third person on purpose. A Cause line reaches the Closeout process's brief, so a
+  second person imperative there would be an instruction to an agent whose brief is to record the
+  outcome and touch nothing; the operator's imperative belongs in the summary's checks by hand,
+  which nothing but an operator reads.
+- The record carries `halt_stage`, written from `tail.stage` beside `halt_evidence` on every tail
+  refusal and reset with `halt_class` at each launch. It is the route, so a class with two raisers
+  can be attributed without inferring anything from the findings.
+- The summary prints the stage under the Cause line and splits the check by hand into two kinds:
+  `path_gate_backstop`, raised off the record's class and stage and asking for the merge, and
+  `path_gate_denial`, raised off a transcript finding and saying so in the sentence. A record like
+  IW-179's, whose class came from the tail and whose findings came from the transcript, now gets one
+  line per raiser instead of three copies of one sentence.
+- `HALT_LINES` is shared with the Closeout brief through `classify.finding_line`, so this changed
+  what reaches a tracker card, not only the run summary. That makes it a contract change between
+  processes, which is what CLAUDE.md's live task rule is for: the stub renders the brief with the
+  same code that will render it live, so only a real Closeout process can show how it reads the
+  sentence. Record the live proof here when it runs.
+
+**Item 4 of the issue, whether a denied `Bash` naming a `.claude/` path should promote, was decided
+no.** A Bash denial under `dontAsk` comes from the command allowlist, not from the path gate, so the
+promotion would assert a cause nobody has observed; on a blocked or absent envelope it would also
+hand the record its halt class through `classify`'s precedence and print the attended edit repair
+for a write that was never attempted. Detecting it would mean matching the command string, which
+catches reads the gate does not touch at all. `DenialTargets` in `tests/test_classify.py` pins the
+non promotion, so the IW-179 `git checkout -- .claude/skills/itg-brief/SKILL.md` denial stays a
+plain `denied_tool` finding by decision rather than by omission.
 
 ### Two secondary rules from the same run
 
