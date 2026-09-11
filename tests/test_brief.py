@@ -98,6 +98,28 @@ class ReviewStep(BriefCase):
             self.assertIn("ending your turn is exiting", text, mode)
             self.assertIn("completion notification does not survive the final turn", text, mode)
 
+    def test_the_brief_scopes_the_kill_on_exit_claim_to_tracked_background_tasks(self):
+        """Issue #17. The rule used to say everything still running is killed with you, which is
+        true of a tracked background task and false of a shell child started with a trailing `&`.
+        A task that believes the false version has a reason to leave a server bound."""
+        for mode, text in self.each_template():
+            self.assertIn("every background task this session is tracking is killed with you",
+                          text, mode)
+            self.assertNotIn("everything still running is killed with you", text, mode)
+
+    def test_the_brief_forbids_leaving_a_process_running_behind_a_command(self):
+        """Issue #17, from the run of 2026-09-10: a task backgrounded a static server inside one
+        foreground Bash call, crossed no turn boundary, exited clean, and left the port held for
+        the remaining 5h 24m of the run. The runner's group kill fires only on an operator signal,
+        a lost lease, or the deadline, so a clean exit sweeps nothing, and its own teardown was
+        refused by the deny list. The only lever is what the task starts."""
+        for mode, text in self.each_template():
+            self.assertIn("Leave no process running when a command returns", text, mode)
+            self.assertIn("never start a process you cannot stop inside the same command",
+                          text, mode)
+            for tool in ("`kill`", "`pkill`", "`killall`"):
+                self.assertIn(tool, text, "%s does not name %s as refused" % (mode, tool))
+
     def test_the_contract_strings_come_from_contracts_rather_than_the_template(self):
         local = self.render()
         self.assertIn("```" + contracts.ENVELOPE_FENCE_TAG, local)
