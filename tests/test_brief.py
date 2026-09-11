@@ -315,6 +315,8 @@ class CommitMessageConstraint(BriefCase):
     def test_a_grok_brief_carries_the_constraint(self):
         for mode, text in (("local_merge", self.render(backend="grok")),):
             self.assertIn(contracts.BACKEND_PINS["grok"]["commit_message_constraint"], text, mode)
+            self.assertIn("$(git merge-base", text, mode)
+            self.assertIn("one simple command per call", text, mode)
 
     def test_claude_and_codex_briefs_do_not_carry_it(self):
         for backend in ("claude", "codex"):

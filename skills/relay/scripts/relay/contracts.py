@@ -237,8 +237,15 @@ BACKEND_PINS = {
         # trivial probe does not reproduce the cancel; this is that case. The constraint stays
         # because the original finding was a multi-turn Task, and because grok now loads the
         # operator's skill catalogue, including `ce-commit-push-pr`, which still teaches the
-        # heredoc form. Any skill or guide the process reads showing a worked heredoc commit
-        # defeats the brief.
+        # heredoc form.
+        #
+        # Live T-72 the same day, session 420a4122-7b75-4e00-8127-7aa17a18eeec, widened the
+        # shape. The Task committed `double()` on relay/T-72, then `/review` branch mode pasted
+        # the skill's own setup into one `run_terminal_command`: a multi-line if/elif assigning
+        # BASE, then `MERGE_BASE=$(git merge-base ...)`. Grok cancelled it
+        # (`cancellationCategory: PermissionCancelled`), the turn ended with no envelope, and
+        # the record is blocked. The cancel is not limited to a git commit heredoc. Any skill
+        # that shows a compound git script, `/review` included, can defeat the brief.
         "permission_mode": "auto",
         "forbidden_permission_modes": ("bypassPermissions", "dontAsk"),
         "output_format": ("--output-format", "streaming-json"),
@@ -273,18 +280,23 @@ BACKEND_PINS = {
         "config_overrides": (),
         "strict_config": False,
         "grants_network": False,
-        # Issue #57. Instruction is the only enforcement layer this backend has for the
-        # cancellation R4 and the BACKEND_PINS caveat below both describe. Strengthened
-        # 2026-09-11: grok loads the operator catalogue, so a skill showing the heredoc
-        # form is the common case, not an edge.
+        # Issue #57, strengthened 2026-09-11 after live T-72. Instruction is the only
+        # enforcement layer this backend has for the cancellation. The live `/review` cancel
+        # is recorded in docs/solutions/workflow-issues/
+        # grok-cancels-review-branch-mode-compound-bash.md.
         "commit_message_constraint": (
-            "This CLI can cancel a git commit whose message uses command substitution or a "
-            "heredoc, such as `git commit -m \"$(cat <<'EOF' ... EOF)\"`, instead of refusing "
-            "it: the tool call is cancelled outright, no envelope is written, and whatever the "
-            "task had in flight is stranded. Use plain `git commit` forms only. For a subject "
-            "plus body, repeat `-m`: `git commit -m \"Subject\" -m \"Body paragraph.\"`. Any "
-            "skill or guide that shows a worked heredoc commit is wrong for this CLI; do not "
-            "follow that form even when a skill presents it as the way to commit."
+            "This CLI can cancel a run_terminal_command whose argument is a multi-line "
+            "if/elif, a command substitution, or a heredoc. Observed forms include "
+            "`git commit -m \"$(cat <<'EOF' ... EOF)\"` and the `/review` skill's own setup "
+            "that assigns BASE with if/elif and MERGE_BASE with `$(git merge-base ...)`. The "
+            "tool call is cancelled outright, the turn ends with no envelope, and whatever "
+            "the task had in flight is stranded. Use one simple command per call. For a git "
+            "commit subject plus body, repeat `-m`: `git commit -m \"Subject\" -m \"Body "
+            "paragraph.\"`. When `/review` shows a compound git script, run each "
+            "`git rev-parse` and `git merge-base` as its own one-line command, then write "
+            "the diff with a one-line `git diff`. Any skill or guide that shows a worked "
+            "heredoc, command substitution, or multi-line if/elif in one call is wrong for "
+            "this CLI; do not follow that form even when a skill presents it as the way to run."
         ),
     },
 }
