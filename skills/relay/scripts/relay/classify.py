@@ -391,11 +391,16 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
                     file_path = str((use.get("input") or {}).get("file_path") or (use.get("input") or {}).get("notebook_path") or "") if isinstance(use.get("input"), dict) else ""
                     # The tool input's own path, never a command string. Issue #8 asked whether
                     # a denied Bash naming a .claude/ path should promote too, and the answer is
-                    # no: a Bash denial comes from the command allowlist rather than from the
-                    # path gate, so the promotion would assert a cause nobody observed, hand the
-                    # record a halt class through the precedence below, and print the attended
-                    # edit repair for a write that was never attempted. Matching a command
-                    # string would also catch reads, which the gate does not touch.
+                    # still no, though the 2026-09-11 gate probe replaced the reason. The gate
+                    # does refuse a Bash write into .claude/, so the original reason, that a
+                    # Bash denial can only come from the command allowlist, was wrong. What
+                    # survives is that the two refusals read identically in the transcript, so
+                    # nothing there says which wall fired, and a command string cannot separate
+                    # a write from a read: `ls -la .claude` is allowed. A denied write also
+                    # leaves nothing on the branch, so the denied_tool finding already names
+                    # Bash and its command, and path_gate would assert a wall no evidence
+                    # confirms. The probe is recorded under the Examples heading of
+                    # docs/solutions/workflow-issues/headless-dontask-blocks-claude-dir-edits.md.
                     # DenialTargets in tests/test_classify.py pins the non promotion.
                     if contracts.CLAUDE_DIR_PATH_REGEX.search(file_path):
                         finding["class"] = contracts.HALT_PATH_GATE
