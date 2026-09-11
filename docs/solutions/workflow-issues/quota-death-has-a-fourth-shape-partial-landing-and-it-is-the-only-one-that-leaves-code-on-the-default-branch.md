@@ -18,7 +18,7 @@ applies_when:
 symptoms:
   - "the summary reads landed at <sha> and did not verify as landed: card_terminal, closing_reference on the same Task"
   - "the default branch carries a merged unit whose issue is still open and whose review, mutation table and record never ran"
-  - "relay verify refuses to promote a hand repaired Task even though a default branch commit names the issue as #N"
+  - "relay verify reports not landed on a hand repaired Task even though a default branch commit names the issue as #N"
   - "two different limit messages in one run's logs, one naming the account session and one naming a single model"
   - "a relaunch on the same model halts within seconds while the same Manifest on another model runs to completion"
 tags:
