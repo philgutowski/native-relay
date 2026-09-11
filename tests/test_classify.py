@@ -232,10 +232,12 @@ class DenialTargets(unittest.TestCase):
         """KTD6 promotes to path_gate from input.file_path only; a denied Bash command that
         merely mentions the directory is a plain denial with the command as its target.
 
-        Issue #8 asked whether that should change and the answer is no, which this pins. A Bash
-        denial comes from the command allowlist rather than from the path gate, so promoting it
-        would assert an unobserved cause, hand the record a halt class through classify's
-        precedence, and print the attended edit repair for a write nobody attempted."""
+        Issue #8 asked whether that should change and the answer is no, which this pins. The
+        2026-09-11 gate probe showed the gate does refuse a Bash write into the directory, so
+        the reason is not that such a denial is impossible. It is that the path gate's refusal
+        and the command allowlist's refusal are the same sentence, so the transcript cannot
+        attribute one, a command string cannot separate a write from a read, and a denied write
+        leaves nothing on the branch for the attended merge repair to be about."""
         import json
         import tempfile
         lines = [

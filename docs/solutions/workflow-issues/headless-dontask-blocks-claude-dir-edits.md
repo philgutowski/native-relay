@@ -8,7 +8,7 @@ component: runner
 severity: high
 root_cause: missing_workflow_step
 resolution_type: workflow_improvement
-last_updated: 2026-09-10
+last_updated: 2026-09-11
 related_components: [manifest, task-process, permission-mode, classify, gitwrite, summary]
 applies_when:
   - "launching claude -p with --permission-mode dontAsk (Claude backend only, see the Scope note)"
@@ -16,6 +16,7 @@ applies_when:
   - "the allowlist explicitly names Edit and Write"
   - "the run has no human present to approve a permission prompt"
   - "reading a path_gate halt in a run summary, where the class can come from the transcript scan or from the post run branch diff, and the record's halt_stage says which"
+  - "writing a file under .claude/ from Bash, where one redirection form lands and another is refused"
 symptoms:
   - "Edit denied with: Permission to use Edit has been denied because Claude Code is running in don't ask mode"
   - "every other Edit and Write in the same run succeeds; only the .claude/ path is refused"
@@ -24,7 +25,9 @@ symptoms:
   - "the summary lists .claude/ edit denials for a task whose own envelope reads status: complete"
   - "a record carries halt class path_gate while its branch holds finished commits and a clean tree"
   - "two path_gate check lines in one summary, one asking for an attended merge and one for the work itself"
-tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run, claude-dir-backstop, evidence-provenance, halt-class-vs-finding, halt-stage]
+  - "Bash denied with the same don't ask mode sentence for a command that redirects into .claude/, while an ls of the same directory is allowed"
+  - "a .claude/ file that a heredoc write created successfully, on a branch the merge tail then refuses"
+tags: [dontask-permission-mode, claude-directory-gate, headless-claude, manifest, pre-flight-check, unattended-run, claude-dir-backstop, evidence-provenance, halt-class-vs-finding, halt-stage, bash-redirection-gate, cli-version-pin]
 ---
 
 # Headless dontAsk mode blocks edits under .claude/ regardless of allowlist
@@ -80,7 +83,9 @@ on an ordinary path and an Edit on a `.claude/` path in the same process, with t
 different answers. This is not documented in the local CLI help, which lists only the mode choices
 (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`), nor anywhere in the
 installed plugin tree. Treat the boundary as observed behavior on CLI 2.1.245, not as a documented
-contract, and re-test it when the CLI version moves.
+contract, and re-test it when the CLI version moves. Re-tested on 2.1.268 on 2026-09-11, where the
+Edit and Write half behaved exactly as described here; see the gate probe under the Examples
+heading for what else it found.
 
 The run did what the denial text told it to do. It wrote:
 
@@ -255,14 +260,47 @@ KTD6):
   what reaches a tracker card, not only the run summary. That makes it a contract change between
   processes, which is what CLAUDE.md's live task rule is for: the stub renders the brief with the
   same code that will render it live, so only a real Closeout process can show how it reads the
-  sentence. Record the live proof here when it runs.
+  sentence.
+
+**The live proof ran 2026-09-11 and the contract holds, with one correction to the route.** One
+task, T-70, against the throwaway target. The card asked for a `.claude/settings.json` written by
+shell redirection rather than by an editor tool; the task finished the work and committed it on
+`relay/T-70`; the merge tail refused that branch at the `backstop` stage. The record carried
+`halt_class path_gate` with `halt_stage backstop`, and the summary printed the backstop sentence,
+then `refused at the backstop step of the merge tail`, then `branch left in place: relay/T-70`, then
+the same sentence again under checks by hand. Nothing was pushed. The real Closeout process read
+the Cause line out of its brief and wrote this to the card:
+
+> 2026-09-11 halted: path_gate. The merge tail refused relay/T-70 because its diff touches
+> .claude/settings.json; the work is finished and needs an attended gate and merge, not a rerun.
+
+It kept the repair and dropped only the `see solutions doc` tail, which a tracker card cannot
+follow. In its own message it said the finished work was sitting on the branch waiting for an
+attended merge and that merging was outside its scope, and it attempted no rerun, no merge, and no
+push. That is the behaviour the single shared sentence would have inverted, since it would have told
+the same process the work was unfinished and needed an attended session to do it.
+
+**The route the bullet above names is not the one that carried it.** A backstop refusal attaches no
+finding, so `classify.finding_line` never ran: the record read `findings: []`. The sentence reached
+the brief as `_Halt.message`, built by `summary.cause_line` at `run.py:812` and rendered into the
+brief's `Cause:` field at `closeout.py:162` through `brief.defang`. `finding_line` is the route for
+the transcript raiser. Both routes bottom out in `summary.cause_line`, so the shared renderer really
+is the seam that let one sentence serve two opposite repairs, but a reader tracing this defect
+through `finding_line` alone would never reach the raiser that caused it.
 
 **Item 4 of the issue, whether a denied `Bash` naming a `.claude/` path should promote, was decided
-no.** A Bash denial under `dontAsk` comes from the command allowlist, not from the path gate, so the
-promotion would assert a cause nobody has observed; on a blocked or absent envelope it would also
-hand the record its halt class through `classify`'s precedence and print the attended edit repair
-for a write that was never attempted. Detecting it would mean matching the command string, which
-catches reads the gate does not touch at all. `DenialTargets` in `tests/test_classify.py` pins the
+no, and the 2026-09-11 probe replaced the reason without changing the answer.** The original reason
+was that a Bash denial comes from the command allowlist and not from the path gate. That is false.
+The probe's disallowed list could not match `echo '...' > .claude/probe-bash.json`, and the call was
+refused anyway with the same `dontAsk` sentence, so the gate does reach `Bash`. What survives is
+stronger than what it replaced. The path gate's refusal and the allowlist's refusal are the same
+sentence, so nothing in the transcript says which wall fired, and a promotion would sometimes claim
+the gate for an allowlist refusal. Detecting a candidate at all would mean matching the command
+string, which cannot separate a write from a read: `ls -la .claude` is allowed. And a denied write
+leaves nothing behind, so the `denied_tool` finding already names `Bash` and its command while
+`path_gate`'s attended merge repair would be about a branch change that does not exist. On a blocked
+or absent envelope the promotion would also hand the record its halt class through `classify`'s
+precedence. `DenialTargets` in `tests/test_classify.py` pins the
 non promotion, so the IW-179 `git checkout -- .claude/skills/itg-brief/SKILL.md` denial stays a
 plain `denied_tool` finding by decision rather than by omission.
 
@@ -383,10 +421,13 @@ nowhere, so it carries no stability guarantee in either direction. A future vers
 gate or remove it, and either change should show up as a change in this pre-flight's hit rate rather
 than as a surprise at minute fifty.
 
-**This trigger has fired and the re-test is outstanding, as of 2026-08-28.**
-`contracts.CLI_VERSION_TESTED` now reads `2.1.250`, bumped against the installed binary during the
-backends spike. Nothing in that spike exercised the `.claude/` path gate, so whether it still behaves
-as described at 2.1.250 is unverified. Treat the gate as observed on 2.1.245 and unconfirmed since.
+**Re-tested 2026-09-11 against CLI 2.1.268, issue #14.** `contracts.CLI_VERSION_TESTED` and the
+`claude` entry in `BACKEND_PINS` now read `2.1.268`, the version the probe actually ran against, and
+`tests/stub-claude/claude` reports the same string so the pinned and observed fields still agree
+under the stub. The gate is still present and the `Edit` and `Write` half is unchanged. Two things
+the earlier description got wrong came out of the probe: the gate reaches `Bash`, and its `Bash`
+half is sensitive to the shape of the command rather than to the path alone. The probe and its
+consequences are under the Examples heading.
 
 **When the backend changes.** A permission mode's spelling on another vendor's CLI is not a promise
 about its behavior, which the descendant doc establishes for `dontAsk` on Grok. Whether a `.claude/`
@@ -465,6 +506,70 @@ The correct repair was the merge repair, not the do-the-work repair: review the 
 including `closing_reference`.
 
 The tell was in the envelope the whole time. The findings list never carried it.
+
+### The 2026-09-11 gate probe, issue #14, on CLI 2.1.268
+
+One headless session against the throwaway target, launched with the runner's own posture:
+`--permission-mode dontAsk`, `--allowedTools Bash,Read,Edit,Write,Grep,Glob`, a disallowed list of
+`Bash(git push*)` and `Bash(rm -rf*)` only, and the nesting markers `launch.child_env` drops. The
+steps were ordered so a `.claude/` write was attempted as the very first tool call of the session
+and again after unrelated work, because a gate that opens early and closes later was the reading
+IW-179 suggested.
+
+| Step | Call | Result |
+|---|---|---|
+| 1, first call of the session | `Write` to `.claude/probe-early.json` | refused |
+| 2 | `Write` to `probe-ordinary.txt` | allowed |
+| 3 | `Edit` on `probe-ordinary.txt` | allowed |
+| 4 | `Read` on `README.md` | allowed |
+| 5 | `Bash`, `ls -la` of the repo root | allowed |
+| 6 | `Bash`, `mkdir -p ... && echo '...' > <abs>/.claude/probe-bash.json` | refused |
+| 7 | `Write` to `.claude/probe-late.json` | refused |
+
+A second session tested the spelling of the Bash write on its own, since T-70's live task had
+written `.claude/settings.json` through `Bash` minutes earlier without being refused:
+
+| Step | Command | Result |
+|---|---|---|
+| 1 | `mkdir -p .claude && cat > .claude/probe-rel-heredoc.json <<'EOF' ... EOF` | allowed, file created |
+| 2 | `mkdir -p .claude && echo '...' > .claude/probe-rel-echo.json` | refused |
+| 3 | `echo '...' > <abs>/.claude/probe-abs-echo.json` | refused |
+| 4 | `ls -la .claude` | allowed |
+
+Three findings, two of which correct this doc.
+
+**The gate is not phase scoped, on this axis.** The first tool call of a fresh session was refused
+and the late call was refused identically, while ordinary paths stayed writable the whole way
+through. There was no window that opened and closed.
+
+**The gate reaches `Bash`.** This doc previously described it as a gate on `Edit` and `Write`, with
+the standing advice that a shell redirection is the way to write such a file under the posture. That
+advice is only conditionally true, and the refusal arrives with the same `dontAsk` sentence an
+allowlist refusal carries.
+
+**Its `Bash` half is scoped by the shape of the command, not by the path.** A heredoc write landed
+and an `echo` redirection to the same relative path, in the same session, after the same `mkdir -p`,
+was refused. The absolute spelling of the `echo` was refused too, so this is not about relative
+versus absolute paths. Whatever inspects the command recognises one redirection form and not the
+other. Treat the `Bash` half as leaky rather than as a boundary: do not build on either the refusal
+or the success.
+
+**This reframes IW-179 without settling it.** A commit landing 48 lines in a `.claude/` path at
+12:48 and denials against that same path at 13:02 looked like a gate that closed partway through the
+session. A gate scoped by tool and command shape explains the same two observations with no time
+component at all: a write that lands through one `Bash` form, and `Edit` calls that are refused
+whenever they are attempted. Confirming that means reading which tool produced the 12:48 commit,
+which lives in the support-workbench record rather than here. Until someone does, treat phase
+scoping as unsupported rather than disproved. This probe shows it did not happen in a fresh session,
+not that it cannot happen in a long one.
+
+**Issue #14's item 4, whether the backstop should tell a `.claude/` change the process was allowed
+to make from one it was not, is decided no.** The harness itself does not hold that line: the same
+path is writable through one command shape and refused through another, so allowed and not allowed
+is a property of how a write was spelled rather than of the path, the task, or the phase. A branch
+diff cannot recover the spelling, and it has no reason to. Any `.claude/` change on a branch is an
+attended merge, which is exactly what the backstop refuses. T-70 is the worked example: a
+legitimate, permitted, committed `.claude/settings.json` that still must not be merged unattended.
 
 ## Related
 

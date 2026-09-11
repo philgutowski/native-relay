@@ -50,7 +50,7 @@ def parse_args(argv):
 
 def main(argv):
     if argv[:1] == ["--version"]:
-        print(os.environ.get("RELAY_STUB_CLI_VERSION", "2.1.250 (Claude Code)"))
+        print(os.environ.get("RELAY_STUB_CLI_VERSION", "2.1.268 (Claude Code)"))
         return 0
 
     flags = parse_args(argv)

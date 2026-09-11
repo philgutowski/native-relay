@@ -9,7 +9,7 @@ import re
 
 # Backward-compatible Claude pin. New terminal records use the per-backend values in
 # BACKEND_PINS, which are the single source of truth for all three CLIs.
-CLI_VERSION_TESTED = "2.1.250"
+CLI_VERSION_TESTED = "2.1.268"
 
 # The return envelope (KTD8): the status field, its three values, and the list keys. The task
 # brief asks for it inside a fenced block with ENVELOPE_FENCE_TAG so a quoted `status:`
@@ -90,10 +90,16 @@ OUTPUT_FORMAT = "stream-json"
 BACKEND_PINS = {
     "claude": {
         "binary": "claude",
-        "version_tested": "2.1.250",
+        # Bumped 2026-09-11 (issue #14) to the version a live run and a gate probe both
+        # exercised, replacing a pin seventeen patch versions behind the installed binary. The
+        # .claude/ path gate is still in force here for Edit and Write. The probe also found it
+        # refusing one Bash redirection form into that directory while allowing another, so the
+        # Bash half is leaky and nothing should be built on either outcome;
+        # docs/solutions/workflow-issues/headless-dontask-blocks-claude-dir-edits.md has the runs.
+        "version_tested": "2.1.268",
         # `claude --version` leads with the number, so the leading-digit parse works here and
         # nowhere else. See the two entries below.
-        "version_output_sample": "2.1.250 (Claude Code)",
+        "version_output_sample": "2.1.268 (Claude Code)",
         "headless_flag": "-p",
         "session_id_choosable": True,
         "permission_mode": "dontAsk",
