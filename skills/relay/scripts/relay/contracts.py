@@ -434,10 +434,17 @@ AUDIT_CLASSES = (AUDIT_STALE_IN_REVIEW, AUDIT_REOPENED, AUDIT_CLOSED_UNLANDED,
 # evidence, under the Examples heading for the run this split came from.
 #
 # Both are written in the third person, describing a state rather than instructing a reader.
-# They are Cause lines, and a Cause line reaches the Closeout process's brief through
-# classify.finding_line, where a second person imperative would be an instruction to an agent
-# whose whole brief is to record the outcome and touch nothing. The operator's imperative lives
-# in summary's checks by hand, which no process but the operator ever reads.
+# They are Cause lines, and a Cause line reaches the Closeout process's brief by either of two
+# routes. A finding is rendered through classify.finding_line, which closeout.py:109 calls in a
+# loop over the record's findings. A tail refusal carries its own message instead, built by
+# summary.cause_line at run.py:812 and placed in the brief's Cause field at closeout.py:162
+# through brief.defang. The backstop sentence below only ever takes the second route, because a
+# tail refusal attaches no finding at all: the 2026-09-11 live proof's record read findings: [].
+# An earlier version of this comment named finding_line alone, which sent a reader tracing this
+# defect past the raiser that caused it. Either route reaches an agent whose whole brief is to
+# record the outcome and touch nothing, so a second person imperative would be an instruction to
+# it. The operator's imperative lives in summary's checks by hand, which no process but the
+# operator ever reads.
 #
 # classify's transcript promotion. The task asked the harness for a write and was refused, so
 # the work never happened.
