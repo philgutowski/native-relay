@@ -130,7 +130,9 @@ Native mode runs on `claude` and `grok`, grok admitted 2026-09-11: the Review st
 skill, and only a backend whose Capability record names a verified one can run the Brief.
 `validate` refuses a Task naming Codex with a sentence that names the missing step. Codex's
 launch seam and evidence reader stay in the Runner, pinned against the CLI version they were
-observed on, so that refusal can lift once a review step is verified live.
+observed on, so that refusal can lift once a review step is verified live. Jira pairs with
+`claude` and `grok`: both write the card through Atlassian MCP. Grok needs its own Atlassian
+OAuth; Claude's stored token does not travel. Codex on Jira stays refused.
 
 Between runs the Manifest's resolution decides again, so editing a Task's backend or model moves
 any Task that has not landed, and the Runner reports the move on its own output and as a finding
@@ -144,9 +146,10 @@ launches; a model name Relay does not recognise is allowed through.
 ### Capability record
 The frozen facts the Runner reads about one backend: whether it enforces tool restrictions at
 launch, its permission flags and forbidden spellings, the version it was tested against, the
-built in review skill the Brief names on it, its credential prefixes and nesting markers, and
-whether the session id is runner chosen. The launch seam, the readiness probe, the Brief inserts,
-and the classifier all read this record rather than a second per backend table.
+built in review skill the Brief names on it, its credential prefixes and nesting markers,
+whether a Jira Closeout can write on it, and whether the session id is runner chosen. The launch
+seam, the readiness probe, the Brief inserts, and the classifier all read this record rather
+than a second per backend table.
 
 ### Task path bound
 The commit-scope prefix list a Manifest names for Task branches. On a backend that cannot refuse

@@ -11,9 +11,11 @@ plan and returns a ValidationResult with errors, warnings, the defaults applied,
 completed closeout allowed paths. `validate` reads the target repo through gitread for the
 remote and identity checks; pass `check_repo=False` to skip those.
 """
+import json
 import os
 import re
 import shutil
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 
@@ -364,6 +366,57 @@ def _backend_readiness_errors(manifest, env):
     return errors
 
 
+GROK_ATLASSIAN_MCP_URL = "https://mcp.atlassian.com/v1/mcp/authv2"
+GROK_ATLASSIAN_AUTH_HINT = (
+    "complete grok's Atlassian login with `grok mcp add --transport http atlassian %s` "
+    "and the browser prompt; Jira writes on grok go through that server, not JIRA_API_TOKEN"
+    % GROK_ATLASSIAN_MCP_URL
+)
+MCP_DOCTOR_TIMEOUT_SECONDS = 20
+
+
+def _jira_grok_mcp_errors(manifest, env, run=None):
+    """Jira Closeout on grok writes through Atlassian MCP. Schema validation accepts the pair;
+    this probe, on check_environment, refuses a launch whose handshake cannot write the card.
+
+    `run` is injectable so the suite never starts a live grok doctor. The default is resolved
+    at call time, not at import, so a test that patches `subprocess.run` is the function this
+    actually calls."""
+    if manifest.tracker.adapter != "jira":
+        return []
+    if not any(task.backend == "grok" for task in manifest.tasks):
+        return []
+    path = env.get("PATH") if env is not None else None
+    if not shutil.which("grok", path=path):
+        return []
+    if run is None:
+        run = subprocess.run
+    try:
+        proc = run(
+            ["grok", "mcp", "doctor", "--json"],
+            capture_output=True, text=True, timeout=MCP_DOCTOR_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ["atlassian MCP on grok could not be probed; %s" % GROK_ATLASSIAN_AUTH_HINT]
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except ValueError:
+        return ["atlassian MCP on grok could not be probed; %s" % GROK_ATLASSIAN_AUTH_HINT]
+    servers = payload.get("servers") if isinstance(payload, dict) else None
+    if not isinstance(servers, list):
+        return ["atlassian MCP on grok could not be probed; %s" % GROK_ATLASSIAN_AUTH_HINT]
+    atlassian = [server for server in servers
+                 if isinstance(server, dict) and server.get("name") == "atlassian"]
+    if not atlassian:
+        return ["jira adapter with backend grok needs the atlassian MCP server connected; %s"
+                % GROK_ATLASSIAN_AUTH_HINT]
+    if not any(server.get("healthy") for server in atlassian):
+        return ["atlassian MCP handshake failed on grok; %s" % GROK_ATLASSIAN_AUTH_HINT]
+    return []
+
+
 def _model_owners(model):
     """Every backend whose capability record claims `model`, in BACKENDS order. Empty means no
     backend claims the name, which KTD11 reads as "allowed", not as "unknown and therefore
@@ -483,9 +536,9 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
     # is a manifest-shape error, so it remains visible to schema-only validation.
     if adapter == "jira":
         for task in manifest.tasks:
-            if task.backend in BACKENDS and task.backend != "claude":
+            if task.backend in BACKENDS and not backends.build(task.backend).CAPABILITY.jira_closeout:
                 err("tracker.adapter jira is incompatible with backend %s: its Closeout tools "
-                    "are available only on claude" % task.backend)
+                    "are available only on claude and grok" % task.backend)
 
     # R2, R5: every task has id, model, effort; an excluded task has a reason.
     # Parent KTD12: a Task whose resolved backend differs from the resolved default carries a
@@ -578,8 +631,10 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         if manifest.project.default_branch is None and gitread.default_branch(repo) is None:
             err("project.default_branch is unset and refs/remotes/origin/HEAD is not set in the repo")
     if check_environment:
-        err_list = _backend_readiness_errors(manifest, os.environ if env is None else env)
+        ready_env = os.environ if env is None else env
+        err_list = _backend_readiness_errors(manifest, ready_env)
         result.errors.extend(err_list)
+        result.errors.extend(_jira_grok_mcp_errors(manifest, ready_env))
     result.allowed_paths = completed_allowed_paths(manifest)
     return result
 

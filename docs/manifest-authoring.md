@@ -54,6 +54,9 @@ in_review_status = "in review"
   it at the remote's default branch, or at the local one under `shipping.push = false`.
 - `jira`: `site`, `project_key`, `done_statuses`, and the two environment variables the runner
   reads credentials from (`token_env`, `email_env`, default `JIRA_API_TOKEN` and `JIRA_EMAIL`).
+  Those tokens are for the runner's reads. Writes go through Atlassian MCP on `claude` and
+  `grok`. A grok Jira Task also needs grok's own Atlassian login; `validate` probes
+  `grok mcp doctor --json` and refuses until that handshake is healthy. Codex on Jira is refused.
 - `github`: `owner`, `project_number`, and `status_field` for a GitHub Project board, read
   through a logged in `gh`.
 - `in_review_status` is the status the task process moves a card to at its start. It is required

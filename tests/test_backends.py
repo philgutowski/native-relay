@@ -73,6 +73,11 @@ class CapabilityRecord(unittest.TestCase):
         self.assertFalse(backends.build("codex").CAPABILITY.enforces_at_launch)
         self.assertTrue(backends.build("grok").CAPABILITY.enforces_at_launch)
 
+    def test_jira_closeout_is_claude_and_grok_only(self):
+        self.assertTrue(backends.build("claude").CAPABILITY.jira_closeout)
+        self.assertTrue(backends.build("grok").CAPABILITY.jira_closeout)
+        self.assertFalse(backends.build("codex").CAPABILITY.jira_closeout)
+
     def test_every_backend_names_the_models_it_is_known_to_accept(self):
         """Issue #58, KTD11. The lists are partial by design, so the only claims made here are
         that each record carries some names and that no two records claim the same one today.

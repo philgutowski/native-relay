@@ -111,9 +111,11 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
 2. Confirm with the operator, one question at a time: which tasks to include and in what order;
    the model and effort for each; any task to exclude and why; and the three degraded path
    answers, `on_blocked.merge_partial`, `on_blocked.open_followup`, and
-   `on_halt.continue_past_task_halt`. Native mode runs on `claude` and `grok`. Write `claude`
-   unless the operator names grok: `validate` refuses a Task naming `codex` because Codex has
-   no verified built in review step. The rubric at `<rubric>` says how a backend is proposed.
+   `on_halt.continue_past_task_halt`. Native mode runs on `claude` and `grok`. Jira pairs with
+   both. Write `claude` unless the operator names grok: `validate` refuses a Task naming `codex`
+   because Codex has no verified built in review step, and refuses Codex on Jira because it has
+   no Closeout write path. A grok Jira Task needs grok's own Atlassian MCP login; `validate`
+   probes it and names the repair. The rubric at `<rubric>` says how a backend is proposed.
    Do not write a backend the operator has not seen. Nothing re-applies the rubric after they
    choose. The third degraded-path answer trades a mid run stop for throughput: on, a
    halt contained to one task pauses that task and the later independent tasks keep running,
@@ -298,6 +300,8 @@ never started.
 |---|---|---|
 | `backend <name> binary <binary> is missing from PATH` | that backend's CLI is not installed, or not on `PATH` | install the backend's CLI and put it on `PATH` |
 | `tasks[i] (<id>) names backend <name>, which has no verified native review step, see README` | the manifest names `codex` | set the Task's backend to `claude` or `grok`, with a model that backend serves, and remove the `reason` if it no longer differs from the default |
+| `tracker.adapter jira is incompatible with backend <name>` | the Task names Codex on a Jira tracker | set that Task's backend to `claude` or `grok` |
+| `atlassian MCP handshake failed on grok` / `needs the atlassian MCP server connected` | grok cannot write the Jira card yet | `grok mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2`, complete the browser login, then `validate` again |
 
 After fixing the environment, confirm before resuming:
 

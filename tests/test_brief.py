@@ -489,6 +489,16 @@ class TrackerStepsPerAdapter(unittest.TestCase):
         self.assertIn("no in-progress mark for you to set", steps)
         self.assertNotIn("Move the tracker card", text)
 
+    def test_a_grok_jira_brief_names_the_atlassian_mcp_tools(self):
+        from dataclasses import replace
+        m = self.load("manifest-jira-local-merge.toml")
+        task = replace(m.tasks[0], backend="grok", model="grok-4.6",
+                       reason="fixture: grok Jira Task")
+        text = brief.render(m, task, {"id": "T-1", "title": "t", "description": "d"})
+        self.assertIn("atlassian__transitionJiraIssue", text)
+        self.assertIn("Do not use JIRA_API_TOKEN", text)
+        self.assertIn("Move the tracker card", text)
+
     def test_the_envelope_asks_for_no_plan_path(self):
         """Native mode: the plan is a message, so the envelope has no path to carry."""
         m = self.load("manifest-jira-local-merge.toml")

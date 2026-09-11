@@ -123,6 +123,9 @@ BACKEND_PINS = {
         "config_overrides": (),
         "strict_config": False,
         "grants_network": False,
+        # Jira Closeout writes through Claude's Atlassian MCP tools. True here is the
+        # pairing validate accepts.
+        "jira_closeout": True,
         "commit_message_constraint": None,
     },
     "codex": {
@@ -195,6 +198,9 @@ BACKEND_PINS = {
         # a grant to any substring test, and the record would then claim a reach the Task does
         # not have.
         "grants_network": True,
+        # No Atlassian MCP on this CLI, and no verified review step either. Jira pairing stays
+        # refused even if a review step lands later, until a write path is observed live.
+        "jira_closeout": False,
         "commit_message_constraint": None,
     },
     "grok": {
@@ -280,6 +286,13 @@ BACKEND_PINS = {
         "config_overrides": (),
         "strict_config": False,
         "grants_network": False,
+        # Jira Closeout writes through Atlassian MCP, the same server Claude discovers from
+        # ~/.claude.json. Grok's tool names are atlassian__<tool> with no mcp__ prefix; the
+        # Claude mcp__atlassian__* allow spelling is rewritten onto that matcher. The operator
+        # must complete grok's own Atlassian OAuth; Claude's stored token does not travel.
+        # Observed 2026-09-11 on grok 1.0.25: grok inspect lists atlassian from ~/.claude.json,
+        # grok mcp doctor reports handshake Auth required / invalid_token until that login.
+        "jira_closeout": True,
         # Issue #57, strengthened 2026-09-11 after live T-72. Instruction is the only
         # enforcement layer this backend has for the cancellation. The live `/review` cancel
         # is recorded in docs/solutions/workflow-issues/

@@ -111,6 +111,22 @@ class LandedBrief(CloseoutCase):
                                 "claude", landing_ref=MERGE_SHA, branch="relay/T-1")
         self.assertIn("example.atlassian.net", brief)
 
+    def test_a_grok_jira_closeout_brief_names_grok_tool_spellings(self):
+        text = self.toml.replace('adapter = "markdown"', 'adapter = "jira"')
+        text = text.replace('file = "tracker.md"',
+                            'site = "example.atlassian.net"\nproject_key = "IW"')
+        text = text.replace('done_statuses = ["done"]', 'done_statuses = ["Done", "Closed"]')
+        manifest = self.load(text, name="jira.toml")
+        adapter = jira_adapter.JiraAdapter(
+            manifest, opener=object(),
+            env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
+        brief = closeout.render(manifest, CARD, "landed", digest_from("success.jsonl"),
+                                [], adapter, mf.completed_allowed_paths(manifest),
+                                "grok", landing_ref=MERGE_SHA, branch="relay/T-1")
+        self.assertIn("atlassian__transitionJiraIssue", brief)
+        self.assertIn("not JIRA_API_TOKEN", brief)
+        self.assertIn("example.atlassian.net", brief)
+
     def test_the_brief_carries_the_adapter_duty_and_the_landing_reference(self):
         text = self.render()
         self.assertIn("Transition the card to its terminal status", text)

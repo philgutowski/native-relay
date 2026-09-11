@@ -5,12 +5,17 @@ from types import SimpleNamespace
 
 import _paths
 from relay import classify, contracts, summary
+from relay.adapters import jira as jira_adapter
 from test_summary import FINDING_ROWS
 
 FIXTURES = os.path.join(_paths.FIXTURES_DIR, "transcripts")
 BACKEND_FIXTURES = os.path.join(_paths.FIXTURES_DIR, "backends")
 # The shape the Jira adapter's write_tool_patterns() returns in U4 (KTD16).
-JIRA_PATTERNS = {"tools": ["mcp__atlassian__"], "bash": [], "paths": []}
+JIRA_PATTERNS = {
+    "tools": [jira_adapter.WRITE_TOOL_PREFIX, jira_adapter.GROK_WRITE_TOOL_PREFIX],
+    "bash": [],
+    "paths": [],
+}
 MARKDOWN_PATTERNS = {"tools": [], "bash": [], "paths": ["tracker.md"]}
 GITHUB_PATTERNS = {"tools": [], "bash": ["gh issue", "gh project item-edit"], "paths": []}
 
@@ -154,6 +159,11 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(denied[0]["tool"], "mcp__atlassian__transitionJiraIssue")
         self.assertTrue(r["routable"], "verify decides partial_landing from git and the card")
         self.assertEqual(classify.finding_line(denied[0]), "code landed, card unmoved: mcp__atlassian__transitionJiraIssue denied")
+
+    def test_a_grok_jira_tool_name_is_a_tracker_write(self):
+        use = {"name": "atlassian__transitionJiraIssue", "input": {"cloudId": "example.atlassian.net"}}
+        self.assertTrue(classify.matches_write_pattern(use, JIRA_PATTERNS))
+        self.assertFalse(classify.matches_write_pattern(use, MARKDOWN_PATTERNS))
 
     def test_tracker_denied_without_patterns_is_a_plain_denial(self):
         r = run("tracker_denied.jsonl", patterns=MARKDOWN_PATTERNS)

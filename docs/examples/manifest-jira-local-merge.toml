@@ -20,7 +20,9 @@ adapter = "jira"
 site = "example.atlassian.net"
 project_key = "ABC"
 # The runner reads Jira over REST with these environment variables. It never reads a tracker
-# through a model, and it never passes these to a child process.
+# through a model, and it never passes these to a child process. Writes go through Atlassian
+# MCP. A grok Task on this adapter needs grok's own Atlassian login
+# (`grok mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2`).
 token_env = "JIRA_API_TOKEN"
 email_env = "JIRA_EMAIL"
 # A card in one of these statuses counts as terminal for verify-landed.

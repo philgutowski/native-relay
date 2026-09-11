@@ -73,6 +73,11 @@ manifest written for `compound-relay` that names Codex is refused with that sent
 as an unknown name. Grok's skip is undetectable: the digest lists `review_skipped` as not
 checked.
 
+Jira pairs with `claude` and `grok`. Both write the card through Atlassian MCP, not through
+`JIRA_API_TOKEN` (that token is for the runner's reads, and is scrubbed from every child). Grok
+needs its own Atlassian login; Claude's stored token does not travel. `validate` and `run` probe
+`grok mcp doctor --json` and refuse until that handshake is healthy. Codex stays refused on Jira.
+
 ## Platform
 
 - Python 3.11 or later. The runner is standard library only and reads TOML with `tomllib`,

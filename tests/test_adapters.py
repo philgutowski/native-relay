@@ -300,7 +300,8 @@ class Jira(AdapterCase):
 
     def test_the_write_patterns_name_the_atlassian_mcp_and_nothing_else(self):
         patterns = self.jira(self.opener()).write_tool_patterns()
-        self.assertIn("mcp__atlassian__", patterns["tools"])
+        self.assertEqual(patterns["tools"],
+                         (jira_adapter.WRITE_TOOL_PREFIX, jira_adapter.GROK_WRITE_TOOL_PREFIX))
         self.assertEqual(patterns["bash"], ())
 
     def test_the_closeout_tools_are_explicit_and_carry_no_confluence_tool(self):
@@ -316,6 +317,14 @@ class Jira(AdapterCase):
         for tool in tools:
             self.assertNotIn("Confluence", tool)
             self.assertNotIn("*", tool)
+
+    def test_grok_closeout_tools_use_the_native_allow_form_and_carry_no_wildcard(self):
+        tools = self.jira(self.opener()).closeout_allowed_tools(backend="grok")
+        self.assertEqual(tools, jira_adapter.GROK_CLOSEOUT_TOOLS)
+        for tool in tools:
+            self.assertTrue(tool.startswith("MCPTool(atlassian__"), tool)
+            self.assertNotIn("*", tool)
+            self.assertNotIn("mcp__", tool)
 
     def test_closeout_instructions_name_the_site_as_cloud_id(self):
         adapter = self.jira(self.opener())

@@ -18,7 +18,7 @@ The audit matches command spellings, so what it can match bounds both of those. 
 
 **Residual exposure, every backend.** All three CLIs share the operator's home and keep credentials in files there. Environment scrubbing does not reach those files. Codex's sandbox bounds writes, not reads. The acceptance sentence is where the operator accepts that residual on an unenforced backend.
 
-**Adapter pairing.** Jira Closeout tools exist only on Claude. A Jira manifest with a Codex or Grok Task is refused at validate. GitHub and markdown pair with every backend.
+**Adapter pairing.** Jira Closeout writes through Atlassian MCP. Claude and grok both have that path, grok admitted 2026-09-11: grok discovers the server from `~/.claude.json`, names the tools `atlassian__<tool>` with no `mcp__` prefix, and needs its own Atlassian OAuth. Claude's stored token does not travel. `validate --check-environment` (the default on `validate` and `run`) refuses a grok Jira Task whose `grok mcp doctor --json` handshake is not healthy. Codex has no path and stays refused. GitHub and markdown pair with every backend.
 
 ## How to propose
 

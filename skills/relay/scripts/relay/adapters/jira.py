@@ -25,11 +25,30 @@ ISSUE_PATH = "/rest/api/3/issue/%s"
 SEARCH_PATH = "/rest/api/3/search/jql"
 
 WRITE_TOOL_PREFIX = "mcp__atlassian__"
+# Grok's Atlassian MCP tools carry no mcp__ prefix. Classify matches on startswith, so both
+# spellings have to live here: a grok Closeout denied on atlassian__transitionJiraIssue would
+# otherwise read as a plain denied_tool and not as tracker_write_denied.
+GROK_WRITE_TOOL_PREFIX = "atlassian__"
 CLOSEOUT_TOOLS = (
     "mcp__atlassian__getJiraIssue",
     "mcp__atlassian__getTransitionsForJiraIssue",
     "mcp__atlassian__transitionJiraIssue",
     "mcp__atlassian__addCommentToJiraIssue",
+)
+# Native grok allow form (Grok 1.0.25). The mcp__ spelling is rewritten onto the same matcher,
+# but --allow with a Claude tool name is accepted and does not grant grok's real tools, so
+# Closeout on grok names the form this CLI actually enforces.
+GROK_CLOSEOUT_TOOLS = (
+    "MCPTool(atlassian__getJiraIssue)",
+    "MCPTool(atlassian__getTransitionsForJiraIssue)",
+    "MCPTool(atlassian__transitionJiraIssue)",
+    "MCPTool(atlassian__addCommentToJiraIssue)",
+)
+GROK_TOOL_NAMES = (
+    "atlassian__getJiraIssue",
+    "atlassian__getTransitionsForJiraIssue",
+    "atlassian__transitionJiraIssue",
+    "atlassian__addCommentToJiraIssue",
 )
 
 
@@ -166,12 +185,14 @@ class JiraAdapter:
         return None
 
     def write_tool_patterns(self):
-        return {"tools": (WRITE_TOOL_PREFIX,), "bash": (), "paths": ()}
+        return {"tools": (WRITE_TOOL_PREFIX, GROK_WRITE_TOOL_PREFIX), "bash": (), "paths": ()}
 
-    def closeout_allowed_tools(self):
+    def closeout_allowed_tools(self, backend=None):
+        if backend == "grok":
+            return GROK_CLOSEOUT_TOOLS
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None):
         """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
         supplied for a blocked or halted outcome when the runner wants the card returned there.
         The task process transitioned the card to the in review status at its first step, so
@@ -191,5 +212,10 @@ class JiraAdapter:
                     "Transition the card back to `%s`, the status it read before this run, since "
                     "no process is working on it now; a blocked task stays open." % return_to)
             text = "Add one comment carrying the blocker digest below. %s" % move
-        return text + (" Pass %s as cloudId on every Atlassian call. Never call "
-                       "getAccessibleAtlassianResources." % self._site)
+        tail = (" Pass %s as cloudId on every Atlassian call. Never call "
+                "getAccessibleAtlassianResources." % self._site)
+        if backend == "grok":
+            tail += (" This CLI names the tools %s. Use those, not mcp__atlassian__ names, "
+                     "and not JIRA_API_TOKEN; the token is not in this process."
+                     % ", ".join(GROK_TOOL_NAMES))
+        return text + tail

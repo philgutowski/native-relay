@@ -61,8 +61,9 @@ backlog convention for this repo. Concretely:
   lifting that refusal is a plan of its own with a live run behind it. Grok's skip is
   undetectable: the digest lists `review_skipped` as not checked, and classify must not attach
   a false skip finding.
-- The runner never writes to a tracker. Every tracker write goes through a Claude process with
-  the adapter's instructions; keep it that way.
+- The runner never writes to a tracker. Every tracker write goes through a Task or Closeout
+  process with the adapter's instructions; keep it that way. Jira writes go through Atlassian
+  MCP on claude and grok. Codex has no path.
 - The stub cannot produce what a real process produces. After changing a contract between
   processes (the envelope grammar, the closeout terminal line, a brief template, the halt record,
   the classify digest keys), run one live task against a throwaway target before calling it done.
