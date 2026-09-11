@@ -111,10 +111,14 @@ A Task process owns whatever it spawns. Subagents and gate commands run undernea
 outlive it, so the Runner bounds the whole group rather than the one invocation, and a Task
 process that has exited is not by itself evidence that its work has stopped.
 
-Its own turn ending and the process exiting are the same event, so anything it starts in the
-background is at the mercy of that exit rather than surviving it. This is why the Runner's own
-bounding of the whole group is a backstop rather than the first line of defense: what usually
-kills a background command is the process's own turn ending, not the Runner noticing afterward.
+Its own turn ending and the process exiting are the same event, so a background command the
+harness is tracking on its behalf dies with that exit. A child it starts through the shell
+instead, detached from the command it is itself waiting on, is tracked by nothing and survives,
+outliving the turn, the Task process, and the rest of the run. The Runner's bounding of the whole
+group is not the backstop this appears to leave either, because that bounding fires only where a
+run has gone wrong, on an operator signal, a lost Lease, or a deadline, and never on an ordinary
+exit. So the only Task processes whose leftovers are swept are the ones that failed, and a
+leftover has no place in anything the Runner records.
 
 ### Backend
 The CLI that runs a Task process and that Task's Closeout process, one of `claude`, `codex`, or
