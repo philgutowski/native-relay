@@ -238,6 +238,20 @@ Task process at the end of its context is the worst available judge of its own l
 Blocked Tasks too, since a blocker is often the learning. The Task process may also record what
 the project's own method tells it to on its branch; the judgment does not write that twice.
 
+### Finding
+An observation the Runner attaches to a Task's record without it being that Task's Halt class:
+something the run noticed that an operator should know, from a refused tool call, to a Review step
+that never ran, to a card the Closeout process failed to comment on.
+
+A finding names a class from the closed Halt class set whenever one fits, so the same name can be a
+Task's class and a finding on a Task that landed, and the two mean different things. The class is
+the Runner's verdict on why a Task did not land. A finding is one observation about a Task whose
+outcome it does not decide. The Envelope settles which a given observation becomes: a Task
+reporting itself complete goes to Verify-landed with its findings intact and no class at all, so a
+refusal the Task process worked around leaves a finding on a landed record and nothing else. Some
+findings reach the operator only through the run summary's check by hand list, which is why that
+list is read on a run that reports no halts at all.
+
 ### Halt class
 The Runner's classification of one Task process exit, drawn from a closed set and decided from the
 session transcript plus git and Tracker evidence. Every class carries the evidence its Cause line
@@ -312,6 +326,11 @@ the Tracker rather than trusting which actor performed the merge.
 A Task whose work is durably where the Shipping mode says it belongs and whose Tracker record names
 the landing. Both halves are required: code that merged while the card stayed put is a partial
 landing, not a landing, and it halts the run.
+
+Landed says where the Task's work went, not that the Task did all of the work it set out to do. A
+Task refused part of its change that finishes the rest and merges satisfies both halves and is
+Landed, with the refusal recorded as a Finding. Completeness is not a property the Runner can read
+from git or the Tracker, so no term in this vocabulary asserts it.
 
 ### Blocked
 A Task whose process stopped deliberately without landing, leaving the repository as it found it. A
