@@ -64,13 +64,14 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 
 ## Backends
 
-Native mode runs on `claude` only for now. The review step is Claude Code's built in
-`/code-review`, and neither Codex nor Grok has a verified equivalent reachable from a headless
-run, so `validate` refuses a task naming `codex` or `grok` before anything launches, with an
-error that says so. The launch seams for both are kept in the runner, pinned against the CLI
-versions they were observed on, so the refusal can lift one backend at a time once a review step
-is verified live. A manifest written for `compound-relay` that names either backend is refused
-with that sentence rather than as an unknown name.
+Native mode runs on `claude` and `grok`. The review step is the backend's built in skill,
+`/code-review` on Claude and `/review` on grok. Codex has no verified equivalent reachable from
+a headless run, so `validate` refuses a task naming `codex` before anything launches, with an
+error that names the missing step. Codex's launch seam stays in the runner, pinned against the
+CLI version it was observed on, so that refusal can lift once a review step is verified live. A
+manifest written for `compound-relay` that names Codex is refused with that sentence rather than
+as an unknown name. Grok's skip is undetectable: the digest lists `review_skipped` as not
+checked.
 
 ## Platform
 
@@ -78,7 +79,7 @@ with that sentence rather than as an unknown name.
   which arrived in 3.11.
 - macOS or Linux. The lease uses `fcntl`, so Windows is out until that changes.
 - CLI versions the pins in `skills/relay/scripts/relay/contracts.py` were observed against:
-  `claude` 2.1.250, `codex` 0.149.0, `grok` 1.0.13. A newer CLI usually works; the runner records
+  `claude` 2.1.250, `codex` 0.149.0, `grok` 1.0.25. A newer CLI usually works; the runner records
   the version it actually ran beside the pinned one in the terminal record so drift is visible.
 - For a Jira tracker, two environment variables the manifest names, by default
   `JIRA_API_TOKEN` and `JIRA_EMAIL`. For GitHub Projects, a logged in `gh`.

@@ -111,11 +111,11 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
 2. Confirm with the operator, one question at a time: which tasks to include and in what order;
    the model and effort for each; any task to exclude and why; and the three degraded path
    answers, `on_blocked.merge_partial`, `on_blocked.open_followup`, and
-   `on_halt.continue_past_task_halt`. Native mode runs on `claude` only, so write that backend
-   and no other: `validate` refuses a Task naming `codex` or `grok` because neither has a
-   verified built in review step. The rubric at `<rubric>` says how a backend will be proposed
-   once that refusal lifts; today it proposes nothing. Do not write a backend the operator has
-   not seen. Nothing re-applies the rubric after they choose. The third degraded-path answer trades a mid run stop for throughput: on, a
+   `on_halt.continue_past_task_halt`. Native mode runs on `claude` and `grok`. Write `claude`
+   unless the operator names grok: `validate` refuses a Task naming `codex` because Codex has
+   no verified built in review step. The rubric at `<rubric>` says how a backend is proposed.
+   Do not write a backend the operator has not seen. Nothing re-applies the rubric after they
+   choose. The third degraded-path answer trades a mid run stop for throughput: on, a
    halt contained to one task pauses that task and the later independent tasks keep running,
    so several halts in a row surface only in the summary; off, the first halt stops the run.
    A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
@@ -272,7 +272,7 @@ The classes and what they mean for the operator:
 | `closeout_out_of_scope` | the closeout committed outside its allowed paths; the runner reset it | look at what it tried to write, then resume |
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
 | `unclean_exit` | the process left a dirty tree, or claimed to finish and left nothing to merge | inspect the tree, clean it, resume |
-| `review_skipped` (a finding, never a halt) | the task claimed complete without a `/code-review` call in its transcript; it landed if the gate passed | review the diff of the landing commit by hand |
+| `review_skipped` (a finding, never a halt) | on Claude, the task claimed complete without a `/code-review` Skill call in its transcript; it landed if the gate passed. On grok the skip is undetectable, so this finding is not attached and the digest lists `review_skipped` as not checked | review the diff of the landing commit by hand |
 | `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review | move the card back by hand to the status the line names |
 | `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
 | `unexpected_error` | the run loop hit something it did not anticipate: a defect, a library error, a task process that could not be launched, or a manifest naming an unimplemented shipping mode | read the error text in the cause line and the runner log; the fault is in the runner or the manifest, not the task, so fix that before resuming |
@@ -297,7 +297,7 @@ never started.
 | Error text | What it means | What the operator does |
 |---|---|---|
 | `backend <name> binary <binary> is missing from PATH` | that backend's CLI is not installed, or not on `PATH` | install the backend's CLI and put it on `PATH` |
-| `tasks[i] (<id>) names backend <name>, which has no verified native review step; native mode runs on claude only` | the manifest names `codex` or `grok` | set the Task's backend to `claude`, with a claude model, and remove the `reason` if it no longer differs from the default |
+| `tasks[i] (<id>) names backend <name>, which has no verified native review step, see README` | the manifest names `codex` | set the Task's backend to `claude` or `grok`, with a model that backend serves, and remove the `reason` if it no longer differs from the default |
 
 After fixing the environment, confirm before resuming:
 
@@ -319,7 +319,7 @@ so the next run launches that task where the operator sent it and names the move
 and on the task's record. Two things bound that: a stranded task branch is refused exactly as
 above, judged against the name and baseline the record already carries, so the edit does not get
 the task past it; and a blocked task needs `--retry-blocked` before a reassignment reaches it at
-all. A backend edit is refused at validate today, since native mode runs on `claude` alone.
+all. A backend edit to `codex` is refused at validate, since Codex has no verified review step.
 
 ## What this skill never does
 

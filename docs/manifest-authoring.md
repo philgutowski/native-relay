@@ -191,9 +191,9 @@ reason = "needs a design answer nobody can give unattended"
 
 - Every task carries `id`, `model`, and `effort`. Ids are the tracker's own.
 - `excluded = true` keeps a task out of the run; it needs a `reason` in your words.
-- `backend` is `claude`, the one backend native mode runs. Naming `codex` or `grok` is refused by
-  `validate` with a sentence saying why. When that refusal lifts, a task whose backend differs
-  from the `[defaults]` value will carry a `reason` string, the same field as above.
+- `backend` is `claude` or `grok`. Naming `codex` is refused by `validate` with a sentence that
+  names the missing review step. A task whose backend differs from the `[defaults]` value
+  carries a `reason` string, the same field as above.
 - Tasks must be independent of each other. A task that depends on another belongs in a later run.
 
 ## 10. Validate, then run

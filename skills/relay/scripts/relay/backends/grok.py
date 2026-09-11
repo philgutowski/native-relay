@@ -8,8 +8,10 @@ from . import (Evidence as _Evidence, TEXT_CHARS as _TEXT_CHARS, _argument_of,
                _tool_call_event)
 
 # Issue #58, KTD11. A short, deliberately partial list of the grok family names this CLI takes
-# for `--model`. Unlisted names pass, so this going stale is harmless.
-CAPABILITY = _record("grok", known_models=("grok-4", "grok-4-fast", "grok-code-fast-1"))
+# for `--model`. Unlisted names pass, so this going stale is harmless. Refreshed 2026-09-11
+# from `grok models` on 1.0.25: grok-4.6 (default) and grok-4.5. The earlier grok-4,
+# grok-4-fast, and grok-code-fast-1 names are gone from that listing.
+CAPABILITY = _record("grok", known_models=("grok-4.6", "grok-4.5"))
 
 parse_version = _parse_after_name_token
 
@@ -17,10 +19,10 @@ parse_version = _parse_after_name_token
 # listed so the tool-call line names the argument either way.
 _ARGUMENT_KEYS = ("command", "file_path", "target_file", "pattern", "skill", "description")
 
-# Grok's structured deny mechanism (demonstrated in denial-refusal.jsonl) is detectable; its
-# skill invocation is a plain slash-command string with no distinguishing tool call, so a
-# review step that never ran cannot be (Backends U6, R4), and there is no verified review step
-# here anyway (`review_skill` is None).
+# Grok's structured deny mechanism (demonstrated in denial-refusal.jsonl) is detectable. Skill
+# invocation on 1.0.25 is still a `read_file` of a SKILL.md plus optional `subagent_spawned`,
+# with no Skill tool event, so a review step that never ran cannot be told from one that did
+# (Backends U6, R4). `review_skill` is `review`; skip stays undetectable.
 _UNDETECTABLE = frozenset((contracts.REVIEW_SKIPPED,))
 
 # The marker Grok's own `--deny` rule denial carries. A `tool_call_update` failing for another

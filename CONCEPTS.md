@@ -126,11 +126,11 @@ The CLI that runs a Task process and that Task's Closeout process, one of `claud
 `claude`. The Runner launches on that CLI. It does not choose or change the backend during a run.
 `/relay` itself still runs in Claude Code. Only the launched processes vary.
 
-Native mode runs on `claude` alone, decided 2026-09-07: the Review step is a built in skill, and
-only a backend whose Capability record names a verified one can run the Brief. `validate` refuses
-a Task naming another backend with a sentence saying so. The other two backends' launch seams and
-evidence readers stay in the Runner, pinned against the CLI versions they were observed on, so the
-refusal can lift one backend at a time once a review step is verified live.
+Native mode runs on `claude` and `grok`, grok admitted 2026-09-11: the Review step is a built in
+skill, and only a backend whose Capability record names a verified one can run the Brief.
+`validate` refuses a Task naming Codex with a sentence that names the missing step. Codex's
+launch seam and evidence reader stay in the Runner, pinned against the CLI version they were
+observed on, so that refusal can lift once a review step is verified live.
 
 Between runs the Manifest's resolution decides again, so editing a Task's backend or model moves
 any Task that has not landed, and the Runner reports the move on its own output and as a finding
@@ -175,10 +175,12 @@ supply stop the run outright.
 ### Review step
 The step of the Task brief that runs the backend's built in code review on the branch's diff and
 fixes what it finds. The skill's name comes from the Capability record, so the Brief that asks for
-it and the classifier that looks for it cannot disagree. A Task whose Envelope reads complete and
-whose transcript holds no call to that skill gets a `review_skipped` finding: it lands if the gate
-passes, and the summary lists its diff as one to review by hand. A backend with no such skill has
-no native Brief and is refused at validate.
+it and the classifier that looks for it cannot disagree. On Claude that name is `/code-review` and
+a Skill call is visible, so a Task whose Envelope reads complete and whose transcript holds no
+call to that skill gets a `review_skipped` finding: it lands if the gate passes, and the summary
+lists its diff as one to review by hand. On grok that name is `/review` and skip is undetectable:
+the digest lists `review_skipped` as not checked, and classify does not attach a skip finding. A
+backend with no such skill has no native Brief and is refused at validate.
 
 ### Envelope
 The structured block a Task process prints at the end of its work to report what it did: whether it

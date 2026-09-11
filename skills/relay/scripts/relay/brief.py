@@ -71,15 +71,22 @@ FOLLOWUP_FORBIDDEN = (
 )
 
 # The review rule, rendered from the backend's own `review_skill` rather than written into the
-# template, so the sentence and the step that names the skill cannot drift apart. It does not
-# say the call is recorded: codex and grok declare REVIEW_SKIPPED undetectable, and although
-# neither can run a native brief today, a rule that promises detection would be false the day
-# one of them can.
+# template, so the sentence and the step that names the skill cannot drift apart. Claude's
+# rule promises a report because its Skill call is visible. A backend that names a skill and
+# lists REVIEW_SKIPPED as undetectable gets REVIEW_RULE_UNDETECTABLE instead, so the brief
+# does not promise a report the runner cannot make. Codex still has no skill and still
+# renders the fallback; validate refuses it.
 REVIEW_RULE = (
     "The review step runs this CLI's built in code review, `%s`, exactly as the steps below "
     "spell it. Reading your own diff is not a substitute, and neither is any other skill with a "
     "similar name; a task that completes without running it is reported to the operator as "
     "a review that never ran."
+)
+REVIEW_RULE_UNDETECTABLE = (
+    "The review step runs this CLI's built in code review, `%s`, exactly as the steps below "
+    "spell it. Reading your own diff is not a substitute, and neither is any other skill with a "
+    "similar name. This CLI does not emit a structured skill call Relay can key on, so a "
+    "missing run is not reported as a skip."
 )
 # The fallback for a backend with no verified built in review. `manifest.validate` refuses such
 # a backend, so no real process reads this; it exists so the brief still renders for every
@@ -204,7 +211,13 @@ def values(manifest, task, card, branch=None, mode=None):
     # Bound once: the rule sentence and the step that runs the skill have to name the same thing,
     # and two independent calls are how they would come to name different ones.
     review = backends.review_command(module.CAPABILITY)
-    review_rule = REVIEW_RULE % review if review else REVIEW_RULE_FALLBACK
+    undetectable = getattr(module, "_UNDETECTABLE", frozenset())
+    if review and contracts.REVIEW_SKIPPED in undetectable:
+        review_rule = REVIEW_RULE_UNDETECTABLE % review
+    elif review:
+        review_rule = REVIEW_RULE % review
+    else:
+        review_rule = REVIEW_RULE_FALLBACK
     return {
         "task_id": task.id,
         "title": defang(str(card.get("title") or "")).strip(),

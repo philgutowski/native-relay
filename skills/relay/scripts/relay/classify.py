@@ -10,7 +10,9 @@ One join and one absence do the work (KTD6). A denial is a `tool_result` whose c
 the denial regex; joined by id to its `tool_use` it yields the tool name and the path or argument
 it was denied on. A skipped review is the absence of any `Skill` tool_use naming the backend's
 `review_skill` in a transcript whose envelope reads complete; `review_ran` decides whether a
-call counts, and only a backend with a `review_skill` is judged at all.
+call counts, and only a backend with a `review_skill` whose skip is detectable is judged at
+all. A backend that names a review skill and lists `REVIEW_SKIPPED` as undetectable does not
+get a skip finding.
 Classes assigned here are the ones the transcript alone can decide: timeout (from the launch
 result), blocked_envelope, no_envelope, path_gate, and unexpected_error when the transcript
 itself would not open, which is the runner's fault and never the task's silence (KTD5).
@@ -470,8 +472,11 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
         result["routable"] = True
         # Native mode: a complete claim with no review call in the transcript. A finding, not a
         # class, because verify decides landing from git and the tracker; the summary lists it
-        # as a check by hand. Judged only on a backend that names a review skill at all.
-        if review_skill and not reviewed:
+        # as a check by hand. Judged only on a backend that names a review skill and can
+        # observe a Skill call. Grok names `/review` and lists skip as undetectable, so a
+        # complete grok Task must not pick up a false skip here.
+        if (review_skill and not reviewed
+                and contracts.REVIEW_SKIPPED not in evidence.undetectable):
             result["findings"].append({
                 "class": contracts.REVIEW_SKIPPED,
                 "review": backends.review_command(module.CAPABILITY),

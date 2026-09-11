@@ -16,15 +16,15 @@ FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 # One model name each backend is known to accept, for a fixture that moves a Task off claude.
 # R9 refuses a backend paired with a model another backend claims, so a fixture that reassigns
 # a Task's backend has to reassign its model in the same edit.
-BACKEND_MODELS = {"claude": "opus", "codex": "gpt-5-codex", "grok": "grok-4"}
+BACKEND_MODELS = {"claude": "opus", "codex": "gpt-5-codex", "grok": "grok-4.6"}
 
 
 NATIVE_REFUSAL = "no verified native review step"
 
 
 def other_errors(result):
-    """Every error except the native mode refusal of a non claude backend, so a rule about
-    codex or grok manifests can still be asserted on its own."""
+    """Every error except the native mode refusal of a backend with no review skill, so a
+    rule about a Codex manifest can still be asserted on its own."""
     return [error for error in result.errors if NATIVE_REFUSAL not in error]
 
 
@@ -354,9 +354,15 @@ class Backends(ManifestCase):
         self.assertEqual(other_errors(mf.validate(m)), [])
 
     def test_native_mode_refuses_a_task_on_a_backend_with_no_review_skill(self):
-        """Decided 2026-09-07 (docs/plans/2026-09-07-native-mode-plan.md). The refusal names
-        the task, the backend, and the missing step, and fires on an excluded task and on an
-        inherited [defaults] backend too, so nothing can launch there later."""
+        """Decided 2026-09-07, grok admitted 2026-09-11. The remaining refusal is Codex. It
+        names the task, the backend, and the missing step, not "claude only", and fires on an
+        excluded task and on an inherited [defaults] backend too, so nothing can launch there
+        later. A grok Task with a grok model validates."""
+        grok = self.retarget(self.base, "T-1", "grok", '\nreason = "fixture: grok Task"')
+        result = mf.validate(self.load(grok))
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(any(NATIVE_REFUSAL in error for error in result.errors))
+
         mixed = self._with_unenforced_gate(
             self.retarget(self.base, "T-1", "codex", '\nreason = "fixture: mixed Codex Task"'))
         result = mf.validate(self.load(mixed))
@@ -365,17 +371,18 @@ class Backends(ManifestCase):
         self.assertEqual(len(refusals), 1, result.errors)
         self.assertIn("T-1", refusals[0])
         self.assertIn("codex", refusals[0])
-        self.assertIn("claude only", refusals[0])
+        self.assertNotIn("claude only", refusals[0])
 
-        excluded = self.retarget(self.base, "T-2", "grok")
+        excluded = self.retarget(self.base, "T-2", "codex")
         self.assertTrue(self.load(excluded).tasks[1].excluded, "the fixture's T-2 is the excluded one")
-        result = mf.validate(self.load(excluded))
+        result = mf.validate(self.load(self._with_unenforced_gate(excluded)))
         self.assertTrue(any(NATIVE_REFUSAL in error and "T-2" in error for error in result.errors),
                         result.errors)
 
-        inherited = self.base.replace("[[tasks]]", '[defaults]\nbackend = "grok"\n\n[[tasks]]', 1)
+        inherited = self.base.replace("[[tasks]]", '[defaults]\nbackend = "codex"\n\n[[tasks]]', 1)
         for task_id in ("T-1", "T-2"):
-            inherited = self.remodel(inherited, task_id, BACKEND_MODELS["grok"])
+            inherited = self.remodel(inherited, task_id, BACKEND_MODELS["codex"])
+        inherited = self._with_unenforced_gate(inherited)
         result = mf.validate(self.load(inherited))
         self.assertEqual(sum(NATIVE_REFUSAL in error for error in result.errors), 2, result.errors)
 

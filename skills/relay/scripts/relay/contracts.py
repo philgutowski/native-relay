@@ -199,19 +199,23 @@ BACKEND_PINS = {
     },
     "grok": {
         "binary": "grok",
-        # Bumped 2026-09-01 (issue #57 live verification): the dontAsk and denial-refusal
-        # findings above were pinned against 1.0.5; the cancellation finding below was
-        # confirmed against 1.0.13, the version installed and exercised in that session.
-        "version_tested": "1.0.13",
-        "version_output_sample": "grok 1.0.13 (5e9a58528b76) [stable]",
+        # Bumped 2026-09-11 (docs/plans/2026-09-11-feat-grok-native-review-step-plan.md).
+        # The dontAsk and denial-refusal findings were pinned against 1.0.5. The cancellation
+        # finding below was confirmed against 1.0.13. This pin is the version installed and
+        # probed that day.
+        "version_tested": "1.0.25",
+        "version_output_sample": "grok 1.0.25 (f7e67d6988e2) [stable]",
         "headless_flag": "-p",
         "session_id_choosable": True,
         # U1 finding, and a correction to the plan's Assumptions and KTD6. Grok accepts
         # `dontAsk` at launch and then cancels every tool call the task makes, reporting
         # "User cancelled the execution for tool `run_terminal_command`" with no human present
-        # to have cancelled anything. Reproduced five times: two full pipeline runs that died
-        # partway through planning, and three single-command probes. `auto` is the mode that
-        # runs the task AND still refuses a denied call, so it is the non-bypass posture here.
+        # to have cancelled anything. Reproduced five times on 1.0.5: two full pipeline runs
+        # that died partway through planning, and three single-command probes. Re-observed
+        # 2026-09-11 on grok 1.0.25: `--permission-mode dontAsk` cancelled a `write` the same
+        # way ("User cancelled the execution for tool `write`"), so the finding is not limited
+        # to `run_terminal_command`. `auto` is the mode that runs the task AND still refuses a
+        # denied call, so it is the non-bypass posture here.
         #
         # Issue #57, observed round eight 2026-09-01 on tasks 45 and 56, confirmed live against
         # grok 1.0.13 the same day. Under `auto` mode a `run_terminal_command` whose argument
@@ -226,13 +230,15 @@ BACKEND_PINS = {
         # the denial scan on the same file; `commit_message_constraint` below tells the task to
         # avoid the construct, since instruction is the only enforcement layer this backend has
         # for it. The demonstrated `--deny` refusal above never engages here, because the
-        # matcher does not refuse a shape it cannot analyze, it cancels the call instead. Not
-        # reliably reproducible from a single trivial `-p` probe outside a real multi-turn task;
-        # the live probe that confirmed the marker text and `status` value used the real
-        # capture from task 45's own session file rather than a fresh reproduction attempt.
-        # Any skill or guide the task reads that shows a worked commit in this heredoc form
-        # would defeat the brief instruction outright; re-check before native mode ever admits
-        # a grok task.
+        # matcher does not refuse a shape it cannot analyze, it cancels the call instead.
+        #
+        # Re-observed 2026-09-11 on grok 1.0.25: a trivial single-turn `-p` probe executed that
+        # exact heredoc form to completion (commit a69fdfe). The 1.0.13 pin already said a
+        # trivial probe does not reproduce the cancel; this is that case. The constraint stays
+        # because the original finding was a multi-turn Task, and because grok now loads the
+        # operator's skill catalogue, including `ce-commit-push-pr`, which still teaches the
+        # heredoc form. Any skill or guide the process reads showing a worked heredoc commit
+        # defeats the brief.
         "permission_mode": "auto",
         "forbidden_permission_modes": ("bypassPermissions", "dontAsk"),
         "output_format": ("--output-format", "streaming-json"),
@@ -243,11 +249,22 @@ BACKEND_PINS = {
         # the target directory still present afterwards. A malformed rule is refused at launch
         # ("malformed rule: missing closing parenthesis") rather than silently accepted, and a
         # bare `Skill` entry, which closeout.BASE_TOOLS carries, is accepted.
+        #
+        # Re-observed 2026-09-11 on grok 1.0.25: `--deny 'Bash(rm -rf*)'` still refuses, and the
+        # marker still contains "Denied by permission policy". `--allow` with Claude tool
+        # vocabulary (`Bash`, `Read`, `Edit`, `Write`, `Skill`) is accepted at launch and does
+        # not grant grok's real tools. `--deny run_terminal_command` is accepted at launch and
+        # does not refuse `run_terminal_command`. The working deny form remains `Bash(glob)`.
         "enforces_at_launch": True,
-        # No built in review observed on this CLI, so native mode refuses this backend at
-        # validate until one is verified live.
-        "review_skill": None,
-        "evidence": "~/.grok/sessions/<url-encoded-cwd>/<session-id>/updates.jsonl",
+        # Observed 2026-09-11 on grok 1.0.25 (P1): a headless `grok -p` under `--permission-mode
+        # auto` whose prompt named `/code-review` did not reach bundled `code-review` (that
+        # skill carries `disable-model-invocation: true` and was not injected). The process
+        # read `~/.grok/bundled/skills/review/SKILL.md` and ran `/review` to completion. Skip
+        # stays undetectable: there is no Skill tool event, a `read_file` of the skill directory
+        # is a read not a run, and `subagent_spawned` with description `[reviewer]` is a
+        # convention inside `/review`.
+        "review_skill": "review",
+        "evidence": "~/.grok/sessions/<url-encoded-realpath-cwd>/<session-id>/updates.jsonl",
         "credential_prefixes": ("GROK_", "XAI_"),
         "credential_file": "~/.grok/auth.json",
         "nesting_markers": ("GROK_SANDBOX",),
@@ -257,13 +274,17 @@ BACKEND_PINS = {
         "strict_config": False,
         "grants_network": False,
         # Issue #57. Instruction is the only enforcement layer this backend has for the
-        # cancellation R4 and the BACKEND_PINS caveat below both describe.
+        # cancellation R4 and the BACKEND_PINS caveat below both describe. Strengthened
+        # 2026-09-11: grok loads the operator catalogue, so a skill showing the heredoc
+        # form is the common case, not an edge.
         "commit_message_constraint": (
-            "This CLI cancels a git commit whose message uses command substitution or a "
+            "This CLI can cancel a git commit whose message uses command substitution or a "
             "heredoc, such as `git commit -m \"$(cat <<'EOF' ... EOF)\"`, instead of refusing "
             "it: the tool call is cancelled outright, no envelope is written, and whatever the "
             "task had in flight is stranded. Use plain `git commit` forms only. For a subject "
-            "plus body, repeat `-m`: `git commit -m \"Subject\" -m \"Body paragraph.\"`."
+            "plus body, repeat `-m`: `git commit -m \"Subject\" -m \"Body paragraph.\"`. Any "
+            "skill or guide that shows a worked heredoc commit is wrong for this CLI; do not "
+            "follow that form even when a skill presents it as the way to commit."
         ),
     },
 }
@@ -397,11 +418,13 @@ WAITING_LAST_MESSAGE = "waiting_last_message"
 # or unclean_exit), this names the mechanism instead of leaving the Cause line to read only the
 # downstream symptom, the same shape WAITING_LAST_MESSAGE above already established.
 CANCELLED_TOOL_CALL = "cancelled_tool_call"
-# Native mode. A Task on a backend with a `review_skill` whose envelope read complete and
-# whose transcript holds no Skill call naming that skill. Finding only: the runner's own
-# verify decides landing, and a review that never ran is a check by hand for the operator,
-# not a stop. Backends without a review skill declare it undetectable, and the 2026-08-25
-# proof run is the precedent: a headless process substituted or skipped review steps twice.
+# Native mode. A Task on a backend with a `review_skill` whose skip is detectable, whose
+# envelope read complete, and whose transcript holds no Skill call naming that skill.
+# Finding only: the runner's own verify decides landing, and a review that never ran is a
+# check by hand for the operator, not a stop. A backend that cannot observe a Skill call
+# lists this class in `undetectable` even when it names a review skill, so classify does
+# not attach a false skip. The 2026-08-25 proof run is the precedent: a headless process
+# substituted or skipped review steps twice.
 REVIEW_SKIPPED = "review_skipped"
 # Issue #58. The Manifest's resolution decided this relaunch's backend or model, and it differed
 # from what the record carried, so the Task went somewhere other than where it last ran. Finding

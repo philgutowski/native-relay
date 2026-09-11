@@ -56,9 +56,11 @@ backlog convention for this repo. Concretely:
   a record, not a new class, unless the plan is amended. The set was amended once, by
   `docs/plans/2026-09-07-native-mode-plan.md`: `skill_substitution` left, `review_skipped` joined
   the findings.
-- Native mode runs on `claude` only. `validate` refuses a Task naming `codex` or `grok` because
-  neither has a verified built in review step. The other backends' launch seams stay and stay
-  tested; lifting the refusal for one is a plan of its own with a live run behind it.
+- Native mode runs on `claude` and `grok`. `validate` refuses a Task naming `codex` because
+  Codex has no verified built in review step. Codex's launch seam stays and stays tested;
+  lifting that refusal is a plan of its own with a live run behind it. Grok's skip is
+  undetectable: the digest lists `review_skipped` as not checked, and classify must not attach
+  a false skip finding.
 - The runner never writes to a tracker. Every tracker write goes through a Claude process with
   the adapter's instructions; keep it that way.
 - The stub cannot produce what a real process produces. After changing a contract between

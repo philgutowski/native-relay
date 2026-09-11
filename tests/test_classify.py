@@ -845,8 +845,11 @@ class GrokEvidence(unittest.TestCase):
         self.assertEqual(denied, [])
 
     def test_review_skipped_is_unavailable_but_denial_still_reports_normally(self):
+        """Grok names `/review` and lists skip as undetectable. Without the classify gate a
+        complete grok envelope would attach a false skip finding on every Task."""
         r = run_grok("session-transcript-complete.jsonl")
         self.assertEqual(r["undetectable"], [contracts.REVIEW_SKIPPED])
+        self.assertEqual([f for f in r["findings"] if f["class"] == contracts.REVIEW_SKIPPED], [])
         self.assertTrue(any(f["class"] == contracts.HALT_DENIED_TOOL for f in r["findings"]))
 
     def test_closeout_terminal_line_past_the_200_character_head_is_still_readable(self):

@@ -22,10 +22,10 @@ from . import backends, contracts, gitread
 ADAPTERS = ("jira", "github", "markdown")
 # The CLI a Task process runs on (R1). The closed set stays three wide so a manifest written for
 # another backend is refused with a sentence naming why rather than as an unknown name: native
-# mode runs a Task only on a backend whose capability record names a verified built in review
-# step (`review_skill`), which today is claude alone. What differs per backend otherwise is the
-# launch seam, which contracts.BACKEND_PINS records. A manifest naming none of these puts every
-# Task on claude.
+# mode runs a Task on a backend whose capability record names a verified built in review step
+# (`review_skill`), today `claude` and `grok`. Codex is refused until one is observed live.
+# What differs per backend otherwise is the launch seam, which contracts.BACKEND_PINS records.
+# A manifest naming none of these puts every Task on claude.
 BACKENDS = ("claude", "codex", "grok")
 DEFAULT_BACKEND = "claude"
 SHIPPING_MODES = ("local_merge", "pr_terminal")
@@ -507,11 +507,12 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
             err("%s.backend must be one of %s, not %r"
                 % (label, ", ".join(BACKENDS), task.backend))
         elif backends.build(task.backend).CAPABILITY.review_skill is None:
-            # Native mode, decided 2026-09-07. The review step is a built in skill, and only a
-            # backend with a verified one can run the brief. Checked on excluded Tasks too, so
-            # un-excluding one later cannot launch it somewhere the brief cannot be followed.
-            err("%s (%s) names backend %s, which has no verified native review step; native mode "
-                "runs on claude only, see README" % (label, task.id or "?", task.backend))
+            # Native mode, decided 2026-09-07, grok admitted 2026-09-11. The review step is a
+            # built in skill, and only a backend with a verified one can run the brief. Checked
+            # on excluded Tasks too, so un-excluding one later cannot launch it somewhere the
+            # brief cannot be followed. The error names the missing step, not "claude only".
+            err("%s (%s) names backend %s, which has no verified native review step, see README"
+                % (label, task.id or "?", task.backend))
         if task.id in seen:
             err("%s.id %r is listed twice" % (label, task.id))
         seen.add(task.id)

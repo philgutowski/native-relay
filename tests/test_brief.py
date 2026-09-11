@@ -70,6 +70,7 @@ class ReviewStep(BriefCase):
         self.assertIn("built in code review, `%s`" % REVIEW, text)
         self.assertIn("Run `%s` on the branch's diff" % REVIEW, steps_section(text))
         self.assertRegex(text, r"(?i)reading your own diff is not a substitute")
+        self.assertRegex(text, r"(?i)reported to the operator")
 
     def test_no_plugin_skill_name_reaches_any_brief(self):
         for backend, mode, text in self.each_backend_template():
@@ -78,13 +79,23 @@ class ReviewStep(BriefCase):
                 self.assertNotIn(token, text, "%s %s names %s" % (backend, mode, token))
 
     def test_a_backend_with_no_review_skill_renders_the_self_review_fallback(self):
-        """validate refuses codex and grok in native mode, so no real process reads this; the
-        brief still renders so the launch seam stays under test until the refusal lifts."""
-        for backend in ("codex", "grok"):
-            text = self.render(backend=backend)
-            self.assertIn(brief.REVIEW_RULE_FALLBACK, text, backend)
-            self.assertIn(brief.REVIEW_STEP_FALLBACK, steps_section(text), backend)
-            self.assertNotIn(REVIEW, text, backend)
+        """validate refuses Codex in native mode, so no real process reads this; the brief
+        still renders so the launch seam stays under test until the refusal lifts."""
+        text = self.render(backend="codex")
+        self.assertIn(brief.REVIEW_RULE_FALLBACK, text)
+        self.assertIn(brief.REVIEW_STEP_FALLBACK, steps_section(text))
+        self.assertNotIn(REVIEW, text)
+        self.assertNotIn("/review", text)
+
+    def test_the_grok_brief_names_review_and_does_not_promise_a_skip_report(self):
+        """KTD4. Grok names `/review` and lists skip as undetectable, so the brief must not
+        promise a report the runner cannot make. Claude's brief still does."""
+        text = self.render(backend="grok")
+        self.assertIn("built in code review, `/review`", text)
+        self.assertIn("Run `/review` on the branch's diff", steps_section(text))
+        self.assertNotIn(REVIEW, text)
+        self.assertNotRegex(text, r"(?i)reported to the operator")
+        self.assertIn(brief.REVIEW_RULE_UNDETECTABLE % "/review", text)
 
     def test_no_brief_claims_the_review_call_is_recorded_on_an_undetectable_backend(self):
         for backend in ("codex", "grok"):

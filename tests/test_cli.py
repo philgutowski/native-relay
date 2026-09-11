@@ -165,7 +165,7 @@ class Validate(CliCase):
         self.assertIn("binary", out)
 
     def test_a_codex_task_exits_config_naming_the_missing_review_step(self):
-        """Native mode runs on claude only; the CLI says so before anything launches."""
+        """Codex still has no verified review step; the CLI names that before anything launches."""
         with open(self.manifest_path) as handle:
             text = handle.read()
         text = re.sub(r'id = "T-1"\nmodel = "[^"]*"',

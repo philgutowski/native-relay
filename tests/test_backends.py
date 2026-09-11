@@ -136,17 +136,18 @@ class CapabilityRecord(unittest.TestCase):
         self.assertIsNone(cap.allow_flag)
         self.assertIsNone(cap.deny_flag)
 
-    def test_only_claude_names_a_native_review_skill(self):
-        """Native mode, decided 2026-09-07: the review step is a built in skill, and only a
-        backend with a verified one can run the native brief. `manifest.validate` reads this."""
+    def test_named_review_skills_are_claude_code_review_and_grok_review(self):
+        """Native mode, decided 2026-09-07, grok admitted 2026-09-11: the review step is a
+        built in skill, and only a backend with a verified one can run the native brief.
+        `manifest.validate` reads this. Grok's skill is `review`, not bundled `code-review`."""
         self.assertEqual(backends.build("claude").CAPABILITY.review_skill, "code-review")
+        self.assertEqual(backends.build("grok").CAPABILITY.review_skill, "review")
         self.assertIsNone(backends.build("codex").CAPABILITY.review_skill)
-        self.assertIsNone(backends.build("grok").CAPABILITY.review_skill)
 
     def test_review_command_is_the_slash_form_or_none(self):
         self.assertEqual(backends.review_command(backends.build("claude").CAPABILITY), "/code-review")
+        self.assertEqual(backends.review_command(backends.build("grok").CAPABILITY), "/review")
         self.assertIsNone(backends.review_command(backends.build("codex").CAPABILITY))
-        self.assertIsNone(backends.review_command(backends.build("grok").CAPABILITY))
 
 
 class SharedSurface(unittest.TestCase):
