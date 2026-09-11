@@ -104,7 +104,11 @@ So the order matters:
    requires. The Runner will not do it and `verify` will not ask.
 2. Close the card if it is still open.
 3. Comment on the card with the landing sha, as a comment, not a commit message.
-4. `python3 <runner> verify <manifest> <task-id>` to promote the record.
+4. `python3 <runner> verify <manifest> <task-id>` to confirm the landing. The verb reports
+   and writes nothing. A halted record is promoted at the next run's startup, by
+   `startup_reverify`, which re-runs the full verdict on every halted record and promotes
+   the ones that now pass. On a finished manifest that next run never comes, so a repaired
+   Task keeps a halted record. That is cosmetic, not a second repair to chase.
 
 Step 3 is the one people skip, and skipping it leaves a Task that is genuinely finished reading
 `partial_landing` forever.
@@ -200,8 +204,8 @@ recorded both halves at once:
 
 The repair, in the order that works: the unit's review, mutation table and record were run by hand
 on the merged code, the card was closed, then a comment naming `0285aae` was posted on the card, and
-only then did `verify` promote the record. The record now reads `closing_reference pass` with the
-comment id as its evidence. The attempt before that comment failed with every git check green,
+only then did `verify` return a landed verdict, with `closing_reference pass` and the comment id
+as its evidence. The attempt before that comment failed with every git check green,
 because a `landing_ref` on the record routes past the commit message derivation entirely.
 
 **The 2026-09-09 death, Task 75, a different shape from the same cause family.** No merge had
