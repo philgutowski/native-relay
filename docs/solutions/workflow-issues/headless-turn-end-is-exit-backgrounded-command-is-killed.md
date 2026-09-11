@@ -3,7 +3,7 @@ title: In a headless task process ending the turn is exiting, so a backgrounded 
 date: 2026-08-27
 category: workflow-issues
 module: runner
-last_updated: 2026-08-31
+last_updated: 2026-09-11
 problem_type: workflow_issue
 component: runner
 severity: high
@@ -51,11 +51,18 @@ with the message:
 In a headless process there is no next turn. The CLI recorded the result as completed, killed
 the background tasks it was still carrying, the transcript shows `task_updated` events with
 status `killed` for both the mutation driver and a second background wait loop, and the process
-exited. Anything that had survived that would have met the runner's own group kill, the
+exited. Anything that had survived that would not have met the runner's own group kill. `_kill_group`
+(`launch.py:235`) fires from three places only, the operator signal handler, the lost lease
+branch, and the deadline check, and a process that exits on its own reaches none of them, so the
 mechanism `docs/solutions/logic-errors/process-group-kill-resolves-target-lazily.md` exists to
-keep honest, working exactly as designed here. Either way, nothing backgrounded outlives the
-process, which is correct behavior on both sides and is precisely why the process must never
-background.
+keep honest was never on this path. What the CLI killed here, it killed because it was tracking
+it as a background task, which is what happened in this incident. So nothing the harness tracks
+as a background task outlives the process, which is correct behavior on both sides and is
+precisely why the process must never background. A child started from a shell with a trailing
+ampersand is not tracked, and it does outlive the process;
+`docs/solutions/workflow-issues/backgrounded-child-outlives-the-task-and-no-recorded-state-can-see-it.md`
+records that case, confirmed on a run of 2026-09-10 where such a child held its port for the rest
+of the manifest, unseen by `status`, `summary`, and the end of run audit alike.
 
 The driver died mid mutation, before its restore step, leaving a two line comment
 `# mutation driver null control, restored automatically` appended to
@@ -248,8 +255,14 @@ with it.
   what the runner did after this halt; its Symptoms section names this backgrounding as the
   separate trigger event, a brief template gap, distinct from the verify defect it documents.
 - `docs/solutions/logic-errors/process-group-kill-resolves-target-lazily.md`: the process group
-  kill that stands behind the CLI's own cleanup of backgrounded work, working as designed here,
-  which is exactly why the process must never background.
+  kill, and why its target must be captured at launch. It did not run in this incident and could
+  not have, since a Task that exits on its own reaches none of its three triggers. The CLI's own
+  cleanup of the background tasks it tracks is what applied here.
+- `docs/solutions/workflow-issues/backgrounded-child-outlives-the-task-and-no-recorded-state-can-see-it.md`:
+  the inverse case, and the reason the rule above is stated as never background rather than as
+  something will clean it up. A child started with a trailing shell ampersand is not a tracked
+  background task, so nothing kills it, and nothing the runner records can see that it is still
+  there.
 - `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`:
   the rule that a live run is the only instrument for seams the stub cannot produce; the stub
   never reads the brief, so no test could have found this before a real process ran.
