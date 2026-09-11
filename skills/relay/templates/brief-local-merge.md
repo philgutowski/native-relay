@@ -18,12 +18,25 @@ $data_end
 
 Run every command in the foreground and wait for it to finish. Never start a command or an agent
 in the background and end your turn to wait for it: in this session, ending your turn is exiting,
-and everything still running is killed with you. A mutation driver, a test suite, or a build that
-takes twenty minutes is twenty minutes of waiting, not a reason to background it. A background
-command's completion notification does not survive the final turn either, so run the gate itself
-in the foreground and wait for it the same way. Never end a turn on a promise to resume, "standing
-by", "will check back", "once it finishes", whether or not you actually backgrounded anything:
-there is no next turn to keep that promise on.
+and every background task this session is tracking is killed with you. A mutation driver, a test
+suite, or a build that takes twenty minutes is twenty minutes of waiting, not a reason to
+background it. A background command's completion notification does not survive the final turn
+either, so run the gate itself in the foreground and wait for it the same way. Never end a turn on
+a promise to resume, "standing by", "will check back", "once it finishes", whether or not you
+actually backgrounded anything: there is no next turn to keep that promise on.
+
+Leave no process running when a command returns. A child you start from the shell with a trailing
+`&` is not a background task this session tracks, so nothing kills it: it holds its port or its
+temporary directory through the rest of this session and the rest of the run, where later work can
+reach it and check its own change against files that have nothing to do with that change. You
+cannot clean it up afterwards either, because `kill`, `pkill`, `killall`, and recursive deletes are
+all refused here. So never start a process you cannot stop inside the same command. Render a page
+from a `file://` path rather than serving it. Make one request rather than standing a service up.
+Where a check genuinely needs an origin, run the project's own test harness, whose fixture binds
+and releases the port inside the command you are waiting on, or write a short script that starts
+the helper, does the work, and stops it in a `finally` block. If you bind a port anyway, name the
+port and any temporary directory in your final report, because nothing else in this run can see
+them.
 
 $review_rule
 
