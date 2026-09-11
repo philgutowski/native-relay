@@ -5,9 +5,9 @@ tracker specific lives behind this interface, which is what keeps the runner pro
 (R1) and keeps `mcp__atlassian__` and `gh` out of the classifier and the closeout template.
 
 No method here writes. That is the point of R19: the runner reads the tracker to decide whether
-a task landed, and every write goes through a Claude process instead, so a defect in the runner
-can never move a card. The shared test suite asserts that the public surface of every adapter is
-exactly the eight methods below.
+a task landed, and every write goes through a Task or Closeout process instead, so a defect in
+the runner can never move a card. The shared test suite asserts that the public surface of every
+adapter is exactly the eight methods below.
 
 The interface, with the shapes each method returns:
 
@@ -17,8 +17,8 @@ The interface, with the shapes each method returns:
     comments_since(id, baseline)  -> [{"id", "body", "created"}, ...] newer than baseline, in order
     closing_reference(id, ref)    -> the comment id naming ref, else None
     write_tool_patterns()         -> {"tools": (...), "bash": (...), "paths": (...)}
-    closeout_allowed_tools()      -> (tool name, ...) explicit, never a wildcard
-    closeout_instructions(outcome)-> the duty one text for the closeout brief
+    closeout_allowed_tools(backend=None) -> (tool name, ...) explicit, never a wildcard
+    closeout_instructions(outcome, backend=None) -> the duty one text for the closeout brief
 
 `status` returning a `skipped` reason rather than raising is deliberate: a tracker that cannot be
 read must never be mistaken for either a landing or a failure to land, so verify turns a skip
@@ -74,7 +74,7 @@ def skipped(reason):
     return {"status": None, "terminal": False, "reference": None, "skipped": str(reason)}
 
 
-def task_tracker_steps(manifest, branch):
+def task_tracker_steps(manifest, branch, backend=None):
     """The three places the task brief tells the process to touch the tracker: the start step
     before any other work, the review step before the envelope, and the comment when it cannot
     finish. Resolved by adapter name rather than by building the adapter, so a brief renders
@@ -106,7 +106,7 @@ def task_tracker_steps(manifest, branch):
                              "Print the envelope with `status: blocked` and the blockers listed."
                              % path),
         }
-    return {
+    steps = {
         "start_step": ("Move the tracker card to `%s` now, before anything else in this session. "
                        "This is your first tracker write of the run." % in_review),
         "review_step": ("Comment the head commit of `%s` on the tracker card. This is the last "
@@ -115,6 +115,14 @@ def task_tracker_steps(manifest, branch):
         "blocked_step": ("Comment the blocker on the tracker card, then print the envelope with "
                          "`status: blocked` and the blockers listed."),
     }
+    if name == "jira" and backend == "grok":
+        how = (" Use the Atlassian MCP tools atlassian__getJiraIssue, "
+               "atlassian__getTransitionsForJiraIssue, atlassian__transitionJiraIssue, and "
+               "atlassian__addCommentToJiraIssue. Pass the tracker site as cloudId. Never call "
+               "getAccessibleAtlassianResources. Do not use JIRA_API_TOKEN; it is not in this "
+               "process.")
+        return {key: value + how for key, value in steps.items()}
+    return steps
 
 
 def build(manifest, env=None, opener=None, run=None, read=None):

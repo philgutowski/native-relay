@@ -1,6 +1,6 @@
 {
   "name": "native-relay",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Run a manifest of independent tasks through a native plan, build, review, verify, record pipeline, one fresh headless Claude Code process per task, serially and unattended.",
   "author": {
     "name": "Phillip Gutowski"

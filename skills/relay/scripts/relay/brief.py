@@ -206,7 +206,7 @@ def values(manifest, task, card, branch=None, mode=None):
     accepted for the caller's symmetry with `render` and selects nothing today: one template."""
     default_branch = manifest.project.default_branch or "the default branch"
     branch = branch or gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
-    tracker_steps = adapters.task_tracker_steps(manifest, branch)
+    tracker_steps = adapters.task_tracker_steps(manifest, branch, backend=task.backend)
     module = backends.build(task.backend)
     # Bound once: the rule sentence and the step that runs the skill have to name the same thing,
     # and two independent calls are how they would come to name different ones.

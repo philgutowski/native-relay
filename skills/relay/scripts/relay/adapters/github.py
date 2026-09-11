@@ -156,10 +156,10 @@ class GitHubAdapter:
         pull request, and reading that as a denied tracker write would misclassify the run."""
         return {"tools": (), "bash": WRITE_BASH_PREFIXES, "paths": ()}
 
-    def closeout_allowed_tools(self):
+    def closeout_allowed_tools(self, backend=None):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None):
         """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
         supplied for a blocked or halted outcome when the runner wants the card returned there.
         The task process moved the item to the in review status at its first step, so without

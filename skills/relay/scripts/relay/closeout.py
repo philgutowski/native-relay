@@ -6,7 +6,7 @@ worth keeping and write it if so.
 
 It is a separate process for two reasons that are not interchangeable. The runner cannot do duty
 one because the runner never writes to a tracker (R19), and that rule is what makes a runner
-defect unable to move a card. The task process cannot do it either, because it exits before the
+defect unable to move a card. The Task process cannot do it either, because it exits before the
 merge commit that duty one has to name. Duty two is here rather than in the task process because
 a process at the end of a long context is the worst available judge of its own learning, and
 because a blocked task deserves the same pass; the 2026-08-25 proof run's best learning came from
@@ -66,11 +66,13 @@ class CloseoutResult:
     brief_sha256: str | None = None
 
 
-def allowed_tools(manifest, adapter):
+def allowed_tools(manifest, adapter, backend=None):
     """The base set, plus what the adapter's tracker write needs, plus the manifest's additions.
-    Order is stable and duplicates are dropped, so the same manifest renders the same flag."""
+    Order is stable and duplicates are dropped, so the same manifest renders the same flag.
+    `backend` selects the adapter's grok tool spelling when the Closeout is not on claude."""
     tools = list(BASE_TOOLS)
-    for extra in tuple(adapter.closeout_allowed_tools()) + tuple(manifest.closeout.allowed_tools):
+    extras = adapter.closeout_allowed_tools(backend=backend)
+    for extra in tuple(extras) + tuple(manifest.closeout.allowed_tools):
         if extra not in tools:
             tools.append(extra)
     return tuple(tools)
@@ -188,7 +190,7 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
         "title": brief.defang(str(card.get("title") or "")).strip(),
         "description": brief.defang(str(card.get("description") or "")).strip(),
         "comments": brief.defang(_bullets(_comment_lines(comments))),
-        "duty_one": adapter.closeout_instructions(outcome, return_to=return_to),
+        "duty_one": adapter.closeout_instructions(outcome, return_to=return_to, backend=backend),
         "learnings_dir": learnings_dir(manifest),
         "allowed_paths": _bullets(allowed_paths),
         "complete_line": contracts.CLOSEOUT_COMPLETE_LINE,
@@ -268,7 +270,7 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
     launch_result = launch.launch(
         manifest, _closeout_task(manifest, task_id, backend, task_model=task_model), text,
         store.path("logs", task_id + ".closeout.stdout.log"), timeout_seconds,
-        allowed=allowed_tools(manifest, adapter),
+        allowed=allowed_tools(manifest, adapter, backend=backend),
         disallowed=contracts.CLOSEOUT_DISALLOWED_EXTRA, **launch_kwargs)
 
     # U7 runs over the closeout transcript too (R44). AE1's denied tracker write most often

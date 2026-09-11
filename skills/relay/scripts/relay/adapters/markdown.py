@@ -154,10 +154,10 @@ class MarkdownAdapter:
     def write_tool_patterns(self):
         return {"tools": (), "bash": (), "paths": (self._file,)}
 
-    def closeout_allowed_tools(self):
+    def closeout_allowed_tools(self, backend=None):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None):
         """`return_to` is accepted for the interface and ignored: a markdown tracker has only an
         open box and a checked one, and the task process never moves it."""
         if outcome == OUTCOME_LANDED:

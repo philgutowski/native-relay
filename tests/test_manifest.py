@@ -1,4 +1,5 @@
 """U2: the manifest loads into typed values and every validation rule names its field."""
+import json
 import os
 import re
 import tempfile
@@ -647,6 +648,65 @@ class BackendReadiness(ManifestCase):
         result = mf.validate(self.load(text))
         self.assertFalse(result.ok)
         self.assertTrue(any("jira" in error and "codex" in error for error in result.errors))
+
+    def test_jira_grok_pair_is_accepted_without_environment_probes(self):
+        text = self.base.replace('adapter = "markdown"\nfile = "tracker.md"',
+                                 'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "XX"')
+        text = self.retarget(text, "T-1", "grok", extra='\nreason = "fixture: grok Jira Task"')
+        result = mf.validate(self.load(text))
+        self.assertEqual(other_errors(result), [])
+        self.assertTrue(all("jira" not in error or "grok" not in error for error in result.errors))
+
+    def test_jira_grok_pair_is_refused_when_atlassian_mcp_is_unhealthy(self):
+        text = self.base.replace('adapter = "markdown"\nfile = "tracker.md"',
+                                 'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "XX"')
+        text = self.retarget(text, "T-1", "grok", extra='\nreason = "fixture: grok Jira Task"')
+        payload = json.dumps({
+            "servers": [{"name": "atlassian", "healthy": False}],
+            "healthy_count": 0,
+            "failing_count": 1,
+        })
+        doctor = mock.Mock(return_value=SimpleNamespace(returncode=1, stdout=payload, stderr=""))
+        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/grok"):
+            with mock.patch.object(mf.subprocess, "run", doctor):
+                result = mf.validate(self.load(text), check_repo=False, check_environment=True,
+                                     env=self.environment())
+        self.assertFalse(result.ok)
+        self.assertTrue(any("atlassian MCP handshake failed" in error for error in result.errors),
+                        result.errors)
+        doctor.assert_called_once()
+        self.assertEqual(doctor.call_args.args[0][:4], ["grok", "mcp", "doctor", "--json"])
+
+    def test_jira_grok_pair_is_refused_when_atlassian_mcp_is_absent(self):
+        text = self.base.replace('adapter = "markdown"\nfile = "tracker.md"',
+                                 'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "XX"')
+        text = self.retarget(text, "T-1", "grok", extra='\nreason = "fixture: grok Jira Task"')
+        payload = json.dumps({"servers": [], "healthy_count": 0, "failing_count": 0})
+        doctor = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=payload, stderr=""))
+        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/grok"):
+            with mock.patch.object(mf.subprocess, "run", doctor):
+                result = mf.validate(self.load(text), check_repo=False, check_environment=True,
+                                     env=self.environment())
+        self.assertFalse(result.ok)
+        self.assertTrue(any("needs the atlassian MCP server connected" in error
+                            for error in result.errors), result.errors)
+
+    def test_jira_grok_pair_is_ready_when_atlassian_mcp_is_healthy(self):
+        text = self.base.replace('adapter = "markdown"\nfile = "tracker.md"',
+                                 'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "XX"')
+        text = self.retarget(text, "T-1", "grok", extra='\nreason = "fixture: grok Jira Task"')
+        payload = json.dumps({
+            "servers": [{"name": "atlassian", "healthy": True}],
+            "healthy_count": 1,
+            "failing_count": 0,
+        })
+        doctor = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=payload, stderr=""))
+        with mock.patch.object(mf.shutil, "which", return_value="/test-bin/grok"):
+            with mock.patch.object(mf.subprocess, "run", doctor):
+                result = mf.validate(self.load(text), check_repo=False, check_environment=True,
+                                     env=self.environment())
+        self.assertEqual([error for error in result.errors if "atlassian" in error], [])
+        self.assertTrue(result.ok, result.errors)
 
 
 class TaskAllowedPaths(ManifestCase):
