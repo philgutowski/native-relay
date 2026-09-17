@@ -179,7 +179,10 @@ naming a backend with no verified native review step. See Backend readiness belo
 Once the manifest itself is valid, validate reads every listed task's card, renders its brief, and
 makes the checks the runner makes at launch. A card whose text names a `.claude/` path is an error
 naming the task, where the path appeared, and the path: the runner would skip that task, so show
-the operator the line and ask them to reword the card. A card that cannot be read, or that already
+the operator the line and ask them to reword the card. A mention alone trips it, including a
+sentence that forbids the path; when the task does not edit there, the rewording describes the
+location without the literal `.claude/` segment. Never propose a rewording that hides a real edit
+under `.claude/`: that task needs an attended session. A card that cannot be read, or that already
 reads a done status, is a warning, because the runner skips those rather than failing.
 
 ## Confirm before launch

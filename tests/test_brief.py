@@ -508,3 +508,25 @@ class TrackerStepsPerAdapter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScanMentionRule(unittest.TestCase):
+    """Issue #21: a mention trips the scan whatever the sentence around it says, and the message
+    says so and how to reword."""
+
+    def test_a_sentence_forbidding_the_path_still_trips_the_scan(self):
+        for text in ("name those paths, never .claude/skills",
+                     "never through the .claude/skills link"):
+            hits = brief.scan({"title": "T", "description": text}, "")
+            self.assertEqual([hit["path"] for hit in hits], [".claude/skills"], text)
+
+    def test_the_path_described_without_the_segment_does_not_trip_it(self):
+        text = "never edit the skills directory under the Claude config"
+        self.assertEqual(brief.scan({"title": "T", "description": text}, ""), [])
+
+    def test_the_reason_and_the_validate_error_both_carry_the_mention_rule(self):
+        hits = [{"source": "description", "path": ".claude/skills"}]
+        self.assertIn("a mention alone trips the scan", brief.exclusion_reason(hits))
+        error = brief.scan_error("tasks[0] (T-1)", hits[0])
+        self.assertIn("a mention alone trips the scan", error)
+        self.assertIn("without the literal .claude/ segment", error)

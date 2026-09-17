@@ -695,6 +695,27 @@ class ExcludedByScan(RunCase):
         self.assertIn("Fix the card", skipped[0]["text"])
 
 
+class FableModel(RunCase):
+    def test_a_fable_task_with_clean_card_text_passes_the_scan_and_launches(self):
+        """Regression guard, 2026-09-17. One live run landed four fable tasks; in the next the fable
+        tasks never ran only because the scan skipped their cards (issues #19 and #21). The
+        model name is not what stops a task."""
+        self.manifest = reroute(self.manifest, "T-1", model="fable")
+        self.assertTrue(mf.validate(self.manifest).ok, mf.validate(self.manifest).errors)
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_LANDED)
+        self.assertEqual(record["model"], "fable")
+        self.assertEqual(record["args"][record["args"].index("--model") + 1], "fable")
+
+
 class TerminalCard(RunCase):
     def test_a_card_that_is_already_terminal_is_excluded_instead_of_launched(self):
         """The first Cratekit run relaunched issue 62 after it had been closed by hand."""

@@ -22,6 +22,13 @@ The scan is R41's first half. Under `dontAsk` the harness refuses an edit under 
 whatever the allowlist says, so a task whose text points at one of those paths can never finish
 unattended. Catching it before launch turns a wasted hour into a skipped line in the summary.
 
+A mention alone trips it, including a sentence that forbids the path ("never edit .claude/skills").
+That is deliberate (issue #21). Reading intent out of card prose would mean guessing at negation
+in exactly the text an unattended process acts on, and a wrong guess is a false pass that spends
+a launch before the harness refuses the edit. A false hit costs one rewording, `validate` reports
+it before launch, and the next run checks the card again, so the rule stays a substring match and
+the message says how to reword.
+
 The unenforced-restriction insert has a whitespace contract with the template, described in full
 at `_unenforced_block`. The value carries its own surrounding newlines and the template places its
 placeholder with no blank line above or below, which is what makes the empty case render as it did
@@ -282,12 +289,21 @@ def scan(card, brief_text):
     return hits
 
 
+# Issue #21. Said wherever a hit is reported, because the first operator to meet the scan read
+# "names .claude/skills" on a card that only forbade the path, and could not tell why.
+MENTION_RULE = (
+    "a mention alone trips the scan, including a sentence that forbids the path; if the task "
+    "does not edit there, describe the location without the literal .claude/ segment, for "
+    "example \"the skills directory under the Claude config\""
+)
+
+
 def exclusion_reason(hits):
     """The sentence the record and the summary carry for a scanned out task."""
     paths = sorted({hit["path"] for hit in hits})
     return ("the task text or its brief names %s; an edit under .claude/ is refused under dontAsk "
-            "whatever the allowlist says, so this task must be run attended"
-            % ", ".join(paths))
+            "whatever the allowlist says, so this task must be run attended. %s"
+            % (", ".join(paths), MENTION_RULE))
 
 
 def check_cards(manifest, adapter):
@@ -328,7 +344,7 @@ def check_cards(manifest, adapter):
 def scan_error(label, hit):
     """One R41 hit as the sentence validate prints."""
     return ("%s would be skipped at launch: its %s names %s, and an edit under .claude/ is refused "
-            "unattended (R41 scan)" % (label, hit["source"], hit["path"]))
+            "unattended (R41 scan). %s" % (label, hit["source"], hit["path"], MENTION_RULE))
 
 
 def write(store, task_id, text):
