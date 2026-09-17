@@ -516,6 +516,16 @@ def _reassignment(record, task):
             "to_backend": task.backend, "to_model": task.model}
 
 
+def _skip(cfg, task_id, reason):
+    """A runner decided skip (issue #19): its own status and reason field, so status, summary,
+    and the phase event can tell it from the manifest's exclusion, and no early return on a
+    later run, so the check that wrote it is made again."""
+    cfg.store.upsert(task_id, status=contracts.STATUS_SKIPPED, skip_reason=reason,
+                     excluded_reason=None)
+    if cfg.stream is not None:
+        cfg.stream("%s skipped: %s" % (task_id, reason))
+
+
 def _one_task(cfg, task):
     manifest, adapter, store = cfg.manifest, cfg.adapter, cfg.store
     repo, default, env = cfg.repo, cfg.default, cfg.env
@@ -523,12 +533,15 @@ def _one_task(cfg, task):
     record = store.get(task.id) or state.new_record(task.id)
     status = record.get("status")
 
+    # Issue #19. Only the manifest's exclusion is decided before anything is read, and it is
+    # decided afresh every run, so un-excluding a task in the manifest launches it. A runner
+    # decided skip returns early from nowhere: every check that wrote one runs again below, so
+    # a card the operator fixed between runs launches rather than staying skipped for good.
     if task.excluded:
-        store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=task.reason)
+        store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=task.reason,
+                     skip_reason=None)
         return
     if status == contracts.STATUS_LANDED:
-        return
-    if status == contracts.STATUS_EXCLUDED and record.get("excluded_reason"):
         return
     branch = gitwrite.task_branch_for(task.id, cfg.manifest.project.branch_prefix)
 
@@ -566,10 +579,7 @@ def _one_task(cfg, task):
     # Baseline (R17): what the runner will compare against when it decides landing.
     card = adapter.read(task.id)
     if card.get("skipped"):
-        reason = "the tracker card could not be read: %s" % card["skipped"]
-        store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=reason)
-        if stream is not None:
-            stream("%s skipped: %s" % (task.id, reason))
+        _skip(cfg, task.id, "the tracker card could not be read: %s" % card["skipped"])
         return
     baseline_sha = gitread.rev_parse(repo, default)
     card_status = adapter.status(task.id)
@@ -577,11 +587,8 @@ def _one_task(cfg, task):
         # Startup re-verify runs before this and promotes a task that landed by hand. A card
         # that is terminal and was not promoted was closed elsewhere, and a task process given
         # it has nothing to do. The first Cratekit run relaunched a closed issue this way.
-        reason = ("the card already reads %s, which is terminal; nothing to run"
-                  % card_status.get("status"))
-        store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=reason)
-        if stream is not None:
-            stream("%s skipped: %s" % (task.id, reason))
+        _skip(cfg, task.id, "the card already reads %s, which is terminal; nothing to run"
+              % card_status.get("status"))
         return
     baseline_comment_id = _baseline_comment_id(adapter, task.id)
 
@@ -589,10 +596,7 @@ def _one_task(cfg, task):
     brief_text = brief.render(manifest, task, card)
     hits = brief.scan(card, brief_text)
     if hits:
-        store.upsert(task.id, status=contracts.STATUS_EXCLUDED,
-                     excluded_reason=brief.exclusion_reason(hits))
-        if stream is not None:
-            stream("%s skipped: %s" % (task.id, brief.exclusion_reason(hits)))
+        _skip(cfg, task.id, brief.exclusion_reason(hits))
         return
     brief_path, brief_sha = brief.write(store, task.id, brief_text)
 
@@ -617,6 +621,7 @@ def _one_task(cfg, task):
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
+                 excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
                  unenforced_restrictions=unenforced)

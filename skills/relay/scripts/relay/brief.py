@@ -267,7 +267,7 @@ def _paths_in(text):
 
 def scan(card, brief_text):
     """R41: a hit means the task cannot finish unattended, because under `dontAsk` an edit under
-    `.claude/` is refused whatever the allowlist says. The caller marks the record excluded with
+    `.claude/` is refused whatever the allowlist says. The caller marks the record skipped with
     `exclusion_reason` and never launches a process."""
     hits = []
     seen = set()

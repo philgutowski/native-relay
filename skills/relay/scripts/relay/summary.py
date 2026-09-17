@@ -92,6 +92,7 @@ def _task_entry(store, record):
         "branch": record.get("branch"),
         "closeout": record.get("closeout"),
         "excluded_reason": record.get("excluded_reason"),
+        "skip_reason": record.get("skip_reason"),
         "continued_past": bool(record.get("continued_past")),
         "wall_seconds": record.get("wall_seconds"),
         "active_seconds": record.get("active_seconds"),
@@ -118,8 +119,15 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
         task_id = entry["id"]
         if entry["status"] == contracts.STATUS_EXCLUDED:
             checks.append({"kind": "excluded", "task": task_id,
-                           "text": "%s was skipped: %s. Run it attended."
+                           "text": "%s is excluded by the manifest: %s. Run it attended."
                                    % (task_id, entry["excluded_reason"] or "no reason recorded")})
+        if entry["status"] == contracts.STATUS_SKIPPED:
+            # Issue #19. The runner's own decision, checked again at every launch, so the repair
+            # is the card rather than an attended run.
+            checks.append({"kind": "skipped", "task": task_id,
+                           "text": "%s was skipped by the runner: %s. Fix the card and run again, "
+                                   "or run it attended."
+                                   % (task_id, entry["skip_reason"] or "no reason recorded")})
         if entry["status"] == contracts.STATUS_HALTED and entry["continued_past"]:
             # Issue #15. The run stepped over this task, so the halted line at the bottom
             # of this list never names it; it needs its own. The retry the record promises
@@ -309,6 +317,8 @@ def lines(data):
             out.append(("    %s" % entry["halt_message"], source + ".halt_message"))
         if entry["excluded_reason"]:
             out.append(("    %s" % entry["excluded_reason"], source + ".excluded_reason"))
+        if entry["skip_reason"]:
+            out.append(("    %s" % entry["skip_reason"], source + ".skip_reason"))
         # A landed task's cause line already names the ref; printing it twice was the first
         # live run's summary.
         if entry["landing_ref"] and entry["class"] != contracts.HALT_LANDED:

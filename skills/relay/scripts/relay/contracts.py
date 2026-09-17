@@ -377,7 +377,11 @@ CLOSEOUT_DISALLOWED_EXTRA = (
 
 # Task record statuses (the state machine in the plan's design section).
 STATUS_PENDING = "pending"
+# Excluded is the manifest's own decision (`excluded = true`). Skipped is the runner's, made at
+# launch from what it read (the R41 scan, an unreadable card, a card already terminal), and is
+# checked again on every run, so a card the operator fixes launches next time (issue #19).
 STATUS_EXCLUDED = "excluded"
+STATUS_SKIPPED = "skipped"
 STATUS_RUNNING = "running"
 STATUS_MERGING = "merging"
 STATUS_BLOCKED = "blocked"
@@ -386,6 +390,7 @@ STATUS_LANDED = "landed"
 RECORD_STATUSES = (
     STATUS_PENDING,
     STATUS_EXCLUDED,
+    STATUS_SKIPPED,
     STATUS_RUNNING,
     STATUS_MERGING,
     STATUS_BLOCKED,
@@ -397,7 +402,7 @@ IN_FLIGHT_STATUSES = (STATUS_RUNNING, STATUS_MERGING)
 # Statuses a task does not leave under its own power. Reaching one is what stamps `ended_at`,
 # and a move between two of them is not a new ending: `verify.startup_reverify` promoting a
 # halted record to landed must keep the stamp from the run that did the work.
-TERMINAL_STATUSES = (STATUS_EXCLUDED, STATUS_BLOCKED, STATUS_HALTED, STATUS_LANDED)
+TERMINAL_STATUSES = (STATUS_EXCLUDED, STATUS_SKIPPED, STATUS_BLOCKED, STATUS_HALTED, STATUS_LANDED)
 
 # Halt classes (KTD6). `HALT_LINES` are the summary cause line templates, filled from evidence.
 HALT_LANDED = "landed"

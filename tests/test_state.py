@@ -373,9 +373,9 @@ class Stamps(StateCase):
         self.assertEqual(record["started_at"], started)
         self.assertIsNone(record["ended_at"])
 
-    def test_terminal_statuses_names_the_four_a_task_does_not_leave(self):
+    def test_terminal_statuses_names_the_five_a_task_does_not_leave(self):
         self.assertEqual(set(contracts.TERMINAL_STATUSES),
-                         {contracts.STATUS_EXCLUDED, contracts.STATUS_BLOCKED,
+                         {contracts.STATUS_EXCLUDED, contracts.STATUS_SKIPPED, contracts.STATUS_BLOCKED,
                           contracts.STATUS_HALTED, contracts.STATUS_LANDED})
         self.assertFalse(set(contracts.TERMINAL_STATUSES) & set(contracts.IN_FLIGHT_STATUSES))
         self.assertNotIn(contracts.STATUS_PENDING, contracts.TERMINAL_STATUSES)

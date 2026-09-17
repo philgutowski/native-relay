@@ -618,13 +618,16 @@ class UnreadableEvidenceNeverRescues(RunCase):
 
 
 class ExcludedByScan(RunCase):
-    def test_a_task_whose_text_names_a_claude_path_is_excluded_before_any_launch(self):
+    def write_tracker(self, text):
         with open(os.path.join(self.repo, "tracker.md"), "w") as handle:
-            handle.write(TRACKER_MD.replace("- [ ] T-1 Add the brief renderer",
-                                            "- [ ] T-1 Update .claude/skills/x/SKILL.md"))
+            handle.write(text)
         _repo.git(self.repo, "add", "tracker.md")
-        _repo.git(self.repo, "commit", "-q", "-m", "point T-1 at a claude path")
+        _repo.git(self.repo, "commit", "-q", "-m", "edit the tracker")
         _repo.git(self.repo, "push", "-q", "origin", "main")
+
+    def test_a_task_whose_text_names_a_claude_path_is_skipped_before_any_launch(self):
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-1 Add the brief renderer",
+                                              "- [ ] T-1 Update .claude/skills/x/SKILL.md"))
         self.task_success("T-2")
         self.closeout_landed("T-2")
         self.task_success("T-3")
@@ -633,9 +636,63 @@ class ExcludedByScan(RunCase):
         outcome = self.go()
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
         record = self.store().get("T-1")
-        self.assertEqual(record["status"], contracts.STATUS_EXCLUDED)
-        self.assertIn(".claude/skills/x/SKILL.md", record["excluded_reason"])
+        self.assertEqual(record["status"], contracts.STATUS_SKIPPED)
+        self.assertIn(".claude/skills/x/SKILL.md", record["skip_reason"])
+        self.assertIsNone(record["excluded_reason"])
         self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
+
+    def test_a_card_fixed_after_the_scan_skipped_it_launches_on_the_next_run(self):
+        """Issue #19. The skip was permanent: the record's reason was an early return on every
+        later run, so rewording the card changed nothing."""
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-1 Add the brief renderer",
+                                              "- [ ] T-1 Update .claude/skills/x/SKILL.md"))
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        self.assertEqual(self.go().exit_code, runner.EXIT_OK)
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_SKIPPED)
+
+        self.write_tracker(self.tracker_at_remote().replace(
+            "- [ ] T-1 Update .claude/skills/x/SKILL.md", "- [ ] T-1 Add the brief renderer"))
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_LANDED)
+        self.assertIsNone(record["skip_reason"])
+
+    def test_a_legacy_excluded_record_the_manifest_does_not_exclude_is_evaluated_again(self):
+        """A record older code wrote as excluded with a scan reason is not an operator decision,
+        so it launches once its card is clean."""
+        store = self.store()
+        store.upsert("T-1", status=contracts.STATUS_EXCLUDED,
+                     excluded_reason="the task text or its brief names .claude/skills")
+        for task_id in ("T-1", "T-2", "T-3"):
+            self.task_success(task_id)
+            self.closeout_landed(task_id)
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_LANDED)
+        self.assertIsNone(record["excluded_reason"])
+
+    def test_the_summary_tells_a_runner_skip_from_a_manifest_exclusion(self):
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-1 Add the brief renderer",
+                                              "- [ ] T-1 Update .claude/skills/x/SKILL.md"))
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        lines = []
+        self.go(stream=lines.append)
+        self.assertIn("T-1 is now skipped", "\n".join(lines))
+        checks = summary_module.build(self.manifest, self.store())["pending_checks"]
+        skipped = [check for check in checks if check["kind"] == "skipped"]
+        self.assertEqual([check["task"] for check in skipped], ["T-1"])
+        self.assertIn("skipped by the runner", skipped[0]["text"])
+        self.assertIn("Fix the card", skipped[0]["text"])
 
 
 class TerminalCard(RunCase):
@@ -654,8 +711,8 @@ class TerminalCard(RunCase):
         outcome = self.go()
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
         record = self.store().get("T-1")
-        self.assertEqual(record["status"], contracts.STATUS_EXCLUDED)
-        self.assertIn("terminal", record["excluded_reason"])
+        self.assertEqual(record["status"], contracts.STATUS_SKIPPED)
+        self.assertIn("terminal", record["skip_reason"])
         self.assertIsNone(record["session_id"], "a process was launched on a closed card")
         self.assertNotIn("relay/T-1", self.relay_branches())
         self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
@@ -680,6 +737,19 @@ class ManifestExclusion(RunCase):
         self.assertEqual(record["status"], contracts.STATUS_EXCLUDED)
         self.assertIn("operator decision", record["excluded_reason"])
         self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        checks = summary_module.build(self.manifest, self.store())["pending_checks"]
+        self.assertIn("T-2 is excluded by the manifest",
+                      " ".join(check["text"] for check in checks))
+
+        # Issue #19: the exclusion is the manifest's to lift, so removing it launches the task.
+        with open(self.manifest_path, "w") as handle:
+            handle.write(MANIFEST.replace("__REPO__", self.repo))
+        self.manifest = mf.load(self.manifest_path)
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
 
 
 class TimeoutHalts(RunCase):
@@ -1159,8 +1229,8 @@ class UnexpectedFailures(RunCase):
         outcome = self.go(adapter=Unreadable(adapters.build(self.manifest)))
         self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
         record = self.store().get("T-1")
-        self.assertEqual(record["status"], contracts.STATUS_EXCLUDED)
-        self.assertIn("not authenticated", record["excluded_reason"])
+        self.assertEqual(record["status"], contracts.STATUS_SKIPPED)
+        self.assertIn("not authenticated", record["skip_reason"])
         self.assertIsNone(record["session_id"], "a process was launched on an unreadable card")
         self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
 

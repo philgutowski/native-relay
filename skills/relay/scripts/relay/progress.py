@@ -128,7 +128,9 @@ def build(manifest, store, now=time.time, raw=None, live=True):
 
 # What a later run will attempt again. Halted is here because the run loop does not skip a
 # halted record: it re-verifies it and relaunches, which is the whole repair and re-run shape
-# Relay is built around. Excluded is not, because nothing will run it. Blocked is not either,
+# Relay is built around. Excluded is not, because nothing will run it. Skipped is not, because
+# the runner checks it again at the next launch and nothing here can say whether the card was
+# fixed. Blocked is not either,
 # because it runs again only under `--retry-blocked`, which is a choice made at the next launch
 # and not a fact this state file carries.
 REMAINING_STATUSES = (TODO, contracts.STATUS_HALTED)
@@ -179,7 +181,7 @@ def format_counts(counts):
 # a later run attempts again; settled is what this run is done with, and a halt is done with in
 # either sense, since the run either stopped on it or continued past it.
 SETTLED_STATUSES = (contracts.STATUS_LANDED, contracts.STATUS_BLOCKED, contracts.STATUS_EXCLUDED,
-                    contracts.STATUS_HALTED)
+                    contracts.STATUS_SKIPPED, contracts.STATUS_HALTED)
 
 BAR_WIDTH = 20
 # How often the Follower repeats the bar while nothing moves, so a long Task still shows the
