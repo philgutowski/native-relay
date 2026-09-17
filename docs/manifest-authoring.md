@@ -198,6 +198,12 @@ reason = "needs a design answer nobody can give unattended"
   names the missing review step. A task whose backend differs from the `[defaults]` value
   carries a `reason` string, the same field as above.
 - Tasks must be independent of each other. A task that depends on another belongs in a later run.
+- A card whose text contains a `.claude/` path is skipped at launch, because an unattended edit
+  there is refused. A mention alone trips it, including a sentence that forbids the path, such as
+  "never edit .claude/skills". The match is deliberately plain rather than a guess at what the
+  sentence means: a wrong guess spends a whole launch, and a false hit costs one rewording. When
+  the task does not edit there, describe the location without the literal segment, for example
+  "the skills directory under the Claude config". `validate` reports every hit before launch.
 
 ## 10. Validate, then run
 
