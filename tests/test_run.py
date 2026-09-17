@@ -695,6 +695,30 @@ class ExcludedByScan(RunCase):
         self.assertIn("Fix the card", skipped[0]["text"])
 
 
+class CommentsReachTheBrief(RunCase):
+    def test_a_scope_comment_on_the_card_is_in_the_brief_and_the_baseline_is_its_id(self):
+        """Issue #22. Operators add scope as comments, and the brief carried title and
+        description only."""
+        with open(os.path.join(self.repo, "tracker.md"), "w") as handle:
+            handle.write(TRACKER_MD.replace("- [ ] T-1 Add the brief renderer\n",
+                                            "- [ ] T-1 Add the brief renderer\n"
+                                            "  - Scope: only the template, not the runner\n"))
+        _repo.git(self.repo, "add", "tracker.md")
+        _repo.git(self.repo, "commit", "-q", "-m", "scope comment")
+        _repo.git(self.repo, "push", "-q", "origin", "main")
+        for task_id in ("T-1", "T-2", "T-3"):
+            self.task_success(task_id)
+            self.closeout_landed(task_id)
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        with open(self.store().path("briefs", "T-1.md")) as handle:
+            text = handle.read()
+        self.assertIn("Comment 1:\nScope: only the template, not the runner", text)
+        self.assertEqual(self.store().get("T-1")["baseline_comment_id"], 1)
+        with open(self.store().path("briefs", "T-2.md")) as handle:
+            self.assertNotIn("Comments on the card", handle.read())
+
+
 class FableModel(RunCase):
     def test_a_fable_task_with_clean_card_text_passes_the_scan_and_launches(self):
         """Regression guard, 2026-09-17. One live run landed four fable tasks; in the next the fable

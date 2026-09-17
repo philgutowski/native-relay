@@ -175,6 +175,17 @@ class Validate(CliCase):
         self.assertIn(".claude/skills/x", errors[0])
         self.assertNotIn("is valid:", out)
 
+    def test_a_comment_that_trips_the_scan_is_an_error_naming_the_comment(self):
+        """Issue #22: comments reach the brief, so validate scans them too."""
+        from test_run import TRACKER_MD
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-3 Write the summary\n",
+                                              "- [ ] T-3 Write the summary\n"
+                                              "  - also update .claude/settings.json\n"))
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG, out)
+        self.assertIn("error: tasks[2] (T-3) would be skipped at launch: its comment 1 names "
+                      ".claude/settings.json", out)
+
     def test_an_unreadable_or_terminal_card_is_a_warning_not_an_error(self):
         from test_run import TRACKER_MD
         self.write_tracker(TRACKER_MD.replace("- [ ] T-1", "- [x] T-1")

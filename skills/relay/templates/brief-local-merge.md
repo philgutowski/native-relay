@@ -11,7 +11,7 @@ $data_header
 $data_begin
 $title
 
-$description
+$description$comments
 $data_end
 
 ## Rules for the whole session
