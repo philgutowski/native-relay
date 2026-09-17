@@ -215,6 +215,7 @@ python3 <runner> validate <manifest>          # the rules above, the checkout, t
 python3 <runner> validate <manifest> --list   # the same, plus the tracker's candidate tasks
 python3 <runner> run <manifest>               # to completion or to a halt
 python3 <runner> run <manifest> --detach --notify
+python3 <runner> run <manifest> --detach --wait-for-lease   # queue behind a live runner, then run
 python3 <runner> status <manifest>
 python3 <runner> summary <manifest>
 ```
