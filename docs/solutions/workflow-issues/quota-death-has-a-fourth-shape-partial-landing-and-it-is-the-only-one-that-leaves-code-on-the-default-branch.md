@@ -1,6 +1,7 @@
 ---
 title: A quota death has a fourth shape, partial_landing, and it is the only one that leaves code on the default branch, sometimes unreviewed
 date: 2026-09-10
+last_updated: 2026-09-17
 category: workflow-issues
 module: runner
 problem_type: workflow_issue
@@ -10,7 +11,7 @@ root_cause: missing_workflow_step
 resolution_type: workflow_improvement
 related_components: [run-loop, verify, closeout, classify, adapters, summary]
 applies_when:
-  - "reading a run that died on a usage limit and deciding which repair each burned Task needs"
+  - "reading a run that died on a usage limit and deciding which repair each burned Task needs, including the blocked records queued behind the one that merged"
   - "a Task record reads partial_landing, or a summary line says landed at <sha> alongside did not verify as landed"
   - "repairing a Task whose record already carries a landing_ref, rather than one whose branch never merged"
   - "authoring or relaunching a Manifest after a limit that named one model rather than the account"
@@ -18,7 +19,7 @@ applies_when:
 symptoms:
   - "the summary reads landed at <sha> and did not verify as landed: card_terminal, closing_reference on the same Task"
   - "the default branch carries a merged unit whose issue is still open and whose review, mutation table and record never ran"
-  - "relay verify reports not landed on a hand repaired Task even though a default branch commit names the issue as #N"
+  - "one long Task halted partial_landing followed by a row of Tasks blocked no_envelope in seconds, every one carrying the same session limit last message"
   - "two different limit messages in one run's logs, one naming the account session and one naming a single model"
   - "a relaunch on the same model halts within seconds while the same Manifest on another model runs to completion"
 tags:
@@ -28,7 +29,7 @@ tags:
   - halt-classification
   - hand-repair
   - closing-reference
-  - unattended-run
+  - retry-blocked
   - review-gap
 ---
 
@@ -72,12 +73,14 @@ diagnosis is wasted time. The fourth has already changed the branch every later 
 from, so a wrong diagnosis compounds into the rest of the run.
 
 **Know why the merge survives a death that kills everything after it.** The landing sequence writes
-the reference to the record before it launches anything else: `run.py:811` upserts `landing_ref`
-from the merge sha, `run.py:812` runs a code scope verify, and only then does `run.py:825` launch
+the reference to the record before it launches anything else: `run.py:815` upserts `landing_ref`
+from the merge sha, `run.py:816` runs a code scope verify, and only then does `run.py:829` launch
 the Closeout as a fresh `claude -p`. On an exhausted account that Closeout dies in seconds. The
 card never moves and no comment naming the sha is ever written, so the full verdict fails exactly
 the two tracker checks and passes every code check. `_finish` reads that combination at
-`verify.py:326` and assigns `partial_landing` at `verify.py:328`: "the code is on the remote and the card is not". The
+`verify.py:334` and assigns `partial_landing` at `verify.py:338`: "the code is on the remote and the card is not". Under
+`shipping.push = false` the code is on the local default branch only; `head_equals_remote` is a
+non blocking skip there, so the class reads the same. The
 class is not a guess about a dead process. It is a measurement of a split that really happened.
 
 **Assume the review did not run, because the record cannot tell you it did.** `review_skipped` is a
@@ -92,9 +95,12 @@ the landing commit by hand before you build on it.**
 `hand-landing-repair-lands-only-when-a-commit-names-the-issue-number-as-a-word.md` covers a record
 with no `landing_ref`, where `verify` derives the landing from a default branch commit naming the
 task as a word. This shape is the mirror image. The record already carries a `landing_ref`, so
-`verify.py:240` never attempts that derivation, because its guard opens `if not landing_ref`; control reaches the `else` at `verify.py:253`, and
+`verify.py:250` never attempts that derivation, because its guard opens `if not landing_ref`; control reaches the `else` at `verify.py:263`, and
 the check becomes `adapter.closing_reference(task_id, landing_ref)`, which on GitHub scans the
-card's **comments** for a body naming that sha (`adapters/github.py:147`). No commit message can
+card's **comments** for a body naming that sha (`adapters/github.py:147`, and the same loop on Jira at
+`adapters/jira.py:180`). Both call `reference_hit` (`adapters/__init__.py:61`), which accepts the
+full sha or any abbreviation of seven or more hex characters, so a comment saying `550795f` is
+enough. No commit message can
 satisfy it. Adding an empty commit saying `Closes #N`, the fix the sibling doc prescribes, changes
 nothing here.
 
@@ -104,14 +110,39 @@ So the order matters:
    requires. The Runner will not do it and `verify` will not ask.
 2. Close the card if it is still open.
 3. Comment on the card with the landing sha, as a comment, not a commit message.
-4. `python3 <runner> verify <manifest> <task-id>` to confirm the landing. The verb reports
+4. Delete the merged task branch. The Runner deletes it only after a full verify passes inside
+   the landing sequence (`run.py:856`), which the dead Closeout never reached, and
+   `startup_reverify` promotes a record without touching branches (`verify.py:342`), so nothing
+   else will.
+5. `python3 <runner> verify <manifest> <task-id>` to confirm the landing. The verb reports
    and writes nothing. A halted record is promoted at the next run's startup, by
    `startup_reverify`, which re-runs the full verdict on every halted record and promotes
    the ones that now pass. On a finished manifest that next run never comes, so a repaired
    Task keeps a halted record. That is cosmetic, not a second repair to chase.
+6. If the same death blocked Tasks queued behind this one, relaunch with `--retry-blocked`, not a
+   plain `run`. See the next paragraph.
 
 Step 3 is the one people skip, and skipping it leaves a Task that is genuinely finished reading
 `partial_landing` forever.
+
+**A plain rerun after this death reports success and does nothing for the blocked Tasks.** The
+Tasks the Runner launches after the dying one enter an exhausted account, exit in seconds with no
+envelope, and settle `blocked` through `_blocked_route`, which continues. A blocked record is
+skipped on any later run unless the launch carries `--retry-blocked` (`run.py:535`), and the
+progress model leaves blocked out of `REMAINING_STATUSES` (`progress.py:134`) while counting it as
+settled. So the dying run itself ends `run completed`, its time estimate shrinks with every Task
+that burns, and a plain rerun promotes the repaired halt at startup, skips every blocked record,
+and completes again. Every line of that output is true and none of it says eight Tasks never ran.
+A single `run --retry-blocked` does both jobs in one launch: `startup_reverify` runs before the
+loop on every launch (`run.py:265`), so the repaired halt is promoted first and the blocked Tasks
+relaunch after it. Tasks that died in seconds left no commits on their branches, so the stranded
+branch refusal described in the on halt doc does not fire for them.
+
+**Read the shape of the whole run before reading any one Task.** One long Task halted
+`partial_landing`, followed by a row of Tasks blocked `no_envelope` a few seconds each, all with the
+same `You've hit your session limit` last message, is one event: the account ran out while the
+long Task was between its merge and its Closeout. It is not nine failures. Wait for the reset,
+repair the one halt by steps 1 to 5, and relaunch once with `--retry-blocked`.
 
 **A limit naming one model is a different event from a limit naming the account, and only one of
 them the Manifest can answer.** Both appear as the same halt classes and both read in the summary
@@ -176,6 +207,8 @@ apart is written down. None of it is joined up.
 
 - Reading any run that died on a usage limit. Sort the burned Tasks by whether they merged before
   you decide anything else, because that single fact selects the repair.
+- A run that ends `run completed` with blocked Tasks behind a `partial_landing`. Repair the halt,
+  then relaunch with `--retry-blocked`; a plain rerun completes again and leaves them blocked.
 - Seeing `landed at <sha>` and `did not verify as landed` on the same summary Task. That pair is
   the signature, and it means the code shipped and the card did not.
 - Repairing a Task whose record carries a `landing_ref`. Comment the sha on the card. Do not reach
@@ -214,6 +247,18 @@ there whatever `continue_past_task_halt` said, and the branch held five commits 
 mutation table. The repair was the sibling doc's: commit what the tree held, run the gate, merge,
 `verify`. Nothing about `main` had to be audited, because `main` had not moved.
 
+**The 2026-09-16 death, a Jira run, both repairs in one relaunch.** Run `iw-workbench-6` launched
+eleven Tasks with `shipping.push = false`. IW-274, a plan deliverable, merged to the local `main`
+at `550795f` (a support-workbench commit) after about 21 minutes of active work; its Closeout then died on `You've hit your session
+limit · resets 8:20pm`, the card stayed `In Progress`, and the record halted `partial_landing` with
+`closing_reference` failing against a null comment id. The eight Tasks after it each settled
+`blocked [no_envelope]` with no commits on their branches, one excluded Task was skipped by
+design, and the runner log closed on `run completed: 8 blocked, 1 excluded, 1 halted, 1 landed`.
+After the reset the halt was repaired by hand: a Jira comment naming the sha, the card moved to
+`Done`, the `IW-274` branch deleted. The relaunch under `--retry-blocked` logged `IW-274 is now
+landed` before its first Task started, with `closing_reference pass` on comment `48619`, then
+landed all eight blocked Tasks in order.
+
 **The relaunch, and the one line that mattered.** The dead Task's last message named a model rather
 than the account, and the remaining Tasks all named that same model. Changing one Task's `model`
 was the whole fix:
@@ -237,12 +282,13 @@ the next Task within seconds of launch and looked like a fresh failure.
   doc adds the decoded shape of a `rejected` event and the observation that the window an operator
   would check is not the window that binds.
 - `docs/solutions/workflow-issues/on-halt-continue-past-task-halt-is-not-the-quota-switch-and-the-path-a-quota-death-takes-decides-whether-the-manifest-votes.md`
-  carries the three row table this doc extends by one row. Its conclusion that the Manifest offers
+  carries the three row table this doc extends by one row, and the plain resume versus
+  `--retry-blocked` distinction the 2026-09-16 example relies on. Its conclusion that the Manifest offers
   nothing against exhaustion holds for an account window; a per model limit is the exception, and
   the field is the Task's `model` rather than anything under `on_halt`.
 - `docs/solutions/workflow-issues/hand-landing-repair-lands-only-when-a-commit-names-the-issue-number-as-a-word.md`
   is the opposite repair, for a record with no `landing_ref`. Read the two together and note which
-  branch of `verify.py:240` you are on before choosing, because each doc's fix is inert in the
+  branch of `verify.py:250` you are on before choosing, because each doc's fix is inert in the
   other's case.
 - `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`
   is the standing rule this doc pays. Every claim above came from a live run's state file and logs
