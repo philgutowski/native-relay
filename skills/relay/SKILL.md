@@ -176,6 +176,12 @@ variable, ask them to set it and run validate again. A backend readiness failure
 binary missing from PATH) is also a validate refusal, before any Task launches, and so is a Task
 naming a backend with no verified native review step. See Backend readiness below.
 
+Once the manifest itself is valid, validate reads every listed task's card, renders its brief, and
+makes the checks the runner makes at launch. A card whose text names a `.claude/` path is an error
+naming the task, where the path appeared, and the path: the runner would skip that task, so show
+the operator the line and ask them to reword the card. A card that cannot be read, or that already
+reads a done status, is a warning, because the runner skips those rather than failing.
+
 ## Confirm before launch
 
 Launching starts an unattended process that will merge to the operator's repository and, unless

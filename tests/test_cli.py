@@ -153,6 +153,48 @@ class Validate(CliCase):
         for task_id in ("T-1", "T-2", "T-3"):
             self.assertIn("candidate: %s" % task_id, out)
 
+    def write_tracker(self, text):
+        import _repo
+        with open(os.path.join(self.repo, "tracker.md"), "w") as handle:
+            handle.write(text)
+        _repo.git(self.repo, "add", "tracker.md")
+        _repo.git(self.repo, "commit", "-q", "-m", "edit the tracker")
+        _repo.git(self.repo, "push", "-q", "origin", "main")
+
+    def test_a_card_that_trips_the_scan_is_an_error_naming_task_source_and_path(self):
+        """Issue #20. validate passed a manifest whose first four tasks the runner then skipped
+        at launch, with every card already in reach."""
+        from test_run import TRACKER_MD
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-2 Wire the run loop",
+                                              "- [ ] T-2 Wire the run loop into .claude/skills/x"))
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG, out)
+        errors = [line for line in out.splitlines() if line.startswith("error:")]
+        self.assertEqual(len([line for line in errors if "title" in line]), 1, out)
+        self.assertIn("tasks[1] (T-2)", errors[0])
+        self.assertIn(".claude/skills/x", errors[0])
+        self.assertNotIn("is valid:", out)
+
+    def test_an_unreadable_or_terminal_card_is_a_warning_not_an_error(self):
+        from test_run import TRACKER_MD
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-1", "- [x] T-1")
+                           .replace("- [ ] T-3 Write the summary\n", ""))
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("warning: tasks[0] (T-1) card already reads closed", out)
+        self.assertIn("warning: tasks[2] (T-3) card could not be read", out)
+
+    def test_a_task_the_manifest_excludes_is_not_scanned(self):
+        from test_run import TRACKER_MD, MANIFEST
+        self.write_tracker(TRACKER_MD.replace("- [ ] T-2 Wire the run loop",
+                                              "- [ ] T-2 Edit .claude/settings.json"))
+        with open(self.manifest_path, "w") as handle:
+            handle.write(MANIFEST.replace("__REPO__", self.repo).replace(
+                'id = "T-2"\nmodel = "sonnet"\neffort = "low"',
+                'id = "T-2"\nmodel = "sonnet"\neffort = "low"\nexcluded = true\nreason = "attended"'))
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+
     def test_an_unknown_verb_exits_config_not_halted(self):
         code, _ = self.call("diagnose", self.manifest_path)
         self.assertEqual(code, cli.EXIT_CONFIG)
