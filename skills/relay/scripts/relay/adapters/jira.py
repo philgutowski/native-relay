@@ -23,6 +23,8 @@ ISSUE_FIELDS = "summary,description,status,comment"
 # rather than a wrong landing verdict.
 ISSUE_PATH = "/rest/api/3/issue/%s"
 SEARCH_PATH = "/rest/api/3/search/jql"
+SEARCH_PAGE_SIZE = 100
+SEARCH_PAGE_LIMIT = 20
 
 WRITE_TOOL_PREFIX = "mcp__atlassian__"
 # Grok's Atlassian MCP tools carry no mcp__ prefix. Classify matches on startswith, so both
@@ -126,21 +128,37 @@ class JiraAdapter:
 
     # Interface.
     def candidates(self):
-        payload, reason = self._get(SEARCH_PATH, {
-            "jql": "project = %s ORDER BY created ASC" % self._project_key,
-            "fields": "summary,status",
-        })
-        if payload is None:
-            return []
+        """The project's cards that are not done, oldest first (issue #24). The done statuses go
+        into the JQL, because the search returns one page at a time and a project's done cards
+        filled the first page of 50 on a real board; the same filter runs again on what comes
+        back, so a status Jira matched loosely cannot slip through. Pages are followed to a
+        bound rather than without end."""
+        jql = "project = %s" % self._project_key
+        if self._done:
+            jql += " AND status not in (%s)" % ", ".join(
+                '"%s"' % name.replace('"', '\\"') for name in self._done)
+        params = {"jql": jql + " ORDER BY created ASC", "fields": "summary,status",
+                  "maxResults": SEARCH_PAGE_SIZE}
         found = []
-        for issue in payload.get("issues") or []:
-            fields = issue.get("fields") or {}
-            found.append({
-                "id": issue.get("key"),
-                "title": fields.get("summary") or "",
-                "description": "",
-                "status": (fields.get("status") or {}).get("name"),
-            })
+        for _ in range(SEARCH_PAGE_LIMIT):
+            payload, reason = self._get(SEARCH_PATH, params)
+            if payload is None:
+                break
+            for issue in payload.get("issues") or []:
+                fields = issue.get("fields") or {}
+                status = (fields.get("status") or {}).get("name")
+                if status and status.lower() in self._done:
+                    continue
+                found.append({
+                    "id": issue.get("key"),
+                    "title": fields.get("summary") or "",
+                    "description": "",
+                    "status": status,
+                })
+            token = payload.get("nextPageToken")
+            if payload.get("isLast", True) or not token:
+                break
+            params = dict(params, nextPageToken=token)
         return found
 
     def read(self, task_id):

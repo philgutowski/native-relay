@@ -206,6 +206,27 @@ class Validate(CliCase):
         code, out = self.call("validate", self.manifest_path)
         self.assertEqual(code, cli.EXIT_OK, out)
 
+    def test_the_list_leaves_out_done_cards(self):
+        from test_run import MANIFEST
+        with open(self.manifest_path, "w") as handle:
+            handle.write(MANIFEST.replace("__REPO__", self.repo)
+                         .replace('done_statuses = ["closed"]', 'done_statuses = ["closed", "open"]'))
+        code, out = self.call("validate", self.manifest_path, "--list")
+        self.assertNotIn("candidate:", out)
+        self.assertIn("no candidate tasks", out)
+
+    def test_the_list_prints_even_when_a_qualifying_sentence_is_missing(self):
+        """Issue #24: the list is what the operator needs to write that sentence."""
+        with open(self.manifest_path) as handle:
+            text = handle.read()
+        with open(self.manifest_path, "w") as handle:
+            handle.write(re.sub(r'^independence = .*$', "", text, flags=re.M))
+        code, out = self.call("validate", self.manifest_path, "--list")
+        self.assertEqual(code, cli.EXIT_CONFIG, out)
+        self.assertIn("independence", out)
+        for task_id in ("T-1", "T-2", "T-3"):
+            self.assertIn("candidate: %s" % task_id, out)
+
     def test_an_unknown_verb_exits_config_not_halted(self):
         code, _ = self.call("diagnose", self.manifest_path)
         self.assertEqual(code, cli.EXIT_CONFIG)

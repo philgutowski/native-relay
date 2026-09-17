@@ -293,10 +293,14 @@ class Jira(AdapterCase):
         self.assertEqual(adapter.comments_since("ABC-83", None), [])
         self.assertIsNone(adapter.closing_reference("ABC-83", "abc1234"))
 
-    def test_candidates_lists_the_project_issues(self):
-        adapter = self.jira(self.opener())
-        found = adapter.candidates()
-        self.assertEqual([entry["id"] for entry in found], ["ABC-83", "ABC-84"])
+    def test_candidates_lists_the_project_issues_that_are_not_done(self):
+        """Issue #24: done cards filled the first page of 50 on a real board."""
+        opener = self.opener()
+        found = self.jira(opener).candidates()
+        self.assertEqual([entry["id"] for entry in found], ["ABC-84"])
+        url = opener.requests[0][0]
+        self.assertIn("status+not+in+%28%22done%22%2C+%22closed%22%29", url)
+        self.assertIn("maxResults=100", url)
 
     def test_the_write_patterns_name_the_atlassian_mcp_and_nothing_else(self):
         patterns = self.jira(self.opener()).write_tool_patterns()
