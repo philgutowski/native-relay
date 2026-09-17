@@ -35,7 +35,7 @@ The eight verbs, with the follower options on the two that follow:
 
 ```bash
 python3 <runner> validate <manifest>            # check the manifest and its target repo
-python3 <runner> validate <manifest> --list     # the same, plus the tracker's candidate tasks
+python3 <runner> validate <manifest> --list     # the same, plus the tracker's cards not in a done status
 python3 <runner> run <manifest>                 # run to completion or to a halt
 python3 <runner> run <manifest> --retry-blocked # the same, retrying records that read blocked
 python3 <runner> run <manifest> --detach        # the same, in its own session, logged to the state dir
@@ -108,7 +108,8 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    when the operator names a value other than the default. Point at the commented
    `branch_prefix` lines under `[project]` in `docs/examples/` rather than inventing a new table.
    Then write a draft manifest and run `validate <manifest> --list` to read the candidate tasks
-   back.
+   back. The list leaves out cards in a done status, and it prints even when the draft is refused
+   for a missing sentence, so write the draft before the qualifying sentences exist.
 2. Confirm with the operator, one question at a time: which tasks to include and in what order;
    the model and effort for each; any task to exclude and why; and the three degraded path
    answers, `on_blocked.merge_partial`, `on_blocked.open_followup`, and

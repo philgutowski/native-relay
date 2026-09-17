@@ -149,6 +149,10 @@ def cmd_validate(args, env, out):
     for error in errors:
         out.write("error: %s\n" % error)
     if errors:
+        if args.list_candidates:
+            # Issue #24. A manifest refused for a missing qualifying sentence is exactly the one
+            # whose author needs the card list to write that sentence.
+            _list_candidates(manifest, adapter, env, out)
         out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(errors)))
         return EXIT_CONFIG
     out.write("%s is valid: %d task(s), %s adapter, %s mode%s\n"
@@ -156,13 +160,29 @@ def cmd_validate(args, env, out):
                  "" if manifest_module.pushes(manifest) else ", push off: nothing will be pushed"))
     out.write("closeout may touch: %s\n" % ", ".join(result.allowed_paths))
     if args.list_candidates:
-        candidates = adapter.candidates()
-        if not candidates:
-            out.write("no candidate tasks read from the tracker\n")
-        for entry in candidates:
-            out.write("candidate: %s  %s  [%s]\n"
-                      % (entry.get("id"), entry.get("title"), entry.get("status")))
+        _list_candidates(manifest, adapter, env, out)
     return EXIT_OK
+
+
+def _list_candidates(manifest, adapter, env, out):
+    """The tracker's open cards (issue #24): anything reading one of the manifest's done statuses,
+    or the github board status it names as terminal, is left out, since none of those can be a
+    task. Builds the adapter itself when validation stopped before one existed, and a failure
+    to build one is a printed line, never a second exit code."""
+    if adapter is None:
+        adapter, failure = _adapter_for(manifest, env, out)
+        if failure:
+            return
+    done = {str(name).lower() for name in manifest.tracker.done_statuses}
+    if manifest.tracker.status_field:
+        done.add(str(manifest.tracker.status_field).lower())
+    candidates = [entry for entry in adapter.candidates()
+                  if str(entry.get("status") or "").lower() not in done]
+    if not candidates:
+        out.write("no candidate tasks read from the tracker\n")
+    for entry in candidates:
+        out.write("candidate: %s  %s  [%s]\n"
+                  % (entry.get("id"), entry.get("title"), entry.get("status")))
 
 
 def cmd_run(args, env, out):

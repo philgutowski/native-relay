@@ -212,7 +212,7 @@ reason = "needs a design answer nobody can give unattended"
 
 ```bash
 python3 <runner> validate <manifest>          # the rules above, the checkout, the backend binary, and every card
-python3 <runner> validate <manifest> --list   # the same, plus the tracker's candidate tasks
+python3 <runner> validate <manifest> --list   # the same, plus the tracker's cards not in a done status
 python3 <runner> run <manifest>               # to completion or to a halt
 python3 <runner> run <manifest> --detach --notify
 python3 <runner> run <manifest> --detach --wait-for-lease   # queue behind a live runner, then run
