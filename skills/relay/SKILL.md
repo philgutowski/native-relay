@@ -57,8 +57,8 @@ fires a macOS notification on each phase event, and `--bar` prints a progress ba
 the counts move and once a minute in between. A phase event is a task's log starting, a task's
 status moving, or the run reaching a terminal record. A status move carries the progress phrase
 after it, `T-3 is now landed; 3 of 8 settled, roughly 40m left`, on the printed line and in the
-notification alike. Settled means the run is done with the task: landed, blocked, excluded, or
-halted. The bar is not a phase event: it prints and never notifies.
+notification alike. Settled means the run is done with the task: landed, blocked, excluded,
+skipped, or halted. The bar is not a phase event: it prints and never notifies.
 
 `--notify` also works on `run` with no follower at all, including under a bare `--detach`, which is
 the case that matters for a launchd or cron launch. There the runner notifies on each task status
@@ -313,6 +313,12 @@ python3 <runner> validate <manifest>
 
 Run the same command again. The runner re-verifies every halted record first and promotes any
 that now pass, then resumes at the first task that did not land. A landed task is never re-run.
+
+Excluded and skipped are two different records. `excluded` is the manifest's own
+`excluded = true`, and it stays until the operator removes that line. `skipped` is the runner's
+decision at launch: the card could not be read, the card was already terminal, or its text names a
+`.claude/` path. A skip is checked again on every run, so the repair is the card itself; fix it and
+run the same command, and the task launches.
 
 Blocked tasks are skipped by default, because blocked is a deliberate outcome rather than a
 failure. Pass `--retry-blocked` only when the operator asks for it, and expect it to refuse when a

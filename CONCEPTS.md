@@ -92,7 +92,10 @@ per-Task timeouts, and how each of the project's qualifying properties is satisf
 One unit of work the operator defined before the run started, identified by a Tracker record. Tasks
 in a Manifest are independent of each other by requirement; a Task that depends on another belongs
 in a later run. A Task may be marked excluded from unattended runs, with a stated reason, when
-something about it needs a human present. The same `reason` field is required when a Task's
+something about it needs a human present; that record reads excluded, and only the Manifest lifts
+it. A Task the Runner declines at launch, because its card could not be read, was already
+terminal, or names a `.claude/` path, reads skipped instead, and every later run checks it again,
+so fixing the card is the repair. The same `reason` field is required when a Task's
 backend differs from the manifest default. A Task that matches the default needs none.
 
 ### Task process

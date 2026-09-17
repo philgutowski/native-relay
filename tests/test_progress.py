@@ -426,8 +426,9 @@ class Phrase(unittest.TestCase):
             "T-2": record(contracts.STATUS_BLOCKED),
             "T-3": record(contracts.STATUS_EXCLUDED),
             "T-4": record(contracts.STATUS_HALTED),
-        }, ids=("T-1", "T-2", "T-3", "T-4", "T-5"))
-        self.assertTrue(text.startswith("4 of 5 settled"), text)
+            "T-5": record(contracts.STATUS_SKIPPED),
+        }, ids=("T-1", "T-2", "T-3", "T-4", "T-5", "T-6"))
+        self.assertTrue(text.startswith("5 of 6 settled"), text)
 
     def test_running_and_todo_are_not_settled(self):
         text = self.phrase({"T-1": record(contracts.STATUS_RUNNING, NOW - 5)})
