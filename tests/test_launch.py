@@ -202,6 +202,17 @@ class SuccessfulRun(LaunchCase):
         self.assertTrue(result.transcript_path.endswith(session + ".jsonl"))
         self.assertIn("-some-other-slug", result.transcript_path)
 
+    def test_cwd_is_the_process_working_directory_and_the_transcript_key(self):
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        other = os.path.join(self.tmp.name, "other-cwd")
+        os.makedirs(other)
+        result = self.go(cwd=other)
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(result.transcript_present, result.transcript_path)
+        self.assertEqual(
+            result.transcript_path,
+            contracts.transcript_path(self.home, os.path.realpath(other), result.session_id))
+
 
 class Timeout(LaunchCase):
     def test_a_run_past_its_deadline_is_killed_and_reported_as_timed_out(self):

@@ -1,0 +1,12 @@
+# Relay pair: claude and grok members of one markdown tracked project.
+#
+# Copy this directory next to your other operator files, not into the target repo.
+# Point both members' `repo` at the same checkout, then:
+#
+#   python3 <relay>/skills/relay/scripts/relay_cli.py pair validate this-file.toml
+#   python3 <relay>/skills/relay/scripts/relay_cli.py dispatch this-file.toml --follow
+
+[pair]
+claude = "markdown.claude.toml"
+grok = "markdown.grok.toml"
+order = ["T-1", "T-2", "T-3", "T-4"]

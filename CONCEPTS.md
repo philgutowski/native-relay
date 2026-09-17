@@ -92,6 +92,20 @@ The single file, one per project, carrying every project-specific fact a Runner 
 list, the Tracker adapter to use, the Shipping mode, the permission allowlist and disallow list,
 per-Task timeouts, and how each of the project's qualifying properties is satisfied.
 
+### Pair
+Two Manifests that partition one Task list across `claude` and `grok`, share the project, tracker,
+qualifying sentences, shipping, and gate, and name the original Task order as the merge sequence.
+A pair file points at both members. `pair split` writes the three files from a mixed Manifest.
+Backend assignment stays with the operator and the rubric; the split only groups what they already
+named and keeps their order.
+
+### Dispatch
+The coordinator that drives a Pair: one in flight Task process per native backend, each in a git
+worktree, merges still in Pair order on the primary checkout. `run` stays one Task at a time.
+Dispatch holds the same two Leases `run` does. A halt that does not continue past kills the
+sibling build, removes its worktree, deletes its half built branch, and leaves that record
+pending so the next dispatch starts it fresh.
+
 ### Task
 One unit of work the operator defined before the run started, identified by a Tracker record. Tasks
 in a Manifest are independent of each other by requirement; a Task that depends on another belongs

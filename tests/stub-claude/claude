@@ -68,7 +68,7 @@ def main(argv):
         shutil.copyfile(fixture, target)
         _stub.emit({"type": "system", "subtype": "stub_transcript", "path": target})
 
-    return _stub.main(session_id, write_evidence)
+    return _stub.main(session_id, write_evidence, backend="claude")
 
 
 if __name__ == "__main__":

@@ -31,17 +31,21 @@ Resolve `<runner>` once, from this skill's own directory as the harness gave it 
 Read the file at `<rubric>` before proposing a backend. That path is under this skill's own
 directory, not the target repo. If the file cannot be opened, stop rather than inventing routing.
 
-The eight verbs, with the follower options on the two that follow:
+The ten verbs, with the follower options on the two that follow:
 
 ```bash
 python3 <runner> validate <manifest>            # check the manifest and its target repo
 python3 <runner> validate <manifest> --list     # the same, plus the tracker's cards not in a done status
-python3 <runner> run <manifest>                 # run to completion or to a halt
+python3 <runner> run <manifest>                 # run to completion or to a halt, one task at a time
 python3 <runner> run <manifest> --retry-blocked # the same, retrying records that read blocked
 python3 <runner> run <manifest> --detach        # the same, in its own session, logged to the state dir
 python3 <runner> run <manifest> --detach --notify  # the same, notifying the desktop with nobody attached
 python3 <runner> run <manifest> --detach --wait-for-lease  # queue behind a live runner on this manifest or repo, then run
 python3 <runner> run <manifest> --follow        # detach, then follow it here; implies --detach
+python3 <runner> pair split <manifest>          # write claude and grok sibling manifests plus a pair file
+python3 <runner> pair validate <pair>           # check a pair file and both members
+python3 <runner> dispatch <pair>                # run both backends at once, merging in the pair's order
+python3 <runner> dispatch <pair> --follow       # detach, then follow the dispatch here
 python3 <runner> status <manifest>              # what the run is doing and how much is left; never takes the lease
 python3 <runner> tail <manifest>                # follow the tasks' activity decoded; never takes the lease
 python3 <runner> summary <manifest>             # the run summary as text
@@ -119,7 +123,12 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    no Closeout write path. A grok Jira Task needs grok's own Atlassian MCP login; `validate`
    probes it and names the repair. The rubric at `<rubric>` says how a backend is proposed.
    Do not write a backend the operator has not seen. Nothing re-applies the rubric after they
-   choose. The third degraded-path answer trades a mid run stop for throughput: on, a
+   choose. When the confirmed list names both `claude` and `grok`, author a pair rather than one
+   mixed manifest: keep the operator's task order as the merge order, assign each task from the
+   rubric (high judgment on claude, mechanical bounded work on grok), then `pair split` the
+   mixed draft, or write the two members and the pair file by hand. `dispatch` is what runs
+   both at once. `run` on a mixed manifest stays one task at a time. The third degraded-path
+   answer trades a mid run stop for throughput: on, a
    halt contained to one task pauses that task and the later independent tasks keep running,
    so several halts in a row surface only in the summary; off, the first halt stops the run.
    A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
@@ -192,10 +201,12 @@ reads a done status, is a warning, because the runner skips those rather than fa
 ## Confirm before launch
 
 Launching starts an unattended process that will merge to the operator's repository and, unless
-`shipping.push` is false, push. After validate passes, show the manifest path, the task list with
+`shipping.push` is false, push. After validate passes, show the manifest path (or the pair path), the task list with
 model, effort, and backend, the gate command, whether the run pushes, and `project.branch_prefix` (name the default when the key was omitted) with
 one example branch, prefix plus the first Task id, then ask for an explicit go. Do not launch on the strength of the manifest being
 valid, and do not launch when the operator has said to stop before launch.
+When the list is a pair, say that dispatch will overlap one claude build with one grok build,
+each in its own worktree, and will still merge in the listed order.
 
 ## Launch
 
@@ -204,6 +215,13 @@ what their own run is doing.
 
 ```bash
 python3 <runner> run <manifest> --follow --phases --bar --notify --for 540
+```
+
+When the operator asked for a pair (claude and grok at once), launch with `dispatch` instead of
+`run`, against the pair file. The follower flags are the same.
+
+```bash
+python3 <runner> dispatch <pair> --follow --phases --bar --notify --for 540
 ```
 
 Run that with your harness's command timeout set to its maximum, 600000 ms. The `--for 540` bound

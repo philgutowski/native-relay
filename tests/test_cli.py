@@ -356,6 +356,46 @@ class DetachCommand(CliCase):
         self.assertEqual(argv[3:5], ["run", "/x/manifest.toml"])
         self.assertEqual(sorted(argv[5:]), ["--notify", "--retry-blocked"])
 
+    def test_dispatch_detach_uses_the_dispatch_verb(self):
+        argv = cli.detach_command("/x/relay_cli.py", "/x/pair.toml", False, verb="dispatch")
+        self.assertEqual(argv[3:5], ["dispatch", "/x/pair.toml"])
+
+    def test_pair_split_writes_members_and_validate_accepts_the_pair_file(self):
+        # Rewrite T-2 onto grok so split is legal.
+        with open(self.manifest_path) as handle:
+            body = handle.read()
+        body = body.replace(
+            '''[[tasks]]
+id = "T-2"
+model = "sonnet"
+effort = "low"
+''',
+            '''[[tasks]]
+id = "T-2"
+model = "grok-4.6"
+effort = "low"
+backend = "grok"
+reason = "mechanical work, a good use of the grok account"
+''')
+        body += '\n[defaults]\nbackend = "claude"\n'
+        with open(self.manifest_path, "w") as handle:
+            handle.write(body)
+        code, out = self.call("pair", "split", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("wrote pair", out)
+        pair_path = os.path.join(self.tmp.name, "manifest.pair.toml")
+        self.assertTrue(os.path.exists(pair_path))
+        code, out = self.call("pair", "validate", pair_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        code, out = self.call("validate", pair_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("valid pair", out)
+
+    def test_dispatch_of_a_single_backend_manifest_is_refused(self):
+        code, out = self.call("dispatch", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG, out)
+        self.assertIn("at least one claude task and one grok task", out)
+
 
 class FollowedRun(CliCase):
     """U3: `run --follow` launches the runner, follows it from the launch, and reports."""

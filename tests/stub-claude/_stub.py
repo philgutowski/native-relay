@@ -50,26 +50,48 @@ def maybe_spawn_child():
     return child
 
 
-def next_entry(queue):
-    """Take the next queue entry under flock and return its directory, or None when spent."""
+def next_entry(queue, backend=None):
+    """Take the next queue entry under flock and return its directory, or None when spent.
+
+    An entry may name `backend` in entry.json. A claude or grok process then takes the next
+    matching unused entry rather than the next number, so two backends in flight do not steal
+    each other's fixtures. Entries with no backend still go to whoever asks first, which is
+    today's serial queue.
+    """
     counter_path = os.path.join(queue, "counter")
     with open(counter_path, "a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        handle.seek(0)
-        text = handle.read().strip()
-        taken = int(text) if text else 0
         entries = sorted(
             (int(name) for name in os.listdir(queue) if name.isdigit()),
         )
-        if taken >= len(entries):
+        chosen = None
+        for number in entries:
+            entry_dir = os.path.join(queue, str(number))
+            if os.path.exists(os.path.join(entry_dir, ".taken")):
+                continue
+            try:
+                wanted = load_entry(entry_dir).get("backend")
+            except (OSError, ValueError):
+                wanted = None
+            if backend and wanted and wanted != backend:
+                continue
+            chosen = entry_dir
+            break
+        if chosen is None:
             fcntl.flock(handle, fcntl.LOCK_UN)
             return None
+        taken_path = os.path.join(chosen, ".taken")
+        with open(taken_path, "w", encoding="utf-8") as marker:
+            marker.write(backend or "any")
+        handle.seek(0)
+        text = handle.read().strip()
+        taken = int(text) if text else 0
         handle.seek(0)
         handle.truncate()
         handle.write(str(taken + 1))
         handle.flush()
         fcntl.flock(handle, fcntl.LOCK_UN)
-    return os.path.join(queue, str(entries[taken]))
+    return chosen
 
 
 def load_entry(entry_dir):
@@ -116,7 +138,7 @@ def run_git_hook(entry_dir):
     return None
 
 
-def main(session_id, write_evidence):
+def main(session_id, write_evidence, backend=None):
     """The shared body every thin binary's `main()` calls once its own flag parse and
     `--version` branch has already returned. `write_evidence(entry, queue)` is
     the one backend-specific step: where the queued fixture actually lands. It receives an empty
@@ -128,7 +150,7 @@ def main(session_id, write_evidence):
     entry = {}
     entry_dir = None
     if queue:
-        entry_dir = next_entry(queue)
+        entry_dir = next_entry(queue, backend=backend)
         if entry_dir is None:
             emit({"type": "system", "subtype": "stub_queue_spent"})
             return 97

@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import classify, contracts
+from . import classify, contracts, gitread
 
 OK = "OK"
 LOCKED = "LOCKED"
@@ -98,7 +98,13 @@ class StateStore:
         self.ttl_seconds = ttl_seconds
         base = base_dir(home)
         self.dir = os.path.join(base, sha256_of(self.manifest_path))
-        self.repo_lock_path = os.path.join(base, "repos", sha256_of(self.repo_path) + ".lock")
+        # Key the repo lease on the main working tree, not this checkout's path, so a worktree
+        # of the same repository cannot take a second repo lease.
+        try:
+            identity = gitread.repo_identity(self.repo_path)
+        except (gitread.GitError, OSError, FileNotFoundError):
+            identity = self.repo_path
+        self.repo_lock_path = os.path.join(base, "repos", sha256_of(identity) + ".lock")
         self.state_path = os.path.join(self.dir, "state.json")
         self.lock_path = os.path.join(self.dir, "state.lock")
         self._abort_after_write = None

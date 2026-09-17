@@ -43,7 +43,9 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 - **Runner:** a small script. Reads a manifest, pops the next task, launches that Task's backend
   with the task's model, effort, and permission allowlist, waits, verifies the landed state, runs
   the closeout as a separate short process on the same backend, advances or halts. It holds no
-  project knowledge and never writes to a tracker.
+  project knowledge and never writes to a tracker. `run` is one Task at a time. `dispatch` on a
+  pair overlaps one claude build with one grok build, each in a git worktree, and still merges in
+  the listed order.
 - **Manifest:** one file per project. Names the tracker adapter, the task list, the shipping
   mode, any mirror rule, the disallow patterns, and the docs root the closeout may write a
   learning under. Everything project-specific is data here, never code in the runner. One

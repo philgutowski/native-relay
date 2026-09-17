@@ -402,13 +402,18 @@ def _unpushed_base_refusal(repo, default_branch, baseline_sha, branch, gate, ops
 
 def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, gate_log_path,
                      ops=None, env=None, gate_timeout_seconds=None, still_ours=None,
-                     branch=None, pushes=True):
+                     branch=None, pushes=True, expected_default=None):
     """The fixed local merge sequence of R50, from the task process's exit to a pushed default
     branch. Stops at the first refusal and names the halt class; every stop leaves the task
     branch in place so the operator can repair by hand and resume.
 
     `pushes` false ends the sequence at the merge, with stage `merged` and `pushed` false in the
     evidence, and swaps the fetch and remote compare for `_unpushed_base_refusal`.
+
+    `expected_default` is the SHA the coordinator believes the default branch sits at after its
+    own earlier landings in this dispatch. When set, the remote_advanced check compares against
+    that SHA rather than the Task's launch baseline, so a sibling landing is not a foreign
+    mover. Serial `run` leaves it unset and behaviour is unchanged.
     """
     if branch is None:
         branch = task_branch_for(task_id, None)
@@ -449,15 +454,18 @@ def local_merge_tail(repo, task_id, default_branch, baseline_sha, gate_command, 
                           evidence={"branch": branch, "status_before": contracts.STATUS_MERGING,
                                     "reason": "the lease was lost while the gate ran"})
 
+    compare_sha = expected_default if expected_default is not None else baseline_sha
+
     if pushes:
         fetch(repo, ops=ops, task_id=task_id, env=env)
         remote_sha = gitread.rev_parse(repo, "origin/" + default_branch)
-        if remote_sha != baseline_sha:
+        if remote_sha != compare_sha:
             return TailResult(False, contracts.HALT_REMOTE_ADVANCED, "fetch", gate=gate,
                               evidence={"remote_sha": remote_sha, "baseline_sha": baseline_sha,
+                                        "expected_default": compare_sha,
                                         "sha": remote_sha, "branch": branch})
     else:
-        refused = _unpushed_base_refusal(repo, default_branch, baseline_sha, branch, gate, ops,
+        refused = _unpushed_base_refusal(repo, default_branch, compare_sha, branch, gate, ops,
                                          task_id, env)
         if refused is not None:
             return refused
@@ -504,11 +512,17 @@ def blocked_path(repo, default_branch, branch, ops=None, task_id=None, env=None)
     return {"branch": branch if head else None, "head": head}
 
 
-def timeout_disposition(repo, default_branch, branch):
+def timeout_disposition(repo, default_branch, branch, tree=None, current=None):
     """R35 and R50: after a timeout kill, a clean tree on the task branch or the default branch
-    takes the blocked path and the run continues; a dirty tree halts."""
-    tree = "clean" if gitread.is_clean(repo) else "dirty"
-    current = gitread.current_branch(repo)
+    takes the blocked path and the run continues; a dirty tree halts.
+
+    Dispatch snapshots the worktree before removing it and passes `tree` and `current` so the
+    primary checkout, which stayed clean, does not hide a dirty build.
+    """
+    if tree is None:
+        tree = "clean" if gitread.is_clean(repo) else "dirty"
+    if current is None:
+        current = gitread.current_branch(repo)
     if tree == "clean" and current in (branch, default_branch):
         return TimeoutDisposition("blocked", tree, current)
     return TimeoutDisposition("halt", tree, current)

@@ -216,9 +216,18 @@ python3 <runner> validate <manifest> --list   # the same, plus the tracker's car
 python3 <runner> run <manifest>               # to completion or to a halt
 python3 <runner> run <manifest> --detach --notify
 python3 <runner> run <manifest> --detach --wait-for-lease   # queue behind a live runner, then run
+python3 <runner> pair split <manifest>        # write claude and grok members plus a pair file
+python3 <runner> pair validate <pair>
+python3 <runner> dispatch <pair>              # both backends at once, merges in the listed order
 python3 <runner> status <manifest>
 python3 <runner> summary <manifest>
 ```
+
+When the task list names both `claude` and `grok`, split it into a pair and dispatch that. Keep
+the order you already chose as the merge order. Prefer claude for high judgment work and grok for
+mechanical, bounded work, using the rubric. `run` on the mixed file still goes one task at a time.
+Dispatch overlaps one claude build with one grok build, each in a worktree of the target repo, and
+merges strictly in that order so a grok task that finishes first still waits its turn.
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease.

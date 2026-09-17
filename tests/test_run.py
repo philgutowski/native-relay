@@ -193,7 +193,7 @@ class RunCase(unittest.TestCase):
                     RELAY_HELPER=self.helper,
                     PATH=_paths.STUB_DIR + os.pathsep + os.environ.get("PATH", ""))
 
-    def queue_entry(self, fixture, git_sh=None, exit_code=0, sleep=0, stream=None):
+    def queue_entry(self, fixture, git_sh=None, exit_code=0, sleep=0, stream=None, backend=None):
         """`stream` is the opt in stdout fixture (see the stub's queue protocol). Left None, the
         stub prints only system and result lines, which is what every case but the tail ones
         wants.
@@ -209,6 +209,8 @@ class RunCase(unittest.TestCase):
             entry["fixture"] = os.path.join(TRANSCRIPTS, fixture)
         if stream:
             entry["stream"] = stream
+        if backend:
+            entry["backend"] = backend
         with open(os.path.join(entry_dir, "entry.json"), "w") as handle:
             json.dump(entry, handle)
         if git_sh:

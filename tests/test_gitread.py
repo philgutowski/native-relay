@@ -33,6 +33,16 @@ class GitRead(unittest.TestCase):
         proc = gitread.run(self.repo, ["rev-parse", "--verify", "nope^{commit}"], check=False)
         self.assertNotEqual(proc.returncode, 0)
 
+    def test_repo_identity_matches_the_working_tree_for_a_regular_checkout(self):
+        self.assertEqual(gitread.repo_identity(self.repo), os.path.realpath(self.repo))
+
+    def test_a_worktree_hashes_the_same_identity_as_the_main_checkout(self):
+        dest = os.path.join(self.tmp.name, "wt")
+        sha = gitread.rev_parse(self.repo, "HEAD")
+        _repo.git(self.repo, "worktree", "add", "--detach", dest, sha)
+        self.assertEqual(gitread.repo_identity(dest), gitread.repo_identity(self.repo))
+        self.assertEqual(gitread.common_dir(dest), gitread.common_dir(self.repo))
+
     def test_rev_parse_and_branch_reads(self):
         head = gitread.rev_parse(self.repo, "HEAD")
         self.assertEqual(len(head), 40)

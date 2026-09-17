@@ -107,7 +107,7 @@ def main(argv):
 
     # Codex assigns its own thread id (session_id_choosable is False); the runner names
     # evidence by log path, not by a session id this stub ever sees.
-    return _stub.main("", write_evidence)
+    return _stub.main("", write_evidence, backend="codex")
 
 
 if __name__ == "__main__":

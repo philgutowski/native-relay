@@ -262,6 +262,30 @@ class PreFlight(TailBase):
         self.assertEqual(result.failed, "head_equals_remote")
 
 
+class DispatchExpectedDefault(TailBase):
+    def test_a_sibling_landing_is_not_a_foreign_mover_when_expected_default_matches(self):
+        """Dispatch: T-2 built from the original baseline, T-1 already landed and pushed.
+        The tail must merge T-2 onto the new default rather than halt remote_advanced."""
+        commit_on_branch(self.repo, self.branch, {"src/feature.py": "value = 1\n"}, "task work",
+                         base="main")
+        _repo.git(self.repo, "checkout", "-q", "main")
+        sibling = commit_on_branch(self.repo, "main", {"src/other.py": "other = 1\n"},
+                                   "Merge relay task T-0 from relay/T-0")
+        _repo.git(self.repo, "push", "-q", "origin", "main")
+        result = self.run_tail(expected_default=sibling)
+        self.assertTrue(result.ok, result.evidence)
+
+    def test_a_real_foreign_mover_still_refuses_when_expected_default_is_stale(self):
+        commit_on_branch(self.repo, self.branch, {"src/feature.py": "value = 1\n"}, "task work",
+                         base="main")
+        _repo.git(self.repo, "checkout", "-q", "main")
+        commit_on_branch(self.repo, "main", {"src/other.py": "other = 1\n"}, "unrelated")
+        _repo.git(self.repo, "push", "-q", "origin", "main")
+        result = self.run_tail(expected_default=self.baseline)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.halt_class, contracts.HALT_REMOTE_ADVANCED)
+
+
 class CustomPrefixTail(TailBase):
     def test_local_merge_tail_merges_the_prefixed_branch_not_relay_slash(self):
         prefix = "IW-"

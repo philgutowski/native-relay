@@ -1,9 +1,9 @@
 # Parallel builds in worktrees: up to two Task processes at a time, merges still serial
 
 Date: 2026-09-08
-Status: filed, not planned. Decided to skip for now and build the progress bar and richer
-notifications first. This note keeps the design that was talked through so a later plan starts
-from it rather than from scratch.
+Status: implemented 2026-09-17 as dual manifest dispatch (one claude build and one grok build
+at a time, worktrees, merges in pair order). See docs/plans/2026-09-17-feat-dual-manifest-dispatch-plan.md.
+This note is the design that was talked through first.
 
 ## The ask
 

@@ -1,4 +1,7 @@
-"""The run loop (U10): one manifest, one task at a time, in the fixed sequence of R50.
+"""The run loop (U10): one manifest, tasks in a fixed sequence of R50.
+
+`run` is still one Task process at a time. `dispatch` overlaps one claude process with one
+grok process, each in a worktree, and still merges in Manifest order.
 
 Everything else in Relay is a piece; this is where they are ordered, and the order is the
 product. The sequence after a task process exits is not negotiable and not conditional on what
@@ -22,11 +25,14 @@ the ones that halted (R48), so a repair made between runs is picked up rather th
 The runner never writes to the tracker (R19). Every tracker write in this file happens inside a
 closeout process the runner launched; the runner reads the result back and decides from it.
 """
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 
 from . import (adapters, audit, backends, brief, classify, closeout, contracts, gitread,
-               gitwrite, launch, manifest as manifest_module, progress, state, summary, verify)
+               gitwrite, launch, manifest as manifest_module, progress, state, summary, verify,
+               worktree)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -53,6 +59,9 @@ class _Run:
     now: object
     allowed_paths: tuple
     used_backends: set = field(default_factory=set)
+    # Dispatch only. SHA of the default branch after the last landing this coordinator made.
+    # The merge tail compares against this so a sibling landing is not a foreign mover.
+    expected_default: str | None = None
 
 
 @dataclass
@@ -372,6 +381,94 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
         store.release()
 
 
+def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
+             retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
+             notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
+             sleep=time.sleep, clock=time.monotonic):
+    """Drive a mixed Manifest with one in flight Task process per native backend.
+
+    Builds overlap. Merges stay in Manifest order. Each build runs in a git worktree so the
+    primary checkout stays on the default branch and stays clean. Same leases, halt classes,
+    and closeout as `run`.
+    """
+    repo = manifest.project.repo
+    default = verify.default_branch_of(manifest)
+    overrides = timeout_overrides or {}
+    launch_kwargs = dict(launch_kwargs or {})
+    env = launch.child_env(manifest, base_env, home)
+
+    try:
+        adapter = adapter or adapters.build(manifest, env=base_env)
+    except adapters.ConfigurationError as exc:
+        return RunOutcome(EXIT_CONFIG, message=str(exc))
+    store = store or state.StateStore(manifest.path, repo, home=home)
+
+    announce = _announcer(stream, notifier)
+    store.observer = lambda task_id, _before, after: announce(_moved_line(manifest, store,
+                                                                          task_id, after))
+
+    acquired = _acquire(store, stream, wait_for_lease_seconds, lease_poll_seconds, sleep, clock)
+    if acquired.code == state.LOCKED:
+        holder = acquired.holder or {}
+        where = acquired.other_manifest or holder.get("manifest")
+        return RunOutcome(EXIT_LEASE, message=(
+            "another runner holds the lease: pid %s on %s, manifest %s, heartbeat %.0f seconds old"
+            % (holder.get("holder_pid"), holder.get("hostname"), where, acquired.age_seconds or 0)))
+
+    if stream is not None and acquired.code == state.STALE_RECLAIMED:
+        stream("reclaimed a stale lease from pid %s; %d record(s) marked %s"
+               % ((acquired.previous_holder or {}).get("holder_pid"),
+                  len(acquired.reclaimed_ids), contracts.HALT_RUNNER_CRASHED))
+
+    allowed_paths = tuple(manifest_module.completed_allowed_paths(manifest))
+    config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths)
+    outcome = RunOutcome(EXIT_OK, store=store)
+    wrote_terminal = False
+    try:
+        store.validate()
+        verify.startup_reverify(manifest, store, adapter, env=env, now=now)
+        halted = _concurrent_loop(config, announce)
+        if halted is not None:
+            wrote_terminal = True
+            return halted
+        _audit_cards(config)
+        _write_terminal(store, env, contracts.RUN_COMPLETED,
+                        used_backends=config.used_backends, announce=announce)
+        wrote_terminal = True
+        outcome.records = store.records()
+        return outcome
+    except gitread.GitError as exc:
+        halt = _Halt("dispatch", contracts.HALT_UNCLEAN_EXIT,
+                     "a git command failed while dispatching: %s" % exc,
+                     _git_error_fields(exc))
+        _audit_cards(config)
+        _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
+                        config.used_backends, announce=announce)
+        wrote_terminal = True
+        return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
+                          store, store.records())
+    except Exception as exc:
+        halt = _Halt("dispatch", contracts.HALT_UNEXPECTED_ERROR,
+                     "the runner hit an unexpected %s while dispatching: %s"
+                     % (type(exc).__name__, exc),
+                     {"error_type": type(exc).__name__, "error": str(exc)[:500]})
+        _audit_cards(config)
+        _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
+                        config.used_backends, announce=announce)
+        wrote_terminal = True
+        return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
+                          store, store.records())
+    finally:
+        if not wrote_terminal:
+            try:
+                _write_terminal(store, env, contracts.RUN_CRASHED,
+                                used_backends=config.used_backends, announce=announce)
+            except Exception:
+                pass
+        store.release()
+
+
 def _git_error_fields(exc):
     """The evidence a GitError contributes wherever one is recorded."""
     return {"args": exc.args_list, "returncode": exc.returncode,
@@ -556,7 +653,43 @@ def _skip(cfg, task_id, reason):
         cfg.stream("%s skipped: %s" % (task_id, reason))
 
 
+@dataclass
+class _Begun:
+    """Everything `_begin_task` gathered before launch, so dispatch can launch off the
+    main thread and still complete on it."""
+    task: object
+    card: dict
+    branch: str
+    baseline_sha: str
+    baseline_comment_id: object
+    brief_text: str
+    log_path: str
+    capability: object
+    reassignment: object
+    worktree: str | None = None
+    tree_at_exit: str | None = None
+    current_at_exit: str | None = None
+
+
+@dataclass
+class _Flight:
+    begun: object
+    worktree: str
+    thread: object
+    pgid: list
+    box: list
+
+
 def _one_task(cfg, task):
+    begun = _begin_task(cfg, task)
+    if begun is None:
+        return
+    launched = _launch_begun(cfg, begun, cwd=cfg.repo)
+    return _complete_task(cfg, begun, launched)
+
+
+def _begin_task(cfg, task):
+    """Pre flight, baseline, brief, running upsert. None means skip/exclude/already done."""
     manifest, adapter, store = cfg.manifest, cfg.adapter, cfg.store
     repo, default, env = cfg.repo, cfg.default, cfg.env
     stream = cfg.stream
@@ -662,13 +795,31 @@ def _one_task(cfg, task):
                  continued_past=False, backend=task.backend, model=task.model,
                  unenforced_restrictions=unenforced)
 
+    return _Begun(task=task, card=card, branch=branch, baseline_sha=baseline_sha,
+                  baseline_comment_id=baseline_comment_id, brief_text=brief_text,
+                  log_path=log_path, capability=capability, reassignment=reassignment)
+
+
+def _launch_begun(cfg, begun, cwd, on_started=None):
+    """Blocking launch of a begun task. Serial run uses the repo; dispatch uses a worktree."""
     launched = launch.launch(
-        manifest, task, brief_text, log_path,
-        cfg.overrides.get("task_seconds") or manifest.timeouts.task_minutes * 60,
-        home=cfg.home, base_env=cfg.base_env, stream=stream,
-        heartbeat=store.heartbeat, on_release=store.release, **cfg.launch_kwargs)
+        cfg.manifest, begun.task, begun.brief_text, begun.log_path,
+        cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
+        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream,
+        heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=cwd,
+        on_started=on_started, **cfg.launch_kwargs)
     if not launched.launch_error:
-        cfg.used_backends.add(task.backend)
+        cfg.used_backends.add(begun.task.backend)
+    return launched
+
+
+def _complete_task(cfg, begun, launched):
+    """Classify and take the merge, blocked, or halt route. Always on the main thread."""
+    manifest, adapter, store = cfg.manifest, cfg.adapter, cfg.store
+    task, capability = begun.task, begun.capability
+    reassignment = begun.reassignment
+    branch, baseline_sha = begun.branch, begun.baseline_sha
+    stream = cfg.stream
 
     disallow = (manifest_module.resolved_disallowed(manifest)
                 if not capability.enforces_at_launch else None)
@@ -692,9 +843,11 @@ def _one_task(cfg, task):
                  active_seconds=launched.active_seconds, findings=findings,
                  binary_path=launched.binary_path, args=launched.args)
 
-    context = _Context(task=task, card=card, branch=branch, baseline_sha=baseline_sha,
-                       baseline_comment_id=baseline_comment_id, digest=digest,
-                       launched=launched, findings=findings, **vars(cfg))
+    context = _Context(task=task, card=begun.card, branch=branch, baseline_sha=baseline_sha,
+                       baseline_comment_id=begun.baseline_comment_id, digest=digest,
+                       launched=launched, findings=findings,
+                       tree_at_exit=begun.tree_at_exit, current_at_exit=begun.current_at_exit,
+                       **vars(cfg))
 
     # From here on, every raise is a halt on a task whose process has already launched and whose
     # brief already told it to move the card (R1). The wrap makes that halt visible on the card
@@ -729,7 +882,7 @@ def _one_task(cfg, task):
         if digest.get("halt_class") == contracts.HALT_TIMEOUT:
             return _timeout_route(context)
 
-        routable, note = _routable(manifest, adapter, digest, repo, branch, baseline_sha)
+        routable, note = _routable(manifest, adapter, digest, cfg.repo, branch, baseline_sha)
         if note and stream is not None:
             stream("%s: %s" % (task.id, note))
         if routable:
@@ -747,6 +900,233 @@ def _one_task(cfg, task):
         raise
 
 
+def _snapshot_and_remove(cfg, dest):
+    """Read the worktree's tree state, then remove it so the merge tail can check the branch out."""
+    tree = current = None
+    if dest and os.path.isdir(dest):
+        try:
+            tree = "clean" if gitread.is_clean(dest) else "dirty"
+            current = gitread.current_branch(dest)
+        except gitread.GitError:
+            tree, current = "dirty", None
+    worktree.remove(cfg.repo, dest, env=cfg.env)
+    return tree, current
+
+
+def _spawn_flight(cfg, begun, dest):
+    pgid_box = []
+    result_box = []
+
+    def on_started(_pid, group_id):
+        pgid_box.append(group_id)
+
+    def worker():
+        try:
+            launched = launch.launch(
+                cfg.manifest, begun.task, begun.brief_text, begun.log_path,
+                cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
+                home=cfg.home, base_env=cfg.base_env, stream=None,
+                heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=dest,
+                on_started=on_started, **cfg.launch_kwargs)
+            result_box.append(("ok", launched))
+        except Exception as exc:
+            result_box.append(("err", exc))
+
+    thread = threading.Thread(target=worker, name="relay-build-%s" % begun.task.id, daemon=True)
+    thread.start()
+    return _Flight(begun=begun, worktree=dest, thread=thread, pgid=pgid_box, box=result_box)
+
+
+def _wait_any_flight(slots, timeout=0.1):
+    for backend, flight in list(slots.items()):
+        flight.thread.join(timeout=timeout)
+        if not flight.thread.is_alive():
+            return backend, flight
+    return None, None
+
+
+def _abandon_build(cfg, task_id, branch, dest=None):
+    """Kill a sibling's leftover: worktree gone, branch gone, record pending for a fresh start."""
+    if dest:
+        try:
+            worktree.remove(cfg.repo, dest, env=cfg.env)
+        except worktree.WorktreeError:
+            pass
+    if branch and gitread.branch_exists(cfg.repo, branch):
+        try:
+            gitwrite.delete_branch(cfg.repo, branch, ops=cfg.store, task_id=task_id, env=cfg.env)
+        except gitread.GitError:
+            pass
+    cfg.store.upsert(task_id, status=contracts.STATUS_PENDING, session_id=None,
+                     transcript_path=None, halt_class=None, halt_stage=None,
+                     halt_message=None, skip_reason=None)
+
+
+def _abort_siblings(cfg, slots, waiting, keep_id):
+    """On a halt that does not continue past: drop every other in flight or waiting build."""
+    for backend, flight in list(slots.items()):
+        if flight.begun.task.id == keep_id:
+            continue
+        if flight.pgid:
+            launch.kill_pgid(flight.pgid[0], cfg.launch_kwargs.get("sigkill_grace_seconds", 15))
+        flight.thread.join(timeout=5)
+        _abandon_build(cfg, flight.begun.task.id, flight.begun.branch, flight.worktree)
+        del slots[backend]
+    for task_id, (begun, _launched) in list(waiting.items()):
+        if task_id == keep_id:
+            continue
+        _abandon_build(cfg, task_id, begun.branch)
+        del waiting[task_id]
+
+
+def _record_halt(cfg, halt, task):
+    """The same halt upsert `run` does, so dispatch and serial cannot disagree."""
+    continued = _continue_past(cfg, halt)
+    previous = cfg.store.get(halt.task_id) or {}
+    kept = previous if previous.get("backend") else {"backend": task.backend,
+                                                     "model": task.model}
+    cfg.store.upsert(halt.task_id, status=contracts.STATUS_HALTED,
+                     halt_class=halt.halt_class, halt_evidence=halt.evidence,
+                     halt_message=halt.message, continued_past=continued,
+                     backend=kept.get("backend"), model=kept.get("model"))
+    if continued and cfg.stream is not None:
+        cfg.stream("%s halted with class %s; continuing past it"
+                   % (halt.task_id, halt.halt_class))
+    return continued
+
+
+def _concurrent_loop(cfg, announce):
+    """One in flight process per backend, merges in Manifest order. Returns a halted
+    RunOutcome or None when the pair completed."""
+    tasks = list(cfg.manifest.tasks)
+    n = len(tasks)
+    by_id = {task.id: task for task in tasks}
+    slots = {}
+    waiting = {}
+    settled = set()
+    next_merge = 0
+
+    def in_play(task_id):
+        if task_id in settled or task_id in waiting:
+            return True
+        return any(flight.begun.task.id == task_id for flight in slots.values())
+
+    def backend_busy(backend):
+        if backend in slots:
+            return True
+        # A finished build waiting its merge turn still owns this backend. Starting the next
+        # one would overlap two grok (or two claude) branches and steal the stub queue.
+        return any(begun.task.backend == backend for begun, _launched in waiting.values())
+
+    def fill():
+        for task in tasks:
+            if in_play(task.id):
+                continue
+            if backend_busy(task.backend):
+                continue
+            begun = _begin_task(cfg, task)
+            if begun is None:
+                settled.add(task.id)
+                continue
+            dest = worktree.path_for(cfg.store, task.id)
+            try:
+                worktree.add(cfg.repo, dest, begun.baseline_sha, env=cfg.env)
+            except worktree.WorktreeError as exc:
+                raise _Halt(task.id, contracts.HALT_UNEXPECTED_ERROR,
+                            "could not create a worktree for %s: %s" % (task.id, exc),
+                            {"task": task.id, "error_type": "worktree", "error": str(exc)[:500]})
+            begun.worktree = dest
+            slots[task.backend] = _spawn_flight(cfg, begun, dest)
+            if cfg.stream is not None:
+                cfg.stream("%s building on %s in a worktree" % (task.id, task.backend))
+
+    def drain():
+        nonlocal next_merge
+        while next_merge < n:
+            task = tasks[next_merge]
+            if task.id in settled:
+                next_merge += 1
+                cfg.store.set_cursor(next_merge)
+                continue
+            if task.id not in waiting:
+                return
+            begun, launched = waiting.pop(task.id)
+            _complete_task(cfg, begun, launched)
+            settled.add(task.id)
+            cfg.expected_default = gitread.rev_parse(cfg.repo, cfg.default)
+            next_merge += 1
+            cfg.store.set_cursor(next_merge)
+
+    def handle_halt(halt, task):
+        continued = _record_halt(cfg, halt, task)
+        if continued:
+            settled.add(halt.task_id)
+            if halt.task_id in waiting:
+                del waiting[halt.task_id]
+            cfg.expected_default = gitread.rev_parse(cfg.repo, cfg.default)
+            return None
+        _abort_siblings(cfg, slots, waiting, halt.task_id)
+        _audit_cards(cfg)
+        _write_terminal(cfg.store, cfg.env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
+                        cfg.used_backends, announce=announce)
+        return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
+                          cfg.store, cfg.store.records())
+
+    try:
+        fill()
+        drain()
+    except _Halt as halt:
+        outcome = handle_halt(halt, by_id.get(halt.task_id) or tasks[0])
+        if outcome is not None:
+            return outcome
+
+    while slots or waiting:
+        backend, flight = _wait_any_flight(slots)
+        if flight is None:
+            continue
+        del slots[backend]
+        if not flight.box:
+            halt = _Halt(flight.begun.task.id, contracts.HALT_UNEXPECTED_ERROR,
+                         "%s build thread ended with no result" % flight.begun.task.id,
+                         {"task": flight.begun.task.id, "error_type": "empty_flight"})
+            outcome = handle_halt(halt, flight.begun.task)
+            if outcome is not None:
+                return outcome
+            try:
+                fill()
+            except _Halt as halt:
+                outcome = handle_halt(halt, by_id.get(halt.task_id) or flight.begun.task)
+                if outcome is not None:
+                    return outcome
+            continue
+        kind, payload = flight.box[0]
+        tree, current = _snapshot_and_remove(cfg, flight.worktree)
+        flight.begun.tree_at_exit = tree
+        flight.begun.current_at_exit = current
+        if kind == "err":
+            halt = _Halt(flight.begun.task.id, contracts.HALT_UNEXPECTED_ERROR,
+                         "the runner hit an unexpected %s on %s: %s"
+                         % (type(payload).__name__, flight.begun.task.id, payload),
+                         {"task": flight.begun.task.id, "error_type": type(payload).__name__,
+                          "error": str(payload)[:500]})
+            outcome = handle_halt(halt, flight.begun.task)
+            if outcome is not None:
+                return outcome
+        else:
+            launched = payload
+            if not launched.launch_error:
+                cfg.used_backends.add(flight.begun.task.backend)
+            waiting[flight.begun.task.id] = (flight.begun, launched)
+        try:
+            drain()
+            fill()
+        except _Halt as halt:
+            outcome = handle_halt(halt, by_id.get(halt.task_id) or flight.begun.task)
+            if outcome is not None:
+                return outcome
+    return None
+
+
 @dataclass
 class _Context(_Run):
     """One task's tail: the run wide values plus what this task produced, so each route below
@@ -759,6 +1139,8 @@ class _Context(_Run):
     digest: dict = None
     launched: object = None
     findings: list = None
+    tree_at_exit: str | None = None
+    current_at_exit: str | None = None
 
 
 def _clear_blocked_branch(store, task, repo, record, env, branch):
@@ -779,7 +1161,9 @@ def _timeout_route(ctx):
     """R35 and R50. A clean tree takes the blocked path with a digest naming the timeout, so the
     run continues past a task that ran long. A dirty tree halts, because nobody can tell from
     here whether the half written state is safe to build on."""
-    disposition = gitwrite.timeout_disposition(ctx.repo, ctx.default, ctx.branch)
+    disposition = gitwrite.timeout_disposition(
+        ctx.repo, ctx.default, ctx.branch,
+        tree=ctx.tree_at_exit, current=ctx.current_at_exit)
     # Both units on purpose. The seconds are the measurement and the minutes are what the
     # cause line names; deriving the minutes at render time would put a unit conversion in the
     # summary, which is the one place that must not compute anything.
@@ -840,7 +1224,8 @@ def _merge_route(ctx):
             ctx.store.path("gate", ctx.task.id + ".log"), ops=ctx.store, env=ctx.env,
             gate_timeout_seconds=ctx.overrides.get("gate_seconds"),
             still_ours=lambda: not beat.lost,
-            branch=ctx.branch, pushes=manifest_module.pushes(ctx.manifest))
+            branch=ctx.branch, pushes=manifest_module.pushes(ctx.manifest),
+            expected_default=ctx.expected_default)
     finally:
         beat.stop()
     if not tail.ok:

@@ -5,6 +5,7 @@ which the runner needs before it can compare local and remote heads. The mutatin
 (checkout, merge, push) live in gitwrite.py from U8 onward, so a reader of the run loop can see
 at a glance which calls can move the repo.
 """
+import os
 import subprocess
 
 GIT_TIMEOUT_SECONDS = 120
@@ -153,6 +154,28 @@ def config_get(repo, key, env=None):
     if proc.returncode != 0:
         return None
     return proc.stdout.strip()
+
+
+def common_dir(repo):
+    """The absolute git common dir. A worktree and its main checkout share one."""
+    proc = run(repo, ["rev-parse", "--git-common-dir"])
+    text = proc.stdout.strip()
+    if not os.path.isabs(text):
+        text = os.path.join(repo, text)
+    return os.path.realpath(text)
+
+
+def repo_identity(repo):
+    """The path the repo lease is keyed on.
+
+    A regular checkout hashes its working tree, which is what historical lock files used. A
+    worktree hashes that same main working tree, so two worktrees of one repository cannot
+    take two repo leases.
+    """
+    common = common_dir(repo)
+    if os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return os.path.realpath(repo)
 
 
 def merge_head_exists(repo):

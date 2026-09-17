@@ -232,6 +232,29 @@ class _Heartbeat:
             self._timer.cancel()
 
 
+def kill_pgid(pgid, grace_seconds):
+    """SIGTERM then SIGKILL a process group by id. Used when the coordinator only has the
+    group, not the Popen object, which is the abort path for a sibling build."""
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            return True
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        return True
+    return True
+
+
 def _kill_group(proc, grace_seconds, pgid=None):
     """SIGTERM the whole group, then SIGKILL what is left. The pipe usually stays open until the
     SIGKILL because grandchildren inherited it, so nothing here waits on stdout.
@@ -266,15 +289,20 @@ def _kill_group(proc, grace_seconds, pgid=None):
 def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=None, home=None,
            base_env=None, heartbeat=None, heartbeat_interval=contracts.LEASE_HEARTBEAT_SECONDS,
            stream=print, sigkill_grace_seconds=SIGKILL_GRACE_SECONDS, popen=subprocess.Popen,
-           on_release=None, allowed=None, disallowed=None):
+           on_release=None, allowed=None, disallowed=None, cwd=None, on_started=None):
     """Run one task or closeout process to completion, a timeout, or a lost lease.
 
     `active_seconds` is measured on the monotonic clock, which does not advance while the host
     sleeps, and `wall_seconds` on the wall clock. The deadline uses the monotonic one, so a
     laptop that slept for an hour does not consume the task's budget, and the summary can show
     both so a sleep is visible rather than mysterious.
+
+    `cwd` is the process working directory. Dispatch sets it to the Task's worktree so two
+    builds do not share a tree. Default is the Manifest repo, which is today's serial path.
+    `on_started(pid, pgid)` fires once the child exists, so a coordinator can abort a sibling.
     """
     repo = os.path.realpath(manifest.project.repo)
+    cwd = os.path.realpath(cwd) if cwd else repo
     session_id = session_id or str(uuid.uuid4())
     env = child_env(manifest, base_env, home, backend=task.backend)
     home = home or env.get("HOME") or os.path.expanduser("~")
@@ -282,27 +310,32 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
 
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     args = build_args(manifest, task, brief_text, session_id, allowed, disallowed,
-                      log_path=log_path, repo=repo)
+                      log_path=log_path, repo=cwd)
     result.args = list(args)
     result.binary_path = shutil.which(args[0], path=env.get("PATH"))
 
     started_wall = time.time()
     started = time.monotonic()
     try:
-        proc = popen(args, cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                      stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     except OSError as exc:
         result.launch_error = "could not start %s: %s" % (args[0], exc)
         result.wall_seconds = time.time() - started_wall
         result.active_seconds = time.monotonic() - started
         result.transcript_path, result.transcript_present = find_transcript(
-            home, repo, session_id, backend=task.backend, log_path=log_path)
+            home, cwd, session_id, backend=task.backend, log_path=log_path)
         return result
 
     try:
         group_id = os.getpgid(proc.pid)
     except OSError:
         group_id = None
+    if on_started is not None:
+        try:
+            on_started(proc.pid, group_id)
+        except Exception:
+            pass
 
     lines = queuemod.Queue()
     reader = _Reader(proc.stdout, lines)
@@ -398,5 +431,5 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     result.active_seconds = time.monotonic() - started
     result.wall_seconds = time.time() - started_wall
     result.transcript_path, result.transcript_present = find_transcript(
-        home, repo, session_id, backend=task.backend, log_path=log_path)
+        home, cwd, session_id, backend=task.backend, log_path=log_path)
     return result

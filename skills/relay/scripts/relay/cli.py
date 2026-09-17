@@ -1,4 +1,4 @@
-"""The operator interface (U10, R45): eight verbs, no prompts.
+"""The operator interface (U10, R45): ten verbs, no prompts.
 
 Every verb is a subcommand and none of them asks a question, because the `/relay` skill drives
 them and a skill session cannot answer one either. There is no operation that exists only inside
@@ -16,7 +16,8 @@ import subprocess
 import sys
 
 from . import (adapters, audit as audit_module, brief as brief_module, contracts,
-               manifest as manifest_module, notify, progress, run as run_module, state, summary, tail as tail_module, verify)
+               manifest as manifest_module, notify, pair as pair_module, progress, run as run_module,
+               state, summary, tail as tail_module, verify)
 
 EXIT_OK = run_module.EXIT_OK
 EXIT_CONFIG = run_module.EXIT_CONFIG
@@ -103,6 +104,31 @@ def build_parser():
     lease = verbs.add_parser("lease", help="inspect or break the lease")
     lease.add_argument("manifest")
     lease.add_argument("--break", action="store_true", dest="break_lease")
+
+    pair_verb = verbs.add_parser("pair", help="split a mixed manifest into claude and grok members")
+    pair_sub = pair_verb.add_subparsers(dest="pair_verb", required=True)
+    split_verb = pair_sub.add_parser("split", help="write sibling manifests and a pair file")
+    split_verb.add_argument("manifest")
+    split_verb.add_argument("--out-dir", dest="out_dir",
+                            help="directory for the pair files; default is next to the source")
+    pair_validate = pair_sub.add_parser("validate", help="check a pair file and both members")
+    pair_validate.add_argument("pair")
+
+    dispatch_verb = verbs.add_parser("dispatch",
+                                     help="run claude and grok tasks at once, merging in order")
+    dispatch_verb.add_argument("target", help="a pair file, or a mixed manifest")
+    dispatch_verb.add_argument("--retry-blocked", action="store_true",
+                               help="retry tasks whose records read blocked")
+    dispatch_verb.add_argument("--detach", action="store_true",
+                               help="start the dispatch in its own session, logging to the state "
+                                    "directory, and return at once")
+    dispatch_verb.add_argument("--wait-for-lease", type=int, nargs="?",
+                               const=DEFAULT_LEASE_WAIT_MINUTES,
+                               dest="wait_for_lease", metavar="MINUTES",
+                               help="when another runner holds the lease, wait for it to clear")
+    dispatch_verb.add_argument("--follow", action="store_true",
+                               help="detach, then follow this dispatch in the foreground")
+    _add_follow_options(dispatch_verb)
     return parser
 
 
@@ -127,6 +153,8 @@ def _adapter_for(manifest, env, out):
 
 
 def cmd_validate(args, env, out):
+    if pair_module.is_pair_file(args.manifest):
+        return _validate_pair_path(args.manifest, env, out)
     manifest, failure = _load(args.manifest, out)
     if failure:
         return failure
@@ -219,7 +247,8 @@ def _wait_seconds(args):
     return minutes * 60 if minutes else None
 
 
-def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_minutes=None):
+def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_minutes=None,
+                   verb="run"):
     """The argv for a detached runner.
 
     `-u` is load-bearing. The child's stdout is `runner.log`, and a block buffered Python writes
@@ -236,7 +265,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     that name here would shadow it for anyone later reaching for `notify.available()` inside
     this function.
     """
-    command = [sys.executable, "-u", entry, "run", manifest_path]
+    command = [sys.executable, "-u", entry, verb, manifest_path]
     if retry_blocked:
         command.append("--retry-blocked")
     if notify_on:
@@ -248,7 +277,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     return command
 
 
-def _detach(args, manifest, env, out):
+def _detach(args, manifest, env, out, verb="run"):
     """Start the same `run` in its own session and return, or follow it when asked. `setsid` does
     not exist on macOS, so the /relay skill had to improvise a wrapper on the first Cratekit run;
     `start_new_session` is the portable form. `caffeinate -i` keeps a Mac awake for the run when
@@ -258,7 +287,8 @@ def _detach(args, manifest, env, out):
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_cli.py")
     command = detach_command(entry, os.path.abspath(args.manifest), args.retry_blocked,
                              notify_on=getattr(args, "notify", False),
-                             wait_minutes=getattr(args, "wait_for_lease", None))
+                             wait_minutes=getattr(args, "wait_for_lease", None),
+                             verb=verb)
     if shutil.which("caffeinate"):
         command = ["caffeinate", "-i"] + command
     following = getattr(args, "follow", False)
@@ -480,6 +510,109 @@ def cmd_lease(args, env, out):
     return EXIT_LEASE
 
 
+def _validate_pair_path(path, env, out):
+    try:
+        loaded = pair_module.load(path)
+    except pair_module.PairError as exc:
+        out.write("%s\n" % exc)
+        return EXIT_CONFIG
+    errors = pair_module.validate(loaded, env=env)
+    for item in errors:
+        out.write("error: %s\n" % item)
+    if errors:
+        out.write("%s is not a valid pair: %d error(s)\n" % (path, len(errors)))
+        return EXIT_CONFIG
+    grouped = pair_module.queues(pair_module.combine(loaded))
+    out.write("%s is a valid pair: %d claude task(s), %d grok task(s), merge order is %s\n"
+              % (path, len(grouped["claude"]), len(grouped["grok"]),
+                 " ".join(grouped["order"])))
+    return EXIT_OK
+
+
+def _load_dispatch_target(path, env, out):
+    """A pair file becomes one combined Manifest. A mixed Manifest is used as is once it
+    names both backends."""
+    if pair_module.is_pair_file(path):
+        try:
+            loaded = pair_module.load(path)
+        except pair_module.PairError as exc:
+            out.write("%s\n" % exc)
+            return None, EXIT_CONFIG
+        errors = pair_module.validate(loaded, env=env)
+        if errors:
+            for item in errors:
+                out.write("error: %s\n" % item)
+            out.write("refusing to dispatch an invalid pair; fix it and run pair validate again\n")
+            return None, EXIT_CONFIG
+        try:
+            return pair_module.combine(loaded), None
+        except pair_module.PairError as exc:
+            out.write("%s\n" % exc)
+            return None, EXIT_CONFIG
+    manifest, failure = _load(path, out)
+    if failure:
+        return None, failure
+    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    if not result.ok:
+        for error in result.errors:
+            out.write("error: %s\n" % error)
+        out.write("refusing to dispatch an invalid manifest; fix it and run validate again\n")
+        return None, EXIT_CONFIG
+    try:
+        pair_module.from_manifest(manifest)
+    except pair_module.PairError as exc:
+        out.write("%s\n" % exc)
+        return None, EXIT_CONFIG
+    return manifest, None
+
+
+def cmd_pair(args, env, out):
+    if args.pair_verb == "validate":
+        return _validate_pair_path(args.pair, env, out)
+    manifest, failure = _load(args.manifest, out)
+    if failure:
+        return failure
+    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    if not result.ok:
+        for error in result.errors:
+            out.write("error: %s\n" % error)
+        out.write("refusing to split an invalid manifest; fix it and run validate again\n")
+        return EXIT_CONFIG
+    try:
+        loaded = pair_module.split(manifest, out_dir=args.out_dir)
+    except pair_module.PairError as exc:
+        out.write("%s\n" % exc)
+        return EXIT_CONFIG
+    grouped = pair_module.queues(pair_module.combine(loaded))
+    out.write("wrote pair %s\n" % loaded.path)
+    out.write("  claude: %s (%d task(s))\n" % (loaded.claude.path, len(grouped["claude"])))
+    out.write("  grok: %s (%d task(s))\n" % (loaded.grok.path, len(grouped["grok"])))
+    out.write("  order: %s\n" % " ".join(grouped["order"]))
+    return EXIT_OK
+
+
+def cmd_dispatch(args, env, out):
+    manifest, failure = _load_dispatch_target(args.target, env, out)
+    if failure:
+        return failure
+    adapter, failure = _adapter_for(manifest, env, out)
+    if failure:
+        return failure
+    if getattr(args, "detach", False) or getattr(args, "follow", False):
+        args.manifest = args.target
+        return _detach(args, manifest, env, out, verb="dispatch")
+    outcome = run_module.dispatch(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
+                                  retry_blocked=args.retry_blocked,
+                                  wait_for_lease_seconds=_wait_seconds(args),
+                                  stream=lambda line: out.write(line + "\n"),
+                                  notifier=notify.build(getattr(args, "notify", False)))
+    if outcome.message:
+        out.write("%s\n" % outcome.message)
+    if outcome.store is not None:
+        out.write(summary.render(summary.build(manifest, outcome.store)) + "\n")
+    return outcome.exit_code
+
+
 VERBS = {
     "validate": cmd_validate,
     "run": cmd_run,
@@ -489,6 +622,8 @@ VERBS = {
     "audit": cmd_audit,
     "verify": cmd_verify,
     "lease": cmd_lease,
+    "pair": cmd_pair,
+    "dispatch": cmd_dispatch,
 }
 
 
