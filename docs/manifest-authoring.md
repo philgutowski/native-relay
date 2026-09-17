@@ -202,7 +202,7 @@ reason = "needs a design answer nobody can give unattended"
 ## 10. Validate, then run
 
 ```bash
-python3 <runner> validate <manifest>          # the rules above, plus the checkout and the backend binary
+python3 <runner> validate <manifest>          # the rules above, the checkout, the backend binary, and every card
 python3 <runner> validate <manifest> --list   # the same, plus the tracker's candidate tasks
 python3 <runner> run <manifest>               # to completion or to a halt
 python3 <runner> run <manifest> --detach --notify
@@ -212,6 +212,10 @@ python3 <runner> summary <manifest>
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease.
+
+`validate` reads each listed task's card and makes the runner's launch checks on it. A card whose
+text trips the `.claude/` scan is an error, since the runner would skip that task; a card that
+cannot be read or already reads done is a warning.
 
 `validate` names the property that failed rather than the exit code, and it never invents a
 sentence on your behalf. Read the summary after a halt: it carries the halt class, the cause

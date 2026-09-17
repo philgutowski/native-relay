@@ -15,8 +15,8 @@ import shutil
 import subprocess
 import sys
 
-from . import (adapters, audit as audit_module, contracts, manifest as manifest_module, notify,
-               progress, run as run_module, state, summary, tail as tail_module, verify)
+from . import (adapters, audit as audit_module, brief as brief_module, contracts,
+               manifest as manifest_module, notify, progress, run as run_module, state, summary, tail as tail_module, verify)
 
 EXIT_OK = run_module.EXIT_OK
 EXIT_CONFIG = run_module.EXIT_CONFIG
@@ -120,23 +120,31 @@ def cmd_validate(args, env, out):
     if failure:
         return failure
     result = manifest_module.validate(manifest, check_environment=True, env=env)
+    errors, warnings = list(result.errors), list(result.warnings)
+    adapter = None
+    if result.ok:
+        # Issue #20. The runner reads every card at launch and skips a task whose text trips the
+        # R41 scan; validate has the same cards in reach, so it makes the same checks first.
+        adapter, failure = _adapter_for(manifest, env, out)
+        if failure:
+            return failure
+        card_errors, card_warnings = brief_module.check_cards(manifest, adapter)
+        errors += card_errors
+        warnings += card_warnings
     for applied in result.defaults_applied:
         out.write("default applied: %s\n" % applied)
-    for warning in result.warnings:
+    for warning in warnings:
         out.write("warning: %s\n" % warning)
-    for error in result.errors:
+    for error in errors:
         out.write("error: %s\n" % error)
-    if not result.ok:
-        out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(result.errors)))
+    if errors:
+        out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(errors)))
         return EXIT_CONFIG
     out.write("%s is valid: %d task(s), %s adapter, %s mode%s\n"
               % (args.manifest, len(manifest.tasks), manifest.tracker.adapter, manifest.shipping_mode,
                  "" if manifest_module.pushes(manifest) else ", push off: nothing will be pushed"))
     out.write("closeout may touch: %s\n" % ", ".join(result.allowed_paths))
     if args.list_candidates:
-        adapter, failure = _adapter_for(manifest, env, out)
-        if failure:
-            return failure
         candidates = adapter.candidates()
         if not candidates:
             out.write("no candidate tasks read from the tracker\n")

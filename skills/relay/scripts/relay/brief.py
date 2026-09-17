@@ -290,6 +290,47 @@ def exclusion_reason(hits):
             % ", ".join(paths))
 
 
+def check_cards(manifest, adapter):
+    """Issue #20: the launch time checks `run._one_task` makes on each card, made at validate so
+    a manifest whose tasks the runner would skip does not validate clean.
+
+    Returns (errors, warnings), each a list of sentences. A scan hit is an error, because the
+    operator's repair is a card edit and nothing launches until it is made. An unreadable or
+    terminal card is a warning: the runner skips those rather than failing, and a terminal card
+    is also what a task that already landed looks like. A task the manifest excludes is not
+    read, since the runner never reads it either.
+    """
+    errors, warnings = [], []
+    for index, task in enumerate(manifest.tasks):
+        if task.excluded:
+            continue
+        label = "tasks[%d] (%s)" % (index, task.id)
+        card = adapter.read(task.id)
+        if card.get("skipped"):
+            warnings.append("%s card could not be read, so the runner will skip it: %s"
+                            % (label, card["skipped"]))
+            continue
+        status = adapter.status(task.id)
+        if status.get("terminal"):
+            warnings.append("%s card already reads %s, which is terminal, so the runner will not "
+                            "launch it" % (label, status.get("status")))
+            continue
+        try:
+            text = render(manifest, task, card)
+        except BriefError as exc:
+            errors.append("%s brief could not be rendered: %s" % (label, exc))
+            continue
+        for hit in scan(card, text):
+            errors.append(scan_error(label, hit))
+    return errors, warnings
+
+
+def scan_error(label, hit):
+    """One R41 hit as the sentence validate prints."""
+    return ("%s would be skipped at launch: its %s names %s, and an edit under .claude/ is refused "
+            "unattended (R41 scan)" % (label, hit["source"], hit["path"]))
+
+
 def write(store, task_id, text):
     """Write the rendered brief under the state directory (KTD3) and return its path and SHA-256,
     which goes on the record so a later reader can tell whether the brief changed between runs."""
