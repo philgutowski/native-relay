@@ -337,6 +337,12 @@ A Task whose process stopped deliberately without landing, leaving the repositor
 Blocked Task is a normal outcome rather than a failure, and the run always continues to the next
 Task after one.
 
+A Blocked Task counts as settled, and a later run does not attempt it again unless the operator asks
+for that at launch, so a resumed run that skips every Blocked Task still reports itself complete. A
+Task process that exits with no return envelope for a reason outside the Task, such as an exhausted
+usage window, is also recorded Blocked, so a row of them after one cut off Task is usually one event
+rather than many.
+
 A Blocked Task is only legible to an operator who was not watching if the blocker reaches somewhere
 outside the run's own transcript. The Closeout process writes that record, as a comment on the
 Tracker, and the Runner never does: it reads the Tracker afterwards to confirm a comment appeared
