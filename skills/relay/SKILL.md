@@ -40,6 +40,7 @@ python3 <runner> run <manifest>                 # run to completion or to a halt
 python3 <runner> run <manifest> --retry-blocked # the same, retrying records that read blocked
 python3 <runner> run <manifest> --detach        # the same, in its own session, logged to the state dir
 python3 <runner> run <manifest> --detach --notify  # the same, notifying the desktop with nobody attached
+python3 <runner> run <manifest> --detach --wait-for-lease  # queue behind a live runner on this manifest or repo, then run
 python3 <runner> run <manifest> --follow        # detach, then follow it here; implies --detach
 python3 <runner> status <manifest>              # what the run is doing and how much is left; never takes the lease
 python3 <runner> tail <manifest>                # follow the tasks' activity decoded; never takes the lease
@@ -211,6 +212,15 @@ is nine minutes, chosen to end the follow inside that cap rather than be killed 
 tool call's process group cannot end it, and logs to `runner.log` in the state directory. On macOS
 it wraps the run in `caffeinate -i` so the host stays awake; there is no `setsid` binary on macOS,
 so do not reach for one. Lid close is not supported: the machine must stay open for the whole run.
+
+To queue a manifest behind a run already holding the lease on the same repository, launch it with
+`--detach --wait-for-lease [MINUTES]`. A plain launch exits 3 while the lease is held. With the flag,
+the detached runner polls the lease once a minute, writes one `waiting for the lease held by ...`
+line to its `runner.log` naming the holder and the bound, and starts the moment the lease clears.
+The bound defaults to 1440 minutes; past it the runner exits 3 exactly as an unqueued launch would.
+Never hand write a shell loop that waits on a process id for this: the lease is what the runner
+checks, and a watcher keyed on a process pattern can match the wrong process and launch at once.
+Queue with `--wait-for-lease`, never by breaking a lease.
 A first launchd or cron launch of the runner is not covered by Terminal's Files and Folders grant.
 Before that fire, grant the python binary that job launches access to the folders it will read
 (the checkout and the state directory), typically Documents when the checkout lives there, or grant

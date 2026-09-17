@@ -24,6 +24,11 @@ EXIT_HALTED = run_module.EXIT_HALTED
 EXIT_LEASE = run_module.EXIT_LEASE
 
 
+# Issue #23. A day: long enough to queue behind a whole manifest of hour long tasks, short enough
+# that a queue behind a wedged runner still ends on its own.
+DEFAULT_LEASE_WAIT_MINUTES = 1440
+
+
 class _Parser(argparse.ArgumentParser):
     """argparse exits 2 on a usage error, which is Relay's halted code. A bad command line is a
     configuration problem, so it exits 1 like every other one."""
@@ -66,6 +71,12 @@ def build_parser():
     run_verb.add_argument("--detach", action="store_true",
                           help="start the run in its own session, logging to the state "
                                "directory, and return at once")
+    run_verb.add_argument("--wait-for-lease", type=int, nargs="?", const=DEFAULT_LEASE_WAIT_MINUTES,
+                          dest="wait_for_lease", metavar="MINUTES",
+                          help="when another runner holds the lease on this manifest or its "
+                               "repo, wait for it to clear and then run, polling once a minute "
+                               "for up to MINUTES (default %d); with --detach the detached "
+                               "runner does the waiting" % DEFAULT_LEASE_WAIT_MINUTES)
     run_verb.add_argument("--follow", action="store_true",
                           help="detach, then follow this run in the foreground; implies --detach")
     _add_follow_options(run_verb)
@@ -173,6 +184,7 @@ def cmd_run(args, env, out):
         return _detach(args, manifest, env, out)
     outcome = run_module.run(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
                              retry_blocked=args.retry_blocked,
+                             wait_for_lease_seconds=_wait_seconds(args),
                              stream=lambda line: out.write(line + "\n"),
                              notifier=notify.build(getattr(args, "notify", False)))
     if outcome.message:
@@ -182,7 +194,12 @@ def cmd_run(args, env, out):
     return outcome.exit_code
 
 
-def detach_command(entry, manifest_path, retry_blocked, notify_on=False):
+def _wait_seconds(args):
+    minutes = getattr(args, "wait_for_lease", None)
+    return minutes * 60 if minutes else None
+
+
+def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_minutes=None):
     """The argv for a detached runner.
 
     `-u` is load-bearing. The child's stdout is `runner.log`, and a block buffered Python writes
@@ -204,6 +221,10 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False):
         command.append("--retry-blocked")
     if notify_on:
         command.append("--notify")
+    if wait_minutes:
+        # Issue #23. The child waits, so the operator's shell returns at once and the queue
+        # outlives it, which is what a hand written watcher loop was standing in for.
+        command += ["--wait-for-lease", str(wait_minutes)]
     return command
 
 
@@ -216,7 +237,8 @@ def _detach(args, manifest, env, out):
     log_path = store.path("runner.log")
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_cli.py")
     command = detach_command(entry, os.path.abspath(args.manifest), args.retry_blocked,
-                             notify_on=getattr(args, "notify", False))
+                             notify_on=getattr(args, "notify", False),
+                             wait_minutes=getattr(args, "wait_for_lease", None))
     if shutil.which("caffeinate"):
         command = ["caffeinate", "-i"] + command
     following = getattr(args, "follow", False)

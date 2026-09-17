@@ -919,6 +919,55 @@ class LeaseRefusal(RunCase):
         holder.release()
 
 
+class LeaseWait(RunCase):
+    """Issue #23: `run --wait-for-lease` queues behind a live holder instead of refusing."""
+
+    def test_a_queued_run_starts_once_the_holder_releases(self):
+        holder = state.StateStore(self.manifest_path, self.repo, home=self.home, pid=999999)
+        self.assertTrue(holder.acquire().ok)
+        for task_id in ("T-1", "T-2", "T-3"):
+            self.task_success(task_id)
+            self.closeout_landed(task_id)
+        sleeps, lines = [], []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                holder.release()
+
+        outcome = self.go(wait_for_lease_seconds=600, lease_poll_seconds=5, sleep=sleep,
+                          stream=lines.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(sleeps, [5, 5])
+        text = "\n".join(lines)
+        self.assertIn("waiting for the lease held by pid 999999", text)
+        self.assertIn("for up to 10 minute(s)", text)
+        self.assertIn("the lease cleared", text)
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+
+    def test_the_wait_is_bounded_and_ends_in_the_ordinary_refusal(self):
+        holder = self.store()
+        self.assertTrue(holder.acquire().ok)
+        ticks = iter(range(0, 10_000, 30))
+        lines = []
+        other = state.StateStore(self.manifest_path, self.repo, home=self.home, pid=999999)
+        outcome = self.go(store=other, wait_for_lease_seconds=120, lease_poll_seconds=30,
+                          sleep=lambda seconds: None, clock=lambda: next(ticks),
+                          stream=lines.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_LEASE)
+        self.assertIn(str(holder.pid), outcome.message)
+        self.assertIn("gave up waiting for the lease after 2 minute(s)", "\n".join(lines))
+        holder.release()
+
+    def test_without_the_flag_a_held_lease_refuses_at_once(self):
+        holder = self.store()
+        self.assertTrue(holder.acquire().ok)
+        other = state.StateStore(self.manifest_path, self.repo, home=self.home, pid=999999)
+        outcome = self.go(store=other, sleep=lambda seconds: self.fail("slept without the flag"))
+        self.assertEqual(outcome.exit_code, runner.EXIT_LEASE)
+        holder.release()
+
+
 class PreFlightRefusal(RunCase):
     def test_a_dirty_tree_at_the_start_halts_before_any_task_launches(self):
         with open(os.path.join(self.repo, "operator-wip.txt"), "w") as handle:

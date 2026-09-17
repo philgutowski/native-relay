@@ -204,11 +204,52 @@ def _audit_cards(cfg):
                 pass
 
 
+LEASE_POLL_SECONDS = 60
+
+
+def _holder_phrase(acquired):
+    holder = acquired.holder or {}
+    return ("pid %s on %s, manifest %s"
+            % (holder.get("holder_pid"), holder.get("hostname"),
+               acquired.other_manifest or holder.get("manifest")))
+
+
+def _acquire(store, stream, wait_seconds, poll_seconds, sleep, clock):
+    """Take the leases, polling while a live runner holds either one when the operator asked to
+    queue (issue #23). Polling is `acquire` itself rather than a read of the lease, because there
+    are two leases and only `acquire` checks both; a refused `acquire` changes no state, and one
+    refused on the repo lease gives back the manifest lease it took. A holder that dies is
+    reclaimed at its expiry exactly as an unqueued run would reclaim it."""
+    acquired = store.acquire()
+    if acquired.code != state.LOCKED or not wait_seconds:
+        return acquired
+    started = clock()
+    deadline = started + wait_seconds
+    if stream is not None:
+        stream("waiting for the lease held by %s; polling every %ds for up to %d minute(s)"
+               % (_holder_phrase(acquired), poll_seconds, round(wait_seconds / 60)))
+    while acquired.code == state.LOCKED and clock() < deadline:
+        sleep(max(0, min(poll_seconds, deadline - clock())))
+        acquired = store.acquire()
+    if stream is not None:
+        if acquired.code == state.LOCKED:
+            stream("gave up waiting for the lease after %d minute(s)" % round(wait_seconds / 60))
+        else:
+            stream("the lease cleared after %ds of waiting; starting the run"
+                   % round(clock() - started))
+    return acquired
+
+
 def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
         retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
-        notifier=None):
+        notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
+        sleep=time.sleep, clock=time.monotonic):
     """Drive one manifest to completion or to a named halt. Returns a RunOutcome; never raises
-    for a task level failure, because every one of those is a class an operator can act on."""
+    for a task level failure, because every one of those is a class an operator can act on.
+
+    `wait_for_lease_seconds` (issue #23) queues this run behind a live holder of either lease
+    instead of refusing at once, up to that bound. The refusal after the bound is the same one an
+    unqueued run gets."""
     repo = manifest.project.repo
     default = verify.default_branch_of(manifest)
     overrides = timeout_overrides or {}
@@ -228,7 +269,7 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
     store.observer = lambda task_id, _before, after: announce(_moved_line(manifest, store,
                                                                           task_id, after))
 
-    acquired = store.acquire()
+    acquired = _acquire(store, stream, wait_for_lease_seconds, lease_poll_seconds, sleep, clock)
     if acquired.code == state.LOCKED:
         holder = acquired.holder or {}
         where = acquired.other_manifest or holder.get("manifest")

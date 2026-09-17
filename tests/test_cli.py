@@ -316,6 +316,19 @@ class DetachCommand(CliCase):
         self.assertIn("--notify", cli.detach_command("/e", "/m", False, notify_on=True))
         self.assertNotIn("--notify", cli.detach_command("/e", "/m", False, notify_on=False))
 
+    def test_wait_for_lease_is_carried_through_with_its_bound(self):
+        """Issue #23: the detached child does the waiting."""
+        argv = cli.detach_command("/e", "/m", False, wait_minutes=90)
+        self.assertEqual(argv[-2:], ["--wait-for-lease", "90"])
+        self.assertNotIn("--wait-for-lease", cli.detach_command("/e", "/m", False))
+
+    def test_the_bare_wait_flag_takes_the_default_bound(self):
+        args = cli.build_parser().parse_args(["run", "m.toml", "--wait-for-lease"])
+        self.assertEqual(args.wait_for_lease, cli.DEFAULT_LEASE_WAIT_MINUTES)
+        args = cli.build_parser().parse_args(["run", "m.toml", "--wait-for-lease", "30"])
+        self.assertEqual(args.wait_for_lease, 30)
+        self.assertIsNone(cli.build_parser().parse_args(["run", "m.toml"]).wait_for_lease)
+
     def test_the_flags_do_not_displace_each_other_or_the_interpreter(self):
         argv = cli.detach_command("/x/relay_cli.py", "/x/manifest.toml", True, notify_on=True)
         self.assertEqual(argv[1], "-u")

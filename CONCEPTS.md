@@ -46,6 +46,10 @@ interleaving work against one repository. There are two: one over the Manifest, 
 of the same Manifest refuses to start, and one over the target repository, so two different
 Manifests naming the same repository cannot merge into it at the same time.
 
+A Runner launched to wait for the Lease polls it instead of refusing, and takes it when it
+clears or refuses at its own bound, so one run can queue behind another on the same repository
+without anything outside the Runner watching a process.
+
 A Lease is renewed on a heartbeat rather than held for the length of the work, so it expires on
 its own if a Runner dies. A Lease past its expiry is stale and the next Runner reclaims it,
 marking any Task the dead Runner left in flight as halted. The expiry is deliberately shorter
