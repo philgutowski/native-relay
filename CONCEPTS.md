@@ -167,7 +167,9 @@ process.
 
 The Task brief's steps are the native pipeline: move the card, branch, plan in a message, build,
 run the Review step, run the project's own verification, record what the project's method says a
-unit records, comment the card, print the Envelope. The plan is a message in the transcript rather
+unit records, comment the card, print the Envelope. The Task's own facts are the card's title,
+description, and the comments on it at launch, the same read that fixes the baseline comment, so
+the Task process is told every comment before its run and the Closeout process every one after. The plan is a message in the transcript rather
 than a file, and verification is whatever the project's own instructions define, which the Task
 process reads because it runs inside that project's checkout. Nothing project specific is in the
 template.

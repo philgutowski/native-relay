@@ -130,7 +130,10 @@ editors = "Only the operator's own account edits tasks.md, and it is reviewed on
 Each is a sentence in your own words, and `validate` refuses a manifest missing any of them. They
 are data, not configuration: they record that you checked the property. `editors` matters most,
 because card text is fed verbatim to an unattended process, so it names the accounts whose text
-is trusted to instruct one.
+is trusted to instruct one. The task brief carries the card's title, its description, and every
+comment on it at launch, oldest first and capped at the newest 20, all inside the same fenced data
+block. Scope or prerequisites written as a comment reach the task, and so does a comment an earlier
+Relay attempt left there.
 
 ## 7. Timeouts and the closeout
 

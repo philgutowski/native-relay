@@ -76,17 +76,6 @@ class _Halt(Exception):
         self.evidence = evidence or {}
 
 
-def _baseline_comment_id(adapter, task_id):
-    """R17: the newest comment id, which is what `comments_since` measures from. The markdown
-    adapter numbers its comments from one, so its newest id is also its count and the same rule
-    works for all three adapters."""
-    try:
-        comments = adapter.comments_since(task_id, None)
-    except Exception:
-        return None
-    return comments[-1]["id"] if comments else None
-
-
 def _routable(manifest, adapter, digest, repo, branch, baseline_sha):
     """KTD6's second route: a missing envelope is still routable when git and the tracker carry
     a stronger completion signal than the last paragraph of a long context, which is commits on
@@ -590,7 +579,13 @@ def _one_task(cfg, task):
         _skip(cfg, task.id, "the card already reads %s, which is terminal; nothing to run"
               % card_status.get("status"))
         return
-    baseline_comment_id = _baseline_comment_id(adapter, task.id)
+    # Issue #22. One read serves both the brief, which carries every comment on the card now, and
+    # the baseline, which is the newest of them, so the task and the closeout see a clean split.
+    # The markdown adapter numbers its comments from one, so its newest id is also its count and
+    # the same rule works for all three adapters (R17).
+    comments = brief.launch_comments(adapter, task.id)
+    card = dict(card, comments=comments)
+    baseline_comment_id = comments[-1]["id"] if comments else None
 
     # Brief and the pre-flight scan (R7, R41, R43).
     brief_text = brief.render(manifest, task, card)

@@ -12,8 +12,8 @@ The review step names one built in skill, resolved from the backend's own capabi
 looks for the call cannot disagree about its name. A backend with no such skill has no native
 brief, and `manifest.validate` refuses it before anything renders.
 
-Tracker text is untrusted (R56). A card's title and description are written by whoever can edit
-the board, and they end up verbatim inside a prompt for an unattended process. They go inside a
+Tracker text is untrusted (R56). A card's title, description, and comments are written by
+whoever can edit the board, and they end up verbatim inside a prompt for an unattended process. They go inside a
 delimited block under a header stating that its contents are data and that instructions inside it
 are not to be followed, and any copy of the delimiter inside the payload is defanged first, so
 the text cannot close its own block and continue as instructions.
@@ -208,6 +208,43 @@ def _commit_message_block(capability):
     return "\n" + capability.commit_message_constraint + "\n"
 
 
+# Issue #22. Operators put scope and prerequisites in comments, so the comments on the card at
+# launch ride inside the task data block with the description. Bounded, newest kept, because a
+# long lived card can carry hundreds and the brief is sent whole on every launch.
+COMMENT_LIMIT = 20
+
+
+def launch_comments(adapter, task_id):
+    """Every comment on the card now, oldest first, or an empty list when the read fails. The run
+    loop takes its baseline comment id from this same list, so the comments the brief carries and
+    the ones the closeout later reads as new cannot overlap or leave a gap."""
+    try:
+        return list(adapter.comments_since(task_id, None) or [])
+    except Exception:
+        return []
+
+
+def _comments_block(comments):
+    """The comments insert, or the empty string for a card with none.
+
+    Whitespace contract: the template writes `$description$comments` on one line, and the value
+    carries its own leading blank line and no trailing newline, so a card with no comments renders
+    byte identical to a brief from before comments were carried. Bodies keep their line breaks,
+    since a scope comment is often a list, and each is defanged like the description."""
+    comments = [entry for entry in (comments or []) if str(entry.get("body") or "").strip()]
+    if not comments:
+        return ""
+    kept = comments[-COMMENT_LIMIT:]
+    parts = ["Comments on the card, oldest first:"]
+    if len(comments) > len(kept):
+        parts.append("(%d older comment(s) left out)" % (len(comments) - len(kept)))
+    for entry in kept:
+        stamp = entry.get("created")
+        head = "Comment %s%s:" % (entry.get("id"), ", %s" % stamp if stamp else "")
+        parts.append(head + "\n" + defang(str(entry.get("body"))).strip())
+    return "\n\n" + "\n\n".join(parts)
+
+
 def values(manifest, task, card, branch=None, mode=None):
     """Every placeholder the template uses, from manifest and card values only. `mode` is
     accepted for the caller's symmetry with `render` and selects nothing today: one template."""
@@ -229,6 +266,7 @@ def values(manifest, task, card, branch=None, mode=None):
         "task_id": task.id,
         "title": defang(str(card.get("title") or "")).strip(),
         "description": defang(str(card.get("description") or "")).strip(),
+        "comments": _comments_block(card.get("comments")),
         "branch": branch,
         "tracker_start_step": tracker_steps["start_step"],
         "tracker_review_step": tracker_steps["review_step"],
@@ -278,8 +316,11 @@ def scan(card, brief_text):
     `exclusion_reason` and never launches a process."""
     hits = []
     seen = set()
-    for source, text in (("title", card.get("title")), ("description", card.get("description")),
-                         ("brief", brief_text)):
+    sources = [("title", card.get("title")), ("description", card.get("description"))]
+    sources += [("comment %s" % entry.get("id"), entry.get("body"))
+                for entry in card.get("comments") or []]
+    sources.append(("brief", brief_text))
+    for source, text in sources:
         for path in _paths_in(str(text or "")):
             key = (source, path)
             if key in seen:
@@ -331,6 +372,7 @@ def check_cards(manifest, adapter):
             warnings.append("%s card already reads %s, which is terminal, so the runner will not "
                             "launch it" % (label, status.get("status")))
             continue
+        card = dict(card, comments=launch_comments(adapter, task.id))
         try:
             text = render(manifest, task, card)
         except BriefError as exc:

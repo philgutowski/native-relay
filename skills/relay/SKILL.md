@@ -143,7 +143,9 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    - `qualifying.independence`: why the listed tasks do not depend on each other.
    - `qualifying.editors`: who can edit these cards and their comments. This one matters because
      card text is fed verbatim to an unattended process, so it names the accounts whose text is
-     trusted to instruct one.
+     trusted to instruct one. Card text means the title, the description, and every comment on
+     the card at launch (the newest 20 when there are more), so scope or prerequisites added as a
+     comment reach the task.
 5. Write the TOML. The gate command and any mirror rule are argument lists, never shell strings.
    The gate is one command, the one the operator named; when a project's merge bar is several
    commands, ask which one the runner runs and say what covers the others (a pre-commit hook,
