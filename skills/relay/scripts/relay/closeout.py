@@ -71,7 +71,10 @@ def allowed_tools(manifest, adapter, backend=None):
     Order is stable and duplicates are dropped, so the same manifest renders the same flag.
     `backend` selects the adapter's grok tool spelling when the Closeout is not on claude."""
     tools = list(BASE_TOOLS)
-    extras = adapter.closeout_allowed_tools(backend=backend)
+    # The Jira triple coordinator owns every tracker write so the Codex lane does not need an
+    # Atlassian MCP configuration.  Serial Jira retains its existing MCP-only Closeout path.
+    extras = (() if (manifest.execution.mode == "triple" and manifest.tracker.adapter == "jira")
+              else adapter.closeout_allowed_tools(backend=backend))
     for extra in tuple(extras) + tuple(manifest.closeout.allowed_tools):
         if extra not in tools:
             tools.append(extra)
@@ -190,7 +193,12 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
         "title": brief.defang(str(card.get("title") or "")).strip(),
         "description": brief.defang(str(card.get("description") or "")).strip(),
         "comments": brief.defang(_bullets(_comment_lines(comments))),
-        "duty_one": adapter.closeout_instructions(outcome, return_to=return_to, backend=backend),
+        "duty_one": (
+            "Do not write, transition, or comment on Jira: the triple coordinator records this "
+            "outcome after this documentation pass."
+            if manifest.execution.mode == "triple" and manifest.tracker.adapter == "jira"
+            else adapter.closeout_instructions(outcome, return_to=return_to, backend=backend)
+        ),
         "learnings_dir": learnings_dir(manifest),
         "allowed_paths": _bullets(allowed_paths),
         "complete_line": contracts.CLOSEOUT_COMPLETE_LINE,
@@ -278,7 +286,8 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
     # launched on one CLI whose evidence is normalized as another decodes nothing, so `parse()`
     # sees no terminal line and every run appends a CLOSEOUT_UNFINISHED finding.
     closeout_digest = classify.classify(launch_result.transcript_path, launch_result,
-                                        adapter.write_tool_patterns(), backend=backend)
+                                        adapter.write_tool_patterns(), backend=backend,
+                                        review_required=False)
     findings = [finding for finding in closeout_digest.get("findings") or []
                 if finding.get("class") != contracts.HALT_NO_ENVELOPE]
     result = RESULT_UNFINISHED if launch_result.timed_out else parse(closeout_digest.get("last_message_tail"))

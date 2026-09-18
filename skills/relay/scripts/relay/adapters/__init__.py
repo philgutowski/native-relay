@@ -91,6 +91,11 @@ def task_tracker_steps(manifest, branch, backend=None):
     duty now.
     """
     name = manifest.tracker.adapter
+    if name == "jira" and manifest.execution.mode == "triple":
+        owned = ("The triple coordinator owns Jira transitions and comments for this card. Do not "
+                 "call Atlassian tools, transition the card, or add a Jira comment yourself.")
+        return {"start_step": owned, "review_step": owned, "blocked_step": owned +
+                " Print the envelope with `status: blocked` and the blockers listed."}
     in_review = manifest.tracker.in_review_status or "its in review status"
     if name == "markdown":
         path = manifest.tracker.file or "the tracker file"

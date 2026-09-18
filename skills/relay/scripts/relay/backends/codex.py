@@ -1,5 +1,6 @@
 """Codex backend. Capability record from origin U1 pins."""
 import os
+import shlex
 
 from .. import contracts
 from . import (Evidence as _Evidence, TEXT_CHARS as _TEXT_CHARS, _decode_stream_line,
@@ -21,8 +22,11 @@ _UNDETECTABLE = frozenset((
     contracts.HALT_DENIED_TOOL,
     contracts.HALT_PATH_GATE,
     contracts.HALT_TRACKER_WRITE_DENIED,
-    contracts.REVIEW_SKIPPED,
 ))
+
+# Retain enough review output for an operator to inspect the receipt without making an unbounded
+# agent log part of the digest. The raw stdout log remains the authoritative full evidence.
+REVIEW_OUTPUT_CHARS = 4000
 
 
 def normalize_transcript(transcript_path, log_path=None):
@@ -80,13 +84,40 @@ def _tool_uses_of(obj):
     item = obj.get("item") or {}
     kind = item.get("type")
     if kind == "command_execution":
+        command = str(item.get("command") or "")
+        argv, argv_source = _command_argv(item, command)
+        output = str(item.get("aggregated_output") or "")
         return [{"type": "tool_use", "id": item.get("id"), "name": "Bash",
-                 "input": {"command": item.get("command", "")}}]
+                 "input": {
+                     "command": command,
+                     "argv": argv,
+                     "argv_source": argv_source,
+                     "exit_code": item.get("exit_code"),
+                     "status": item.get("status"),
+                     "output": output[:REVIEW_OUTPUT_CHARS],
+                     "output_truncated": len(output) > REVIEW_OUTPUT_CHARS,
+                 }}]
     if kind == "file_change":
         return [{"type": "tool_use", "id": item.get("id"), "name": "Edit",
                  "input": {"file_path": change.get("path", "")}}
                 for change in (item.get("changes") or [])]
     return []
+
+
+def _command_argv(item, command):
+    """The command argv Codex reported, or a conservative parse of its command text.
+
+    Recent CLI events may carry an argv list. Older events carry only command text; `shlex`
+    gives the classifier a list without pretending a shell wrapper is direct execution. A parse
+    failure deliberately produces an empty argv, which cannot satisfy the review receipt.
+    """
+    reported = item.get("argv") or item.get("command_argv")
+    if isinstance(reported, (list, tuple)) and all(isinstance(part, str) for part in reported):
+        return list(reported), "reported"
+    try:
+        return shlex.split(command), "parsed"
+    except ValueError:
+        return [], "unparseable"
 
 
 def readable(transcript_path, evidence):
@@ -152,4 +183,3 @@ def evidence_sources(home, cwd, session_id, log_path=None, **_kwargs):
     if log_path:
         return (last_message, log_path)
     return (last_message,)
-

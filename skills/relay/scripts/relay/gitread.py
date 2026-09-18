@@ -115,6 +115,23 @@ def remotes(repo):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+def git_dir(repo):
+    """The repository's resolved Git metadata directory, or ``None`` when unavailable.
+
+    A worker clone must own this directory.  A linked worktree instead reports a gitdir file
+    below its worktree which points at metadata shared with the primary checkout, so callers
+    deliberately compare this resolved directory rather than trusting the spelling of
+    ``.git``.
+    """
+    proc = run(repo, ["rev-parse", "--git-dir"], check=False)
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    value = (proc.stdout or "").strip()
+    if not os.path.isabs(value):
+        value = os.path.join(repo, value)
+    return os.path.realpath(value)
+
+
 def default_branch(repo, remote="origin"):
     """The remote's default branch from refs/remotes/<remote>/HEAD, or None when unset.
     A bare origin added with `remote add` never gets this ref; tests set it explicitly."""

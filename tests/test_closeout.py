@@ -97,6 +97,25 @@ class CloseoutCase(unittest.TestCase):
 
 
 class LandedBrief(CloseoutCase):
+    def test_a_jira_triple_closeout_forbids_writes_and_excludes_jira_write_tools(self):
+        text = self.toml.replace('adapter = "markdown"', 'adapter = "jira"')
+        text = text.replace('file = "tracker.md"',
+                            'site = "example.atlassian.net"\nproject_key = "IW"\n'
+                            'coordinator_rest_writes_authorized = true\n'
+                            'in_review_transition = "In Review"')
+        text = text.replace('done_statuses = ["done"]', 'done_statuses = ["Done"]')
+        text = text.replace('[permissions]', '[execution]\nmode = "triple"\n\n[permissions]', 1)
+        manifest = self.load(text, name="jira-triple.toml")
+        adapter = jira_adapter.JiraAdapter(
+            manifest, opener=object(), env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
+        rendered = closeout.render(manifest, CARD, "landed", digest_from("success.jsonl"), [],
+                                   adapter, mf.completed_allowed_paths(manifest), "codex",
+                                   landing_ref=MERGE_SHA, branch="relay/T-1")
+        self.assertIn("Do not write, transition, or comment on Jira", rendered)
+        self.assertNotIn("mcp__atlassian__transitionJiraIssue", closeout.allowed_tools(
+            manifest, adapter, backend="codex"))
+        self.assertNotIn("atlassian__transitionJiraIssue", rendered)
+
     def test_a_jira_closeout_brief_carries_the_tracker_site(self):
         text = self.toml.replace('adapter = "markdown"', 'adapter = "jira"')
         text = text.replace('file = "tracker.md"',
@@ -395,8 +414,10 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
             return launch.LaunchResult(session_id="s1", exit_code=0,
                                        transcript_path="/nonexistent.jsonl", log_path=log_path)
 
-        def fake_classify(transcript_path, launch_result, write_tool_patterns=None, backend=None):
+        def fake_classify(transcript_path, launch_result, write_tool_patterns=None, backend=None,
+                          review_required=True):
             seen["classify_backend"] = backend
+            seen["review_required"] = review_required
             return {"findings": [], "last_message_tail": contracts.CLOSEOUT_SKIPPED_LINE,
                     "last_message": contracts.CLOSEOUT_SKIPPED_LINE}
 
@@ -417,6 +438,7 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
             seen = self.go_spied(backend)
             self.assertEqual(seen["task_backend"], backend)
             self.assertEqual(seen["classify_backend"], backend)
+            self.assertFalse(seen["review_required"])
             self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, seen["brief"])
 
     def test_an_explicit_claude_backend_reaches_every_consumer(self):

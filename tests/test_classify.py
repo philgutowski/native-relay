@@ -470,11 +470,11 @@ class ClaudeBackendFixtures(unittest.TestCase):
 CODEX_FIXTURES = os.path.join(BACKEND_FIXTURES, "codex")
 
 
-def run_codex(last_message_name, stdout_name=None, launch=None):
+def run_codex(last_message_name, stdout_name=None, launch=None, review_base=None):
     log_path = os.path.join(CODEX_FIXTURES, stdout_name) if stdout_name else None
     launch = launch or SimpleNamespace(timed_out=False, exit_code=0, log_path=log_path)
     return classify.classify(os.path.join(CODEX_FIXTURES, last_message_name), launch,
-                             backend="codex")
+                             backend="codex", review_base=review_base)
 
 
 class CodexEvidence(unittest.TestCase):
@@ -533,13 +533,58 @@ class CodexEvidence(unittest.TestCase):
         self.assertEqual(evidence.decoded_events, 0)
         self.assertFalse(module.readable(last_message, evidence))
 
-    def test_denied_path_gate_and_tracker_write_and_review_skipped_are_all_unavailable(self):
+    def test_denied_path_gate_and_tracker_write_are_unavailable_but_review_is_checked(self):
         r = run_codex("last-message-complete.txt", "stdout-complete.jsonl")
         self.assertEqual(r["undetectable"], sorted([
             contracts.HALT_DENIED_TOOL, contracts.HALT_PATH_GATE,
-            contracts.REVIEW_SKIPPED, contracts.HALT_TRACKER_WRITE_DENIED,
+            contracts.HALT_TRACKER_WRITE_DENIED,
         ]))
-        self.assertEqual(classes(r), [])
+        self.assertEqual(classes(r), [contracts.REVIEW_SKIPPED])
+
+    def test_direct_successful_codex_review_receipt_counts_and_retains_bounded_evidence(self):
+        import json
+        import tempfile
+        event = {"type": "item.completed", "item": {
+            "id": "review", "type": "command_execution",
+            "command": "codex exec review --base main",
+            "argv": ["codex", "exec", "review", "--base", "main"],
+            "aggregated_output": "No findings after inspecting the diff.",
+            "exit_code": 0, "status": "completed",
+        }}
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+            handle.write(json.dumps(event) + "\n")
+            log_path = handle.name
+        try:
+            result = run_codex("last-message-complete.txt", launch=SimpleNamespace(
+                timed_out=False, exit_code=0, log_path=log_path), review_base="main")
+        finally:
+            os.unlink(log_path)
+        self.assertEqual([f for f in result["findings"]
+                          if f["class"] in (contracts.REVIEW_SKIPPED, contracts.REVIEW_FAILED)], [])
+        receipt = result["review_receipt"]
+        self.assertEqual(receipt["argv"], ["codex", "exec", "review", "--base", "main"])
+        self.assertEqual(receipt["exit_code"], 0)
+        self.assertIn("No findings", receipt["output"])
+
+    def test_wrapped_or_nonzero_codex_review_is_rejected_not_counted(self):
+        import json
+        import tempfile
+        event = {"type": "item.completed", "item": {
+            "id": "review", "type": "command_execution",
+            "command": "/bin/zsh -lc 'codex exec review --base main && true'",
+            "aggregated_output": "review failed", "exit_code": 0, "status": "completed",
+        }}
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+            handle.write(json.dumps(event) + "\n")
+            log_path = handle.name
+        try:
+            result = run_codex("last-message-complete.txt", launch=SimpleNamespace(
+                timed_out=False, exit_code=0, log_path=log_path), review_base="main")
+        finally:
+            os.unlink(log_path)
+        failed = [f for f in result["findings"] if f["class"] == contracts.REVIEW_FAILED]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["reason"], "not the exact direct command")
 
 
 class UnenforcedAudit(unittest.TestCase):

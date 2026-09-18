@@ -130,7 +130,7 @@ class DispatchEndToEnd(DispatchCase):
         self.assertTrue(gitread.is_clean(self.repo))
         self.assertEqual(gitread.current_branch(self.repo), "main")
 
-    def test_the_two_backends_overlap_in_wall_clock(self):
+    def test_the_default_serial_policy_does_not_overlap_backends_in_wall_clock(self):
         overlap = os.path.join(self.tmp.name, "overlap.log")
         env = self.base_env()
         env["OVERLAP_LOG"] = overlap
@@ -162,7 +162,7 @@ class DispatchEndToEnd(DispatchCase):
             name, _, stamp = line.partition(" ")
             when = line.rsplit(" ", 1)[-1]
             times[line.split(" ", 2)[0] + " " + line.split(" ", 2)[1]] = float(when)
-        self.assertLess(times["T-2 start"], times["T-1 end"])
+        self.assertGreaterEqual(times["T-2 start"], times["T-1 end"])
 
     def test_a_halt_that_does_not_continue_past_abandons_the_sibling(self):
         # T-1 claims complete but leaves no branch, which is unclean_exit. T-2 is still
@@ -178,8 +178,10 @@ class DispatchEndToEnd(DispatchCase):
         self.assertEqual(outcome.exit_code, runner.EXIT_HALTED, outcome.message)
         records = self.store().records()
         self.assertEqual(records["T-1"]["status"], contracts.STATUS_HALTED)
+        # Under the serial-default schedule T-2 never launches, which is stronger than
+        # abandoning an already-running sibling.
         t2 = records.get("T-2") or {}
-        self.assertEqual(t2.get("status"), contracts.STATUS_PENDING)
+        self.assertIn(t2.get("status"), (None, contracts.STATUS_PENDING))
         self.assertFalse(gitread.branch_exists(self.repo, "relay/T-2"))
         self.assertFalse(os.path.isdir(self.store().path("worktrees", "T-2")))
         self.assertNotEqual(records.get("T-3", {}).get("status"), contracts.STATUS_LANDED)

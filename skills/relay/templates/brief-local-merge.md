@@ -51,7 +51,7 @@ $unenforced_restrictions
 ## Steps
 
 1. $tracker_start_step
-2. Create `$branch` from `$default_branch` and stay on it for the rest of the session.
+$branch_step
 3. Plan. Read the project's own instructions at the repository root (`CLAUDE.md` or its
    equivalent, and whatever it tells you to read next) and the files the task names. Then write
    the plan as a message, before you edit anything: what will change, which files, how you will

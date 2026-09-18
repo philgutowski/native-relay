@@ -7,10 +7,10 @@ stopped to ask a question nobody could answer.
 
 Three things in here are load bearing.
 
-The review step names one built in skill, resolved from the backend's own capability record
-(`review_skill`) rather than spelled in the template, so the brief and the classifier that later
-looks for the call cannot disagree about its name. A backend with no such skill has no native
-brief, and `manifest.validate` refuses it before anything renders.
+The review step names either one built in skill or one exact native review command, resolved from
+the backend's capability record rather than spelled in the template. The brief and classifier
+therefore cannot disagree about the required proof. A backend with neither has no native brief,
+and `manifest.validate` refuses it before anything renders.
 
 Tracker text is untrusted (R56). A card's title, description, and comments are written by
 whoever can edit the board, and they end up verbatim inside a prompt for an unattended process. They go inside a
@@ -77,12 +77,9 @@ FOLLOWUP_FORBIDDEN = (
     "and let the operator decide."
 )
 
-# The review rule, rendered from the backend's own `review_skill` rather than written into the
-# template, so the sentence and the step that names the skill cannot drift apart. Claude's
-# rule promises a report because its Skill call is visible. A backend that names a skill and
-# lists REVIEW_SKIPPED as undetectable gets REVIEW_RULE_UNDETECTABLE instead, so the brief
-# does not promise a report the runner cannot make. Codex still has no skill and still
-# renders the fallback; validate refuses it.
+# The review rule comes from the backend's record rather than the template, so the sentence and
+# step cannot drift apart. Claude's rule promises a report because its Skill call is visible.
+# A backend that names a skill and lists REVIEW_SKIPPED as undetectable gets the weaker rule.
 REVIEW_RULE = (
     "The review step runs this CLI's built in code review, `%s`, exactly as the steps below "
     "spell it. Reading your own diff is not a substitute, and neither is any other skill with a "
@@ -95,9 +92,14 @@ REVIEW_RULE_UNDETECTABLE = (
     "similar name. This CLI does not emit a structured skill call Relay can key on, so a "
     "missing run is not reported as a skip."
 )
-# The fallback for a backend with no verified built in review. `manifest.validate` refuses such
-# a backend, so no real process reads this; it exists so the brief still renders for every
-# backend in the closed set and the launch seam stays under test until the refusal lifts.
+REVIEW_RULE_COMMAND = (
+    "The review step runs `%s` exactly, in the foreground, with no shell wrapper, control "
+    "operator, redirection, pipeline, or extra argument. Keep its output in this session, fix "
+    "what it finds, and commit the fixes. Relay accepts completion only when its transcript "
+    "records this direct command, a zero exit status, and review output."
+)
+# The fallback for a backend with no verified native review. `manifest.validate` refuses such a
+# backend, so no real process reads this; it keeps the renderer seam exercisable.
 REVIEW_RULE_FALLBACK = (
     "This CLI has no built in code review Relay can name, so the review step is a reading of "
     "the whole diff, hunk by hunk, for correctness bugs, with each one fixed and committed."
@@ -252,16 +254,26 @@ def values(manifest, task, card, branch=None, mode=None):
     branch = branch or gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
     tracker_steps = adapters.task_tracker_steps(manifest, branch, backend=task.backend)
     module = backends.build(task.backend)
-    # Bound once: the rule sentence and the step that runs the skill have to name the same thing,
-    # and two independent calls are how they would come to name different ones.
-    review = backends.review_command(module.CAPABILITY)
+    # Bound once: the rule sentence and the step have to name the same review invocation.
+    review = backends.review_command(module.CAPABILITY, default_branch)
     undetectable = getattr(module, "_UNDETECTABLE", frozenset())
-    if review and contracts.REVIEW_SKIPPED in undetectable:
+    if module.CAPABILITY.review_argv:
+        review_rule = REVIEW_RULE_COMMAND % review
+    elif review and contracts.REVIEW_SKIPPED in undetectable:
         review_rule = REVIEW_RULE_UNDETECTABLE % review
     elif review:
         review_rule = REVIEW_RULE % review
     else:
         review_rule = REVIEW_RULE_FALLBACK
+    if manifest.execution.mode == "triple":
+        branch_step = (
+            "2. Verify that this worker clone is already on `%s`: run `pwd` and `git branch "
+            "--show-current`. Do not create, switch, merge, or delete a branch; the coordinator "
+            "owns the clone and branch assignment."
+        ) % branch
+    else:
+        branch_step = "2. Create `%s` from `%s` and stay on it for the rest of the session." % (
+            branch, default_branch)
     return {
         "task_id": task.id,
         "title": defang(str(card.get("title") or "")).strip(),
@@ -282,6 +294,7 @@ def values(manifest, task, card, branch=None, mode=None):
         "envelope_tag": contracts.ENVELOPE_FENCE_TAG,
         "review_rule": review_rule,
         "review_command": review or REVIEW_STEP_FALLBACK,
+        "branch_step": branch_step,
         "unenforced_restrictions": _unenforced_block(manifest, module.CAPABILITY),
         "commit_message_rule": _commit_message_block(module.CAPABILITY),
     }

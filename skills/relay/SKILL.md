@@ -6,7 +6,7 @@ description: Author a Relay manifest from a conversation, validate it, launch th
 # Relay
 
 Relay runs a list of independent tasks through a native pipeline, plan, build, review, verify,
-record, one fresh headless process per task, serially, with nobody watching. No plugin is in the
+record, one fresh headless process per task, serially by default, with nobody watching. No plugin is in the
 loop: the task process plans in a message, runs the CLI's built in code review, and runs the
 project's own verification as the project's own instructions define it. Your job in this skill
 is to author the manifest, check it, start the runner, and later explain what happened. You
@@ -19,7 +19,9 @@ process, Backend, Halt class, Verify-landed. Use those words with the operator.
 ## The runner
 
 Every operator action is a runner subcommand. There is nothing this skill can do that an operator
-at a terminal cannot do the same way, and no verb prompts for anything.
+at a terminal cannot do the same way. `dispatch` is the one interactive surface: an attached normal
+dispatch offers the dispatch-policy choices `serial` and `parallel`, defaulting to `serial`; noninteractive
+or detached launches without an explicit policy remain serial.
 
 Resolve `<runner>` once, from this skill's own directory as the harness gave it to you:
 
@@ -36,7 +38,10 @@ The ten verbs, with the follower options on the two that follow:
 ```bash
 python3 <runner> validate <manifest>            # check the manifest and its target repo
 python3 <runner> validate <manifest> --list     # the same, plus the tracker's cards not in a done status
-python3 <runner> run <manifest>                 # run to completion or to a halt, one task at a time
+python3 <runner> run <manifest>                 # run one task at a time
+python3 <runner> dispatch <manifest>             # choose serial (default) or conservative parallel, then dispatch
+python3 <runner> dispatch <manifest> --policy parallel # explicit conservative parallel policy
+python3 <runner> dispatch <manifest> --policy serial # explicit serial policy
 python3 <runner> run <manifest> --retry-blocked # the same, retrying records that read blocked
 python3 <runner> run <manifest> --detach        # the same, in its own session, logged to the state dir
 python3 <runner> run <manifest> --detach --notify  # the same, notifying the desktop with nobody attached
@@ -138,7 +143,10 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    and any mirror. False merges locally and pushes nothing, so the whole run stays on the
    machine and the operator ships by hand afterwards; the repo then needs no `origin`, a mirror
    is refused, and the summary ends with the one command that ships it. Write `push = false`
-   only when the operator chooses it. `pr_terminal` is named in the schema and
+   only when the operator chooses it. Then ask the dispatch-policy multiple choice: `serial` (default)
+   or `parallel`. Record their choice in the dispatch command, not the manifest. Under `parallel`,
+   Relay inspects the repository and task scopes before launch, and it serializes every uncertain
+   or potentially conflicting pair automatically. `pr_terminal` is named in the schema and
    refused by `validate`: the run loop has no pull request sequence, so every task under it
    would halt without one being opened or checked.
 3. If a chosen backend does not enforce tool restrictions at launch (`codex`, which native
@@ -166,9 +174,24 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    resolved default is that value when the key is present, else `claude`. On a Task whose backend
    differs from that resolved default, write `reason` with the operator's one-line reason; that
    `reason` also covers an excluded Task, and a Task that matches the resolved default needs none.
+   When a task's expected write scope is narrow and known, write its optional
+   `declared_paths = ["src/example.py", "tests/test_example.py"]` as repository-relative files
+   or directory prefixes. Never invent this evidence: no/broad/uncertain scope is safe because
+   Relay serializes it. `declared_paths` is scheduling evidence, not a permission grant.
    Write `[closeout] docs_root` when the project keeps its documentation somewhere other than
    `docs/`; the closeout writes a learning under `<docs_root>/solutions/` and may commit only
    inside the docs root, `CONCEPTS.md`, the markdown tracker file, and `closeout.allowed_paths`.
+   For a simultaneous three-card GitHub Projects or Jira run, add `[execution] mode = "triple"`; require
+   exactly three independent, nonexcluded cards and assign `claude`, `grok`, and `codex` once
+   each. It requires pushed local-merge shipping and an origin that accepts atomic Relay claim
+   refs. Relay creates isolated disconnected worker clones and serializes landing itself. For a
+   Jira triple only, require the operator to write
+   `tracker.coordinator_rest_writes_authorized = true`, an `in_review_transition` workflow label,
+   an `in_review_status` destination status, and `transition_labels` entries for terminal and
+   return statuses. Explain that the coordinator chooses the label then verifies the exact target
+   status; workers and Closeout never receive Jira credentials or
+   Jira write tools. Do not bypass target pre-push hooks for claim refs: a failed release retains
+   exact-token claims for explicit guarded recovery.
 
 The examples under `docs/examples/` are the three shapes, one per adapter.
 
@@ -207,6 +230,12 @@ one example branch, prefix plus the first Task id, then ask for an explicit go. 
 valid, and do not launch when the operator has said to stop before launch.
 When the list is a pair, say that dispatch will overlap one claude build with one grok build,
 each in its own worktree, and will still merge in the listed order.
+For a normal `parallel` dispatch, say Relay will print its pre-launch schedule, including every
+serialized edge and its reason, then launch without asking for a second approval. It may overlap
+only high-confidence disjoint scopes. Broad or unknown scope, shared configuration, dependency
+manifests, migrations, CI, root documentation, generated output, or conflicting evidence are
+serialized automatically. Every permitted worker still has an isolated worktree and every landing
+still follows the usual serial gate and verification path.
 
 ## Launch
 
@@ -214,7 +243,7 @@ Launch and then stay with it. The operator should not have to open a second term
 what their own run is doing.
 
 ```bash
-python3 <runner> run <manifest> --follow --phases --bar --notify --for 540
+python3 <runner> dispatch <manifest> --policy serial --follow --phases --bar --notify --for 540
 ```
 
 When the operator asked for a pair (claude and grok at once), launch with `dispatch` instead of
@@ -339,7 +368,6 @@ never started.
 | Error text | What it means | What the operator does |
 |---|---|---|
 | `backend <name> binary <binary> is missing from PATH` | that backend's CLI is not installed, or not on `PATH` | install the backend's CLI and put it on `PATH` |
-| `tasks[i] (<id>) names backend <name>, which has no verified native review step, see README` | the manifest names `codex` | set the Task's backend to `claude` or `grok`, with a model that backend serves, and remove the `reason` if it no longer differs from the default |
 | `tracker.adapter jira is incompatible with backend <name>` | the Task names Codex on a Jira tracker | set that Task's backend to `claude` or `grok` |
 | `atlassian MCP handshake failed on grok` / `needs the atlassian MCP server connected` | grok cannot write the Jira card yet | `grok mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2`, complete the browser login, then `validate` again |
 

@@ -9,6 +9,7 @@ project board equals the status field the manifest names. The second is what let
 "Done" column matters more than the issue state still land a task.
 """
 import json
+import hashlib
 import subprocess
 
 from . import NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, reference_hit, skipped
@@ -17,11 +18,42 @@ from . import NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, reference
 # later card read as absent from the board (2026-08-29).
 PROJECT_ITEM_LIMIT = 500
 
-ISSUE_FIELDS = "title,body,state,comments"
+# `gh project item-list` itself has a 500 item ceiling.  That is fine for the serial
+# candidate browser, but it is not a safe authority for a triple allocation: a declared card
+# at position 501 would otherwise appear to have disappeared.  The triple reader below starts
+# from each declared issue and pages that issue's ProjectV2 memberships instead.
+PROJECT_LIST_LIMIT = 1000
+PROJECT_ITEM_PAGE_SIZE = 100
+PROJECT_ITEM_PAGE_LIMIT = 1000
+COMMENT_PAGE_SIZE = 100
+COMMENT_DIGEST_LIMIT = 200
+
+ISSUE_FIELDS = "id,title,body,state,comments"
 CLOSED_STATE = "CLOSED"
 
 WRITE_BASH_PREFIXES = ("gh issue", "gh project item-edit")
 CLOSEOUT_TOOLS = ("Bash",)
+
+
+def _canonical(value):
+    """A stable digest for persisted board evidence, independent of dict insertion order."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _collision(reason, expected=None, observed=None):
+    """One deliberately small, serialisable collision shape for the batch record.
+
+    A coordinator stores this verbatim and never tries to repair it.  `expected` and
+    `observed` are digests rather than card bodies so a status screen can prove divergence
+    without repeating tracker content into logs.
+    """
+    result = {"kind": "card_collision", "reason": str(reason)}
+    if expected is not None:
+        result["expected_digest"] = _canonical(expected)
+    if observed is not None:
+        result["observed_digest"] = _canonical(observed)
+    return result
 
 
 def make_run(cwd):
@@ -91,6 +123,185 @@ class GitHubAdapter:
             return [], reason
         return [{"id": str(entry.get("id")), "body": entry.get("body") or "",
                  "created": entry.get("createdAt")} for entry in payload.get("comments") or []], None
+
+    # Triple snapshot transport.  These remain private methods so the eight-method generic
+    # adapter interface stays usable by Jira and markdown.  The module functions after this
+    # class are the opt-in GitHub-only coordinator seam.
+    def _graphql(self, query, variables):
+        args = ["gh", "api", "graphql", "-f", "query=" + query]
+        for key in sorted(variables):
+            value = variables[key]
+            if value is not None:
+                args.extend(["-F", "%s=%s" % (key, value)])
+        payload, reason = self._gh(args)
+        if payload is None:
+            return None, reason
+        if not isinstance(payload, dict):
+            return None, "GitHub GraphQL returned a non-object payload"
+        errors = payload.get("errors") or []
+        if errors:
+            messages = "; ".join(str(entry.get("message") or entry) for entry in errors)
+            return None, "GitHub GraphQL returned errors: %s" % messages
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None, "GitHub GraphQL returned no data"
+        return data, None
+
+    def _repository_identity(self):
+        payload, reason = self._gh(["gh", "repo", "view", "--json", "id,nameWithOwner"])
+        if payload is None:
+            return None, reason
+        repository_id = str(payload.get("id") or "").strip()
+        name = str(payload.get("nameWithOwner") or "").strip()
+        if not repository_id or "/" not in name:
+            return None, "GitHub repository identity is incomplete"
+        owner, repository = name.split("/", 1)
+        if not owner or not repository:
+            return None, "GitHub repository identity is incomplete"
+        return {"id": repository_id, "name": name, "owner": owner, "repository": repository}, None
+
+    def _project_identity(self):
+        payload, reason = self._gh([
+            "gh", "project", "list", str(self._owner), "--format", "json",
+            "--limit", str(PROJECT_LIST_LIMIT),
+        ])
+        if payload is None:
+            return None, reason
+        # gh has emitted a bare list and an object with `projects` across releases.  Accept both
+        # rather than making a CLI presentation change silently turn into a false collision.
+        projects = payload.get("projects") if isinstance(payload, dict) else payload
+        if not isinstance(projects, list):
+            return None, "GitHub project list is not a list"
+        for project in projects:
+            if str(project.get("number")) == str(self._project_number):
+                project_id = str(project.get("id") or "").strip()
+                if not project_id:
+                    return None, "GitHub ProjectV2 has no node id"
+                return {"id": project_id, "number": str(self._project_number)}, None
+        return None, "GitHub ProjectV2 #%s was not found for owner %s" % (
+            self._project_number, self._owner)
+
+    def _project_item_for_issue(self, repository, project_id, task_id):
+        """Read one declared issue's membership, rather than truncating the whole board."""
+        query = """
+query($owner: String!, $repository: String!, $number: Int!, $cursor: String, $statusField: String!) {
+  repository(owner: $owner, name: $repository) {
+    issue(number: $number) {
+      projectItems(first: 100, after: $cursor) {
+        nodes {
+          id
+          project { id number }
+          fieldValueByName(name: $statusField) {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        cursor = None
+        seen = 0
+        while True:
+            data, reason = self._graphql(query, {
+                "owner": repository["owner"], "repository": repository["repository"],
+                "number": task_id, "cursor": cursor, "statusField": self._status_field,
+            })
+            if data is None:
+                return None, reason
+            issue = ((data.get("repository") or {}).get("issue"))
+            items = (issue or {}).get("projectItems")
+            if not isinstance(items, dict):
+                return None, "GitHub issue #%s has no readable project memberships" % task_id
+            for item in items.get("nodes") or []:
+                seen += 1
+                project = item.get("project") or {}
+                if str(project.get("id") or "") == project_id:
+                    status = (item.get("fieldValueByName") or {}).get("name")
+                    item_id = str(item.get("id") or "").strip()
+                    if not item_id:
+                        return None, "GitHub project item for #%s has no node id" % task_id
+                    return {"id": item_id, "status": status}, None
+                if seen >= PROJECT_ITEM_PAGE_LIMIT:
+                    return None, "GitHub issue #%s has too many project memberships to read safely" % task_id
+            page = items.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                return None, "GitHub issue #%s is not on the declared project" % task_id
+            cursor = page.get("endCursor")
+            if not cursor:
+                return None, "GitHub project membership pagination lost its cursor"
+
+    def _bounded_comments(self, repository, task_id):
+        """Return a content-sensitive bounded comment snapshot.
+
+        We deliberately refuse a card with more comments than the digest limit.  Dropping an
+        older comment would make a later foreign edit indistinguishable from a Relay comment,
+        which is a collision safety failure, not a performance optimisation.
+        """
+        query = """
+query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repository) {
+    issue(number: $number) {
+      comments(first: 100, after: $cursor) {
+        nodes { id body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        comments = []
+        cursor = None
+        while True:
+            data, reason = self._graphql(query, {
+                "owner": repository["owner"], "repository": repository["repository"],
+                "number": task_id, "cursor": cursor,
+            })
+            if data is None:
+                return None, reason
+            issue = ((data.get("repository") or {}).get("issue"))
+            page = (issue or {}).get("comments")
+            if not isinstance(page, dict):
+                return None, "GitHub issue #%s has no readable comments" % task_id
+            for entry in page.get("nodes") or []:
+                comment_id = str(entry.get("id") or "").strip()
+                if not comment_id:
+                    return None, "GitHub issue #%s returned a comment without an id" % task_id
+                comments.append({"id": comment_id, "body": entry.get("body") or "",
+                                 "created": entry.get("createdAt")})
+                if len(comments) > COMMENT_DIGEST_LIMIT:
+                    return None, "GitHub issue #%s has more than %d comments; snapshot is unsafe" % (
+                        task_id, COMMENT_DIGEST_LIMIT)
+            info = page.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                return comments, None
+            cursor = info.get("endCursor")
+            if not cursor:
+                return None, "GitHub comment pagination lost its cursor"
+
+    def _triple_card(self, repository, project, task_id):
+        payload, reason = self._issue(task_id)
+        if payload is None:
+            return None, reason
+        issue_id = str(payload.get("id") or "").strip()
+        if not issue_id:
+            return None, "GitHub issue #%s has no node id" % task_id
+        item, reason = self._project_item_for_issue(repository, project["id"], task_id)
+        if item is None:
+            return None, reason
+        comments, reason = self._bounded_comments(repository, task_id)
+        if comments is None:
+            return None, reason
+        card = {
+            "id": str(task_id), "item_id": item["id"], "content_id": issue_id,
+            "title": payload.get("title") or "", "description": payload.get("body") or "",
+            "status": item.get("status"), "issue_state": payload.get("state"),
+            "comments": comments,
+        }
+        card["comments_digest"] = _canonical(comments)
+        card["digest"] = _canonical(card)
+        return card, None
 
     # Interface.
     def candidates(self):
@@ -176,3 +387,154 @@ class GitHubAdapter:
                     "comment`. %s: a halted task is not finished." % move)
         return ("Add one comment carrying the blocker digest below with `gh issue comment`. %s: a "
                 "blocked task stays open." % move)
+
+
+# Triple coordinator read and comparison primitives ------------------------------------------
+#
+# These are module functions, intentionally not methods on the generic adapter interface.  A
+# triple batch is GitHub Projects specific; adding a ninth required method would make an
+# otherwise compatible Jira or markdown adapter pretend it can offer board identity fencing.
+
+
+def read_triple_snapshot(adapter, task_ids):
+    """Read exactly the declared cards into a deterministic, immutable board snapshot.
+
+    The caller performs this once before remote claims and once after.  It must treat any
+    non-None `reason` as a collision boundary: a partial snapshot is never an eligible
+    allocation.  Card order follows the manifest declaration, while the digest itself is
+    canonical and therefore insensitive to Python dict ordering.
+    """
+    if not isinstance(adapter, GitHubAdapter):
+        return {"snapshot": None, "reason": "triple snapshots require GitHubAdapter"}
+    task_ids = tuple(str(task_id) for task_id in task_ids)
+    if len(task_ids) != 3 or len(set(task_ids)) != 3 or any(not task_id for task_id in task_ids):
+        return {"snapshot": None, "reason": "triple snapshot requires exactly three distinct card ids"}
+    repository, reason = adapter._repository_identity()
+    if repository is None:
+        return {"snapshot": None, "reason": reason}
+    project, reason = adapter._project_identity()
+    if project is None:
+        return {"snapshot": None, "reason": reason}
+    cards = []
+    for task_id in task_ids:
+        card, reason = adapter._triple_card(repository, project, task_id)
+        if card is None:
+            return {"snapshot": None, "reason": "card %s is unreadable: %s" % (task_id, reason)}
+        cards.append(card)
+    snapshot = {
+        "repository_id": repository["id"], "repository": repository["name"],
+        "project_id": project["id"], "project_number": project["number"], "cards": cards,
+    }
+    snapshot["digest"] = _canonical(snapshot)
+    return {"snapshot": snapshot, "reason": None}
+
+
+def card_state(card, phase="preread"):
+    """Freeze all observable fields that matter for later collision detection."""
+    if not isinstance(card, dict):
+        raise ValueError("card snapshot must be an object")
+    required = ("id", "item_id", "content_id", "title", "description", "status",
+                "issue_state", "comments")
+    missing = [key for key in required if key not in card]
+    if missing:
+        raise ValueError("card snapshot is missing %s" % ", ".join(missing))
+    return {key: card[key] for key in required} | {"phase": phase}
+
+
+def collision_evidence(expected, observed):
+    """Return None only for an exact expected board state.
+
+    This deliberately considers a foreign comment mixed with a valid Relay transition a
+    collision.  The coordinator cannot prove who authored the foreign mutation, so accepting
+    the valid half would be a false proof of exclusive card ownership.
+    """
+    if observed is None:
+        return _collision("card is unreadable or evicted from the project", expected)
+    try:
+        wanted = card_state(expected, expected.get("phase", "preread"))
+        actual = card_state(observed, wanted["phase"])
+    except (AttributeError, ValueError) as exc:
+        return _collision("invalid board snapshot: %s" % exc, expected, observed)
+    # phase is local state, not a board field.
+    wanted.pop("phase", None)
+    actual.pop("phase", None)
+    if wanted == actual:
+        return None
+    immutable = ("id", "item_id", "content_id", "title", "description")
+    for key in immutable:
+        if wanted[key] != actual[key]:
+            return _collision("unexpected %s change" % key, expected, observed)
+    if wanted["status"] != actual["status"] or wanted["issue_state"] != actual["issue_state"]:
+        return _collision("unexpected status transition", expected, observed)
+    if wanted["comments"] != actual["comments"]:
+        return _collision("unexpected or mixed comment mutation", expected, observed)
+    return _collision("unclassified board mutation", expected, observed)
+
+
+def _same_card_except(expected, observed, ignored):
+    wanted = card_state(expected)
+    actual = card_state(observed)
+    for key in ("phase",) + tuple(ignored):
+        wanted.pop(key, None)
+        actual.pop(key, None)
+    return wanted == actual
+
+
+def _new_comments(expected, observed):
+    before = expected.get("comments") or []
+    after = observed.get("comments") or []
+    # A comment edit or deletion must not be accepted as an append.  GitHub comment node ids
+    # are immutable, and preserving the exact prefix also protects bodies from later edits.
+    if after[:len(before)] != before:
+        return None
+    return after[len(before):]
+
+
+def capture_task_delta(expected, observed, in_review_status, branch_ref):
+    """Capture the one Task-owned transition and its exact head-comment identity.
+
+    Returns `(next_expected, evidence)`.  The coordinator persists `next_expected` immediately
+    after the post-Task read.  Any evidence halts that card before it can be merged.
+    """
+    if observed is None:
+        return None, _collision("card is unreadable after Task", expected)
+    if not _same_card_except(expected, observed, ("status", "comments")):
+        return None, _collision("Task changed immutable card fields", expected, observed)
+    if str(observed.get("status") or "").lower() != str(in_review_status or "").lower():
+        return None, _collision("Task did not make the declared in-review transition", expected, observed)
+    added = _new_comments(expected, observed)
+    if added is None or len(added) != 1 or not reference_hit(added[0].get("body") or "", branch_ref):
+        return None, _collision("Task comment is missing, foreign, or does not name its branch head",
+                                expected, observed)
+    return card_state(observed, "task"), None
+
+
+def capture_closeout_delta(expected, observed, outcome, terminal_status=None, landing_ref=None,
+                           return_to=None):
+    """Capture the one Closeout comment and its allowed terminal or return transition.
+
+    `landing_ref` is mandatory for a landed closeout so a generic comment cannot masquerade as
+    proof of the merge.  Blocked and halted outcomes must keep the issue open and, when a
+    `return_to` status is supplied, return exactly there.
+    """
+    if observed is None:
+        return None, _collision("card is unreadable after Closeout", expected)
+    if not _same_card_except(expected, observed, ("status", "issue_state", "comments")):
+        return None, _collision("Closeout changed immutable card fields", expected, observed)
+    added = _new_comments(expected, observed)
+    if added is None or len(added) != 1:
+        return None, _collision("Closeout comment is missing, foreign, or mixed", expected, observed)
+    if outcome == OUTCOME_LANDED:
+        if not landing_ref or not reference_hit(added[0].get("body") or "", landing_ref):
+            return None, _collision("Closeout comment does not name the landing reference", expected, observed)
+        status_terminal = (terminal_status is not None and
+                           str(observed.get("status") or "").lower() == str(terminal_status).lower())
+        if observed.get("issue_state") != CLOSED_STATE and not status_terminal:
+            return None, _collision("landed Closeout did not reach a terminal state", expected, observed)
+    else:
+        if observed.get("issue_state") == CLOSED_STATE:
+            return None, _collision("non-landed Closeout closed the issue", expected, observed)
+        if return_to is not None and str(observed.get("status") or "").lower() != str(return_to).lower():
+            return None, _collision("non-landed Closeout did not return the card to its prior status",
+                                    expected, observed)
+    return card_state(observed, "closeout"), None

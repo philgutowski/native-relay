@@ -85,6 +85,61 @@ whole run stays on the machine and you decide afterwards what reaches the remote
   local default branch;
 - the summary ends by saying nothing was pushed and naming the one `git push` that ships it.
 
+## Normal dispatch policy and conservative scheduling
+
+For a normal manifest, `dispatch` asks an attached operator to choose `serial` or `parallel`; `serial`
+is the default. Supply `--policy serial` or `--policy parallel` when the choice must be explicit.
+A noninteractive or detached launch that receives no explicit policy stays serial.
+
+`parallel` does not trust an independence claim by itself. Before workers start, Relay inspects the
+repository and every task's declared scope and prints the schedule. Add a narrow
+`declared_paths` list to a task when its expected write set is known:
+
+```toml
+[[tasks]]
+id = "T-1"
+model = "sonnet"
+effort = "medium"
+declared_paths = ["src/relay/schedule.py", "tests/test_schedule.py"]
+```
+
+Paths are repository-relative files or directory prefixes. They are scheduling evidence, not a
+permission grant or a promise that Relay will overlap the task. Relay serializes a pair unless it
+has high-confidence, deterministic evidence of disjoint bounded work. It also serializes any
+task with no or broad scope and any task affecting shared configuration, dependency manifests,
+migrations, CI, root documentation, generated output, or another global surface. Read-only
+semantic analysis may explain an edge but cannot remove one. The printed schedule names each
+serialized edge and why it exists; after that pre-launch display, Relay starts the computed run
+without seeking another authorization. Permitted parallel workers use isolated worktrees, while
+gates, hooks, verification, and landing remain serial in manifest order.
+
+## Triple execution mode
+
+For one simultaneous Claude, Grok, and Codex run from a GitHub Projects or Jira board, add:
+
+```toml
+[execution]
+mode = "triple"
+```
+
+This is an exact three-card profile, not a general concurrency setting. It requires GitHub Projects
+or Jira,
+`local_merge`, `push = true`, three independent nonexcluded tasks, and explicit assignments of
+`claude`, `grok`, and `codex` exactly once. Relay claims all three cards and an integration fence
+in one atomic remote Git operation before starting any worker. Each worker receives a private,
+disconnected clone; landing remains serial and follows the usual gate, verification, and Closeout
+sequence. If a worker, board snapshot, or lease diverges, Relay retains the evidence rather than
+starting a replacement or deleting a claim automatically. Jira triples use the coordinator's
+Jira REST credential for the claimed cards' In Review, outcome-comment, and terminal/return
+transitions; workers never receive Jira credentials or write tools. The credential must be
+permitted to make those writes, and `tracker.coordinator_rest_writes_authorized = true` is
+required. Set `tracker.in_review_transition` to the workflow label and
+`tracker.in_review_status` to its exact expected destination status; Relay refuses a missing,
+ambiguous, or mismatched transition. Supply `tracker.transition_labels` for that status, every
+terminal status, and every possible blocked-return status; Relay does not infer a label from a
+status. Custom claim-ref pushes preserve repository hooks; a failed
+release retains exact-token claims until an explicit guarded recovery.
+
 ## 4. Permissions
 
 ```toml
@@ -186,6 +241,8 @@ backend = "claude"
 id = "T-1"
 model = "sonnet"
 effort = "medium"
+# Optional scheduling evidence for `dispatch --policy parallel`.
+declared_paths = ["src/relay/", "tests/test_relay.py"]
 
 [[tasks]]
 id = "T-2"
@@ -196,6 +253,9 @@ reason = "needs a design answer nobody can give unattended"
 ```
 
 - Every task carries `id`, `model`, and `effort`. Ids are the tracker's own.
+- `declared_paths` is optional, narrow repository-relative scheduling evidence for a parallel
+  run. It may name files or directory prefixes. Omit it when the expected write scope is not
+  known; Relay treats uncertainty as a reason to serialize, never as a reason to overlap.
 - `excluded = true` keeps a task out of the run; it needs a `reason` in your words.
 - `backend` is `claude` or `grok`. Naming `codex` is refused by `validate` with a sentence that
   names the missing review step. A task whose backend differs from the `[defaults]` value
@@ -220,6 +280,8 @@ finding is a check by hand, not a halt.
 python3 <runner> validate <manifest>          # the rules above, the checkout, the backend binary, and every card
 python3 <runner> validate <manifest> --list   # the same, plus the tracker's cards not in a done status
 python3 <runner> run <manifest>               # to completion or to a halt
+python3 <runner> dispatch <manifest> --policy parallel  # inspect, print, and execute a conservative parallel schedule
+python3 <runner> dispatch <manifest> --policy serial    # explicit serial choice
 python3 <runner> run <manifest> --detach --notify
 python3 <runner> run <manifest> --detach --wait-for-lease   # queue behind a live runner, then run
 python3 <runner> pair split <manifest>        # write claude and grok members plus a pair file
@@ -228,6 +290,13 @@ python3 <runner> dispatch <pair>              # both backends at once, merges in
 python3 <runner> status <manifest>
 python3 <runner> summary <manifest>
 ```
+
+An attached `dispatch` with no policy presents the two choices, `serial` and `parallel`, with serial
+selected by default. A noninteractive or detached run with no explicit policy remains serial.
+When parallel is selected, inspect Relay's pre-launch schedule; it is informational, not a second
+authorization step, so the runner starts its scheduled workers immediately after showing it.
+Workers that Relay permits to overlap receive separate worktrees; their landings still occur in
+manifest order.
 
 When the task list names both `claude` and `grok`, split it into a pair and dispatch that. Keep
 the order you already chose as the merge order. Prefer claude for high judgment work and grok for

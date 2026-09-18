@@ -52,6 +52,11 @@ class LaunchResult:
     launch_error: str | None = None
     binary_path: str | None = None
     args: list | None = None
+    # Captured immediately after Popen, while the process identity still exists.  Triple-mode
+    # cleanup uses this pair to prove that a worker's detached process group is gone before it
+    # removes that worker clone.
+    pid: int | None = None
+    process_group_id: int | None = None
 
 
 ALWAYS_SCRUBBED = ("JIRA_API_TOKEN", "JIRA_EMAIL")
@@ -289,7 +294,7 @@ def _kill_group(proc, grace_seconds, pgid=None):
 def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=None, home=None,
            base_env=None, heartbeat=None, heartbeat_interval=contracts.LEASE_HEARTBEAT_SECONDS,
            stream=print, sigkill_grace_seconds=SIGKILL_GRACE_SECONDS, popen=subprocess.Popen,
-           on_release=None, allowed=None, disallowed=None, cwd=None, on_started=None):
+           on_release=None, allowed=None, disallowed=None, cwd=None, on_started=None, repo=None):
     """Run one task or closeout process to completion, a timeout, or a lost lease.
 
     `active_seconds` is measured on the monotonic clock, which does not advance while the host
@@ -301,8 +306,13 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     builds do not share a tree. Default is the Manifest repo, which is today's serial path.
     `on_started(pid, pgid)` fires once the child exists, so a coordinator can abort a sibling.
     """
-    repo = os.path.realpath(manifest.project.repo)
-    cwd = os.path.realpath(cwd) if cwd else repo
+    # Serial callers omit ``repo`` and retain the manifest checkout contract.  A triple
+    # coordinator passes its independently cloned worker path, which is also passed to the
+    # backend (notably Codex's ``-C`` and writable .git allowance) and transcript resolver.
+    # Dispatch supplies ``cwd`` for the same reason.  The two names are retained as compatible
+    # call-site contracts; an explicit triple repo takes precedence.
+    repo = os.path.realpath(repo or cwd or manifest.project.repo)
+    cwd = os.path.realpath(cwd or repo)
     session_id = session_id or str(uuid.uuid4())
     env = child_env(manifest, base_env, home, backend=task.backend)
     home = home or env.get("HOME") or os.path.expanduser("~")
@@ -331,6 +341,8 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
         group_id = os.getpgid(proc.pid)
     except OSError:
         group_id = None
+    result.pid = proc.pid
+    result.process_group_id = group_id
     if on_started is not None:
         try:
             on_started(proc.pid, group_id)
