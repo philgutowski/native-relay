@@ -380,13 +380,36 @@ and reports a Blocked Task whose card carries none as a check for the operator t
 Blocked Task the Closeout failed to record is visible in the run summary rather than on the board,
 which is the accepted cost of the Runner holding no write path at all.
 
+### Excluded
+A Task the Manifest itself keeps out of the run, named with the reason rather than left off the
+list. The record stands until the operator edits the Manifest, and no later run reconsiders it.
+
+Naming an excluded Task rather than deleting it keeps the reason where the next operator reads it,
+so work that needs an attended session, a paid run, or a decision only the maintainer can make stays
+visible in the run's own summary instead of vanishing from the queue.
+
+### Skipped
+A Task the Runner declined to launch on what it read at launch time: a card it could not read, a
+card already at a done status, or text naming a path the Task process would be refused. It is the
+Runner's decision about this moment, where Excluded is the Manifest's standing decision, and where
+Blocked is the Task process stopping after it started.
+
+A skip reports what the card said rather than judging the Task, so every later run checks the same
+Task again and launches it once the condition clears. That is what makes moving a card the repair
+for a skip rather than a problem with one: an operator who lands a Task by hand and moves its card
+to a done status turns the next run's launch into a skip, and that skip is the run stepping over
+work that is already done.
+
 ### Card audit
 The Runner's pass over every Task's card at the end of a run, comparing each with its record
 and with git, and the same pass an operator can run between runs on demand. It names four
 disagreements: a card at the in review status with no process on it, a Landed record whose card
 is no longer terminal, a terminal card nothing landed for, and a card that could not be read. It
 reports and never repairs, because the Runner holds no way to move a card; each finding says
-what to move and where, and the summary lists it as a check by hand. The run end pass writes
+what to move and where, and the summary lists it as a check by hand. A finding reads the card and
+the record alone, so where it names a card to move back it is assuming the Task was abandoned; an
+operator who has instead landed that Task by hand wants the card moved forward, and the audit has no
+way to tell the two apart. The run end pass writes
 under the Lease; the on-demand pass takes none and writes nothing, so it is safe beside a live run, where a
 record in flight is a process at work rather than a stale card.
 
