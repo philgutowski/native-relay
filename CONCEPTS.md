@@ -106,6 +106,12 @@ Dispatch holds the same two Leases `run` does. A halt that does not continue pas
 sibling build, removes its worktree, deletes its half built branch, and leaves that record
 pending so the next dispatch starts it fresh.
 
+A finished build waiting its merge turn still occupies that backend's slot. Freeing the slot when
+the Task process exits would start another Task on the same backend before the previous one has
+merged. The merge tail must treat this coordinator's own earlier landings as expected movement of
+the default branch, not as a foreign mover. A real concurrent session advancing the default branch
+is still a halt.
+
 ### Task
 One unit of work the operator defined before the run started, identified by a Tracker record. Tasks
 in a Manifest are independent of each other by requirement; a Task that depends on another belongs
