@@ -84,12 +84,18 @@ Triple mode requires `tracker.adapter = "github"` or `"jira"`, `shipping.mode = 
 `shipping.push = true`, three distinct nonexcluded task ids, and each backend exactly once. The
 Git host must permit atomic pushes of Relay's custom claim refs. Claims never expire by clock;
 after a crashed coordinator, inspect the retained state and worker evidence. Relay deliberately
-does not reclaim a remote claim automatically.
+does not reclaim a remote claim automatically. Custom-ref pushes preserve the target
+repository's normal pre-push hooks; their cost or failure is a remote operational constraint, and
+a failed release retains exact-token claims for explicit guarded recovery.
 
 Serial Jira pairs with `claude` and `grok`, which write through Atlassian MCP. In a Jira triple,
 the coordinator uses its already-scrubbed Jira REST credential for exact claimed-card transitions
 and outcome comments; workers, including Codex, receive neither that credential nor Jira write
-tools. The credential must have Jira transition/comment permissions. Serial Codex stays refused.
+tools. A Jira triple manifest must explicitly set `tracker.coordinator_rest_writes_authorized = true`
+and name `tracker.in_review_transition`; Relay selects that workflow label and verifies that its
+target status exactly equals `tracker.in_review_status`. Its `tracker.transition_labels` map must
+also name exact labels for the expected in-review, terminal, and possible return statuses. The credential must have Jira
+transition/comment permissions. Serial Codex stays refused.
 
 ## Platform
 

@@ -104,8 +104,13 @@ sequence. If a worker, board snapshot, or lease diverges, Relay retains the evid
 starting a replacement or deleting a claim automatically. Jira triples use the coordinator's
 Jira REST credential for the claimed cards' In Review, outcome-comment, and terminal/return
 transitions; workers never receive Jira credentials or write tools. The credential must be
-permitted to make those writes, and a workflow with no transition to the configured statuses
-refuses safely.
+permitted to make those writes, and `tracker.coordinator_rest_writes_authorized = true` is
+required. Set `tracker.in_review_transition` to the workflow label and
+`tracker.in_review_status` to its exact expected destination status; Relay refuses a missing,
+ambiguous, or mismatched transition. Supply `tracker.transition_labels` for that status, every
+terminal status, and every possible blocked-return status; Relay does not infer a label from a
+status. Custom claim-ref pushes preserve repository hooks; a failed
+release retains exact-token claims until an explicit guarded recovery.
 
 ## 4. Permissions
 

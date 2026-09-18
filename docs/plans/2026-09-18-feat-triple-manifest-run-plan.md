@@ -183,6 +183,33 @@ mode; stable claim-key construction; snapshot/delta detection; successful and re
 transitions/comments; and that serial Jira validation and closeout behavior remain unchanged.
 A live Jira proof is required before the Jira profile is described as released.
 
+### Jira Triple Completion Boundary — 2026-09-18
+
+**Transition contract.** A Jira triple manifest explicitly acknowledges the exceptional
+coordinator-owned REST path with `tracker.coordinator_rest_writes_authorized = true`. It names
+`tracker.in_review_transition` separately from `tracker.in_review_status`: Relay selects exactly
+one transition by label, requires its declared destination to equal the expected status exactly,
+then re-reads the three-card snapshot and accepts only the permitted delta. Missing, duplicate,
+or mismatched labels fail closed before a write. `tracker.transition_labels` maps every expected
+in-review, terminal, and possible return status to the label the coordinator must choose; it
+never infers a workflow label from a destination status.
+
+**Write boundary.** After remote claims are acquired and the project-validated Jira snapshot is
+re-read unchanged, the adapter freezes precisely those three immutable Jira issue IDs. Coordinator
+REST transition and comment methods refuse any ID outside that set. Workers and Closeout receive
+the scrubbed child environment and no Jira write tools; serial Jira remains MCP-owned and serial
+Codex-on-Jira remains refused.
+
+**Operational constraint.** Remote `refs/relay/*` pushes intentionally run all target pre-push
+hooks. Hook cost or a hook failure on acquisition/release is a remote constraint, not authority to
+disable hooks or substitute a local lock. A failed release retains exact-token claims until an
+operator performs explicit guarded recovery.
+
+**Release checkpoint.** Focused manifest, adapter, brief, closeout, and launcher coverage proves
+the local contracts. The external release gate remains open until a disposable private Bitbucket
+repository and exactly three disposable Jira cards prove the real profile and retain scrubbed
+Codex review evidence. No production delivery card or support-workbench checkout is a substitute.
+
 ### Risks and Dependencies
 
 - Remote claim ref policy might be disabled by a host or repository ruleset. Treat it as a validation failure with a manual remediation message, not a fallback to local only claims.

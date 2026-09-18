@@ -172,7 +172,14 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    For a simultaneous three-card GitHub Projects or Jira run, add `[execution] mode = "triple"`; require
    exactly three independent, nonexcluded cards and assign `claude`, `grok`, and `codex` once
    each. It requires pushed local-merge shipping and an origin that accepts atomic Relay claim
-   refs. Relay creates isolated disconnected worker clones and serializes landing itself.
+   refs. Relay creates isolated disconnected worker clones and serializes landing itself. For a
+   Jira triple only, require the operator to write
+   `tracker.coordinator_rest_writes_authorized = true`, an `in_review_transition` workflow label,
+   an `in_review_status` destination status, and `transition_labels` entries for terminal and
+   return statuses. Explain that the coordinator chooses the label then verifies the exact target
+   status; workers and Closeout never receive Jira credentials or
+   Jira write tools. Do not bypass target pre-push hooks for claim refs: a failed release retains
+   exact-token claims for explicit guarded recovery.
 
 The examples under `docs/examples/` are the three shapes, one per adapter.
 
