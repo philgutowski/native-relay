@@ -144,6 +144,10 @@ FINDING_ROWS = {
         {"review": "/code-review"},
         "classify.classify, a complete envelope with no review call in the transcript",
     ),
+    contracts.REVIEW_FAILED: (
+        {"review": "codex exec review --base main", "reason": "nonzero or incomplete exit"},
+        "classify.classify, a Codex review command whose direct receipt is rejected",
+    ),
     contracts.HALT_NO_ENVELOPE: (
         {"last_message": "I have stopped rather than working around the denial."},
         "classify.classify, kept as a finding when the envelope is absent",

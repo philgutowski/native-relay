@@ -114,6 +114,7 @@ BACKEND_PINS = {
         # Skill tool in a headless session. The 2026-08-25 proof run showed a headless process
         # reaching it on its own, so the classifier can see the call in the transcript.
         "review_skill": "code-review",
+        "review_argv": (),
         "evidence": "session jsonl under ~/.claude/projects/<slug>/<session-id>.jsonl",
         "credential_prefixes": ("ANTHROPIC_", "CLAUDE_"),
         "credential_file": "~/.claude/.credentials.json",
@@ -154,9 +155,12 @@ BACKEND_PINS = {
         # simply could not complete. `config_overrides` below removes that, and nothing detects a
         # push from a Task or Closeout here yet. Issue #60.
         "enforces_at_launch": False,
-        # No verified built in review reachable from `codex exec`, so native mode refuses this
-        # backend at validate until one is observed live.
+        # `codex exec review --base <branch>` is Codex's native review invocation. Unlike the
+        # other CLIs it does not produce a Skill event; the normalizer preserves the completed
+        # command argv, exit status, and bounded output and the classifier accepts only its
+        # exact direct foreground form. A live nested-Codex proof remains a release gate.
         "review_skill": None,
+        "review_argv": ("codex", "exec", "review"),
         "evidence": "stdout log plus --output-last-message file; session jsonl at "
                     "~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl",
         "credential_prefixes": ("CODEX_", "OPENAI_"),
@@ -277,6 +281,7 @@ BACKEND_PINS = {
         # is a read not a run, and `subagent_spawned` with description `[reviewer]` is a
         # convention inside `/review`.
         "review_skill": "review",
+        "review_argv": (),
         "evidence": "~/.grok/sessions/<url-encoded-realpath-cwd>/<session-id>/updates.jsonl",
         "credential_prefixes": ("GROK_", "XAI_"),
         "credential_file": "~/.grok/auth.json",
@@ -456,6 +461,9 @@ CANCELLED_TOOL_CALL = "cancelled_tool_call"
 # not attach a false skip. The 2026-08-25 proof run is the precedent: a headless process
 # substituted or skipped review steps twice.
 REVIEW_SKIPPED = "review_skipped"
+# A native review command appeared in evidence but did not satisfy its proof contract (for
+# example it was shell wrapped, exited nonzero, or produced no retained review output).
+REVIEW_FAILED = "review_failed"
 # Issue #58. The Manifest's resolution decided this relaunch's backend or model, and it differed
 # from what the record carried, so the Task went somewhere other than where it last ran. Finding
 # only, and unlike the three above it names an operator's own choice rather than a failure: the
@@ -570,6 +578,7 @@ FINDING_CLASSES = (
     WAITING_LAST_MESSAGE,
     CANCELLED_TOOL_CALL,
     REVIEW_SKIPPED,
+    REVIEW_FAILED,
     BACKEND_REASSIGNED,
     CARD_LEFT_IN_REVIEW,
 )
@@ -578,7 +587,7 @@ FINDING_CLASSES = (
 # findings that are never a record's own class but still have to print.
 LINE_CLASSES = HALT_CLASSES + (
     CLOSEOUT_UNFINISHED, BLOCKED_UNRECORDED, UNENFORCED_DISALLOWED, RUNNER_SELF_KILL,
-    WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, REVIEW_SKIPPED, BACKEND_REASSIGNED,
+    WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, REVIEW_SKIPPED, REVIEW_FAILED, BACKEND_REASSIGNED,
     CARD_LEFT_IN_REVIEW,
 )
 
@@ -613,6 +622,7 @@ HALT_LINES = {
     WAITING_LAST_MESSAGE: "ended the turn waiting on background work that does not resume headless: {last_message}",
     CANCELLED_TOOL_CALL: "the CLI cancelled its own tool call, no user present: {tool} on {target}",
     REVIEW_SKIPPED: "completed without running {review}",
+    REVIEW_FAILED: "review evidence for {review} was rejected: {reason}",
     # Tense neutral on purpose: the runner streams this sentence before the launch, where the
     # move is still intent, and writes it onto the record afterwards, where it is history.
     BACKEND_REASSIGNED: ("{to_backend} {to_model}, reassigned from "
@@ -645,6 +655,7 @@ DIGEST_KEYS = frozenset((
     # Backends U6, R5: halt-class constants this backend's evidence cannot show, so a reader can
     # tell "not checked" from "checked, none found" per finding class.
     "undetectable",
+    "review_receipt",
 ))
 
 # Terminal record run statuses (R30, U3 step 6).
@@ -674,6 +685,13 @@ LEASE_HEARTBEAT_SECONDS = 60
 LEASE_TTL_SECONDS = 600
 
 STATE_SCHEMA_VERSION = 2
+
+# Triple coordinators use these refs as their cross-machine ownership record.  They are refs,
+# rather than timestamps in a board field, because a Git server can reject the whole update in
+# one transaction.  Their object ids are deliberately not secrets: they are fencing tokens
+# whose only job is to prove which coordinator is still entitled to mutate the default branch.
+REMOTE_CLAIM_REF_PREFIX = "refs/relay/claims"
+REMOTE_INTEGRATION_REF_PREFIX = "refs/relay/integration"
 
 
 def slug_for(path):

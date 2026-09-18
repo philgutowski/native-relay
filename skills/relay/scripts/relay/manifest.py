@@ -24,12 +24,14 @@ from . import backends, contracts, gitread
 ADAPTERS = ("jira", "github", "markdown")
 # The CLI a Task process runs on (R1). The closed set stays three wide so a manifest written for
 # another backend is refused with a sentence naming why rather than as an unknown name: native
-# mode runs a Task on a backend whose capability record names a verified built in review step
-# (`review_skill`), today `claude` and `grok`. Codex is refused until one is observed live.
+# mode runs a Task on a backend whose capability record names either a verified built in review
+# step (`review_skill`) or an exact direct review invocation (`review_argv`).
 # What differs per backend otherwise is the launch seam, which contracts.BACKEND_PINS records.
 # A manifest naming none of these puts every Task on claude.
 BACKENDS = ("claude", "codex", "grok")
 DEFAULT_BACKEND = "claude"
+EXECUTION_MODES = ("serial", "triple")
+DEFAULT_EXECUTION_MODE = "serial"
 SHIPPING_MODES = ("local_merge", "pr_terminal")
 # Named in the schema and refused by `validate`. Every read side piece of pr_terminal exists and
 # is unit tested (`gitwrite.find_pr`, `gitwrite.poll_ci`, the `pr_probe` seam in `verify.verify`)
@@ -135,6 +137,18 @@ class OnHalt:
 
 
 @dataclass(frozen=True)
+class Execution:
+    """How Relay schedules the manifest's tasks.
+
+    Serial is deliberately the default: existing manifests retain their one-task-at-a-time
+    semantics unless they explicitly opt into the exact three-lane profile.  The coordinator
+    owns the mechanics of triple mode; this record is the small, immutable dispatch contract
+    it receives.
+    """
+    mode: str
+
+
+@dataclass(frozen=True)
 class Task:
     id: str
     model: str
@@ -168,6 +182,10 @@ class Manifest:
     # that pushes, fetches, or compares against origin (docs/plans/2026-09-10-feat-no-push-
     # shipping-plan.md, the read site table). Appended last so no positional constructor moves.
     shipping_push: bool = True
+    # Appended with a default for callers that construct a serial Manifest directly.  Keeping
+    # this separate from shipping makes concurrency an explicit scheduling choice rather than
+    # an accidental consequence of a shipping setting.
+    execution: Execution = field(default_factory=lambda: Execution(DEFAULT_EXECUTION_MODE))
 
 
 @dataclass
@@ -223,6 +241,7 @@ def load(path):
     ob = raw.get("on_blocked", {})
     oh = raw.get("on_halt", {})
     dflt = raw.get("defaults", {})
+    raw_execution = raw.get("execution", {})
 
     project = Project(
         repo=os.path.expanduser(str(p.get("repo", ""))),
@@ -274,6 +293,13 @@ def load(path):
     on_halt = OnHalt(
         continue_past_task_halt=bool(pick(oh, "on_halt", "continue_past_task_halt", False)),
     )
+    # A scalar `execution = ...` is not silently treated as serial.  Preserve it as the mode
+    # value so validate can name execution.mode rather than crashing while loading a malformed
+    # optional table.
+    execution_obj = Execution(
+        mode=(pick(raw_execution, "execution", "mode", DEFAULT_EXECUTION_MODE)
+              if isinstance(raw_execution, dict) else raw_execution),
+    )
     raw_tasks = raw.get("tasks", [])
     if not isinstance(raw_tasks, list) or not all(isinstance(entry, dict) for entry in raw_tasks):
         raise ManifestError("tasks must be an array of tables ([[tasks]]), not a single [tasks] table")
@@ -310,6 +336,7 @@ def load(path):
         raw=raw,
         # Not coerced with bool(): validate refuses a non boolean, and bool("false") is True.
         shipping_push=pick(raw["shipping"], "shipping", "push", True),
+        execution=execution_obj,
         defaults_applied=tuple(defaults),
     )
 
@@ -498,6 +525,9 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         err("shipping.mode %s is not implemented: the run loop has no pull request sequence, so "
             "every task would halt without one being opened or checked. Use local_merge."
             % manifest.shipping_mode)
+    if manifest.execution.mode not in EXECUTION_MODES:
+        err("execution.mode must be one of %s, not %r"
+            % (", ".join(EXECUTION_MODES), manifest.execution.mode))
     if not isinstance(manifest.shipping_push, bool):
         err("shipping.push must be true or false, not %r" % (manifest.shipping_push,))
     elif not manifest.shipping_push and manifest.project.mirror:
@@ -559,11 +589,11 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         if task.backend not in BACKENDS:
             err("%s.backend must be one of %s, not %r"
                 % (label, ", ".join(BACKENDS), task.backend))
-        elif backends.build(task.backend).CAPABILITY.review_skill is None:
-            # Native mode, decided 2026-09-07, grok admitted 2026-09-11. The review step is a
-            # built in skill, and only a backend with a verified one can run the brief. Checked
-            # on excluded Tasks too, so un-excluding one later cannot launch it somewhere the
-            # brief cannot be followed. The error names the missing step, not "claude only".
+        elif not (backends.build(task.backend).CAPABILITY.review_skill
+                  or backends.build(task.backend).CAPABILITY.review_argv):
+            # A review is either a structured native skill or an exact direct native command
+            # whose evidence contract classify can enforce. Checked on excluded Tasks too, so
+            # un-excluding one later cannot launch it somewhere the brief cannot be followed.
             err("%s (%s) names backend %s, which has no verified native review step, see README"
                 % (label, task.id or "?", task.backend))
         if task.id in seen:
@@ -571,7 +601,8 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         seen.add(task.id)
         if task.excluded and not (task.reason or "").strip():
             err("%s (%s) is excluded but carries no reason (R5)" % (label, task.id or "?"))
-        if (task.backend in BACKENDS and task.backend != resolved_default
+        if (manifest.execution.mode != "triple" and task.backend in BACKENDS
+                and task.backend != resolved_default
                 and not (task.reason or "").strip()):
             err("%s (%s) names backend %s, which differs from the default %s, but carries no reason"
                 % (label, task.id or "?", task.backend, resolved_default))
@@ -591,6 +622,37 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
                     % (label, task.id or "?", task.backend, task.model, ", ".join(owners)))
     if not manifest.tasks:
         err("tasks is empty")
+
+    # KTD1: triple is not a generic concurrency knob.  It is one exact, collision-safe batch
+    # shape.  Keep these checks profile-specific so serial manifests continue to use their
+    # established backend-default and reassignment rules unchanged.
+    if manifest.execution.mode == "triple":
+        if manifest.tracker.adapter != "github":
+            err("execution.mode triple requires tracker.adapter github")
+        if manifest.shipping_mode != "local_merge":
+            err("execution.mode triple requires shipping.mode local_merge")
+        if manifest.shipping_push is not True:
+            err("execution.mode triple requires shipping.push = true")
+        if len(manifest.tasks) != 3:
+            err("execution.mode triple requires exactly three tasks, not %d" % len(manifest.tasks))
+        for index, task in enumerate(manifest.tasks):
+            if task.excluded:
+                err("execution.mode triple does not allow an excluded task: tasks[%d] (%s)"
+                    % (index, task.id or "?"))
+        task_ids = [task.id for task in manifest.tasks]
+        if len(task_ids) != len(set(task_ids)):
+            err("execution.mode triple requires three distinct task ids")
+        raw_tasks = manifest.raw.get("tasks", [])
+        missing_backends = [index for index, entry in enumerate(raw_tasks)
+                            if "backend" not in entry]
+        if missing_backends:
+            err("execution.mode triple requires an explicit tasks[%d].backend for every task"
+                % missing_backends[0])
+        named_backends = {task.backend for task in manifest.tasks}
+        required_backends = set(BACKENDS)
+        if named_backends != required_backends or len(manifest.tasks) != len(named_backends):
+            err("execution.mode triple requires each backend exactly once: claude, grok, codex "
+                "(got %s)" % ", ".join(task.backend for task in manifest.tasks))
 
     # Parent R19. Any Task on a backend that cannot refuse tools at launch, including an
     # excluded one, requires the operator's sentence and a set Task path bound. Schema only.

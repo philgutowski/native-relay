@@ -86,6 +86,7 @@ class CompleteManifest(ManifestCase):
         self.assertEqual(m.tasks[0].id, "T-1")
         self.assertTrue(m.tasks[1].excluded)
         self.assertTrue(m.on_blocked.merge_partial)
+        self.assertEqual(m.execution.mode, "serial")
         result = mf.validate(m)
         self.assertTrue(result.ok, result.errors)
         # The fixture is markdown tracked, so the Jira credential names are not defaults here:
@@ -94,6 +95,7 @@ class CompleteManifest(ManifestCase):
         self.assertNotIn("tracker.email_env = 'JIRA_EMAIL'", result.defaults_applied)
         self.assertEqual(m.tracker.token_env, "")
         self.assertEqual(result.allowed_paths, ["docs/", "CONCEPTS.md", "tracker.md"])
+        self.assertIn("execution.mode = 'serial'", result.defaults_applied)
 
     def test_the_jira_credential_names_default_only_under_the_jira_adapter(self):
         text = self.edit(r'^adapter = "markdown"$', 'adapter = "jira"\nbase_url = "https://x.atlassian.net"\nproject_key = "PROJ"')
@@ -151,6 +153,78 @@ class CompleteManifest(ManifestCase):
         result = mf.validate(m)
         self.assertTrue(result.ok, result.errors)
         self.assertFalse(any("branch_prefix" in d for d in result.defaults_applied))
+
+
+class TripleExecution(ManifestCase):
+    """KTD1: the concurrent profile has one deliberately narrow three-card shape."""
+
+    def triple(self):
+        text = self.base.replace(
+            'adapter = "markdown"\nfile = "tracker.md"\ndone_statuses = ["done"]\nin_review_status = "in review"',
+            'adapter = "github"\nowner = "relay"\nproject_number = 1\n'
+            'status_field = "Status"\ndone_statuses = ["done"]\nin_review_status = "in review"')
+        text = text.replace('excluded = true\nreason = "brief says stop and ask on the schema question"\n', '')
+        text = self.retarget(text, "T-1", "claude")
+        text = self.retarget(text, "T-2", "grok")
+        text += ('\n[[tasks]]\nid = "T-3"\nbackend = "codex"\nmodel = "gpt-5-codex"\n'
+                 'effort = "medium"\n')
+        text = text.replace('[permissions]',
+                            '[permissions]\n'
+                            'unenforced_acceptance = "fixture: operator accepts Codex scope"\n'
+                            'task_allowed_paths = ["src/"]', 1)
+        return text.replace('[permissions]', '[execution]\nmode = "triple"\n\n[permissions]', 1)
+
+    def validated_triple(self, text=None):
+        return mf.validate(self.load(text if text is not None else self.triple()))
+
+    def test_serial_is_the_default_and_is_named(self):
+        manifest = self.load()
+        self.assertEqual(manifest.execution.mode, "serial")
+        self.assertIn("execution.mode = 'serial'", mf.validate(manifest).defaults_applied)
+
+    def test_exact_triple_shape_validates_without_serial_backend_reasons(self):
+        result = self.validated_triple()
+        self.assertTrue(result.ok, result.errors)
+
+    def test_unknown_execution_mode_is_refused(self):
+        result = mf.validate(self.load(self.base + '\n[execution]\nmode = "parallel"\n'))
+        self.assertTrue(any("execution.mode must be one of" in error for error in result.errors),
+                        result.errors)
+
+    def test_triple_requires_explicit_unique_three_backend_assignments(self):
+        text = self.triple().replace('backend = "grok"\nmodel = "grok-4.6"',
+                                     'backend = "claude"\nmodel = "opus"')
+        result = self.validated_triple(text)
+        self.assertTrue(any("each backend exactly once" in error for error in result.errors),
+                        result.errors)
+
+        text = self.triple().replace('backend = "grok"\n', '', 1)
+        result = self.validated_triple(text)
+        self.assertTrue(any("explicit tasks[1].backend" in error for error in result.errors),
+                        result.errors)
+
+    def test_triple_rejects_an_excluded_or_duplicate_card(self):
+        text = self.triple().replace('effort = "high"', 'effort = "high"\nexcluded = true', 1)
+        result = self.validated_triple(text)
+        self.assertTrue(any("does not allow an excluded task" in error for error in result.errors),
+                        result.errors)
+
+        text = self.triple().replace('id = "T-3"', 'id = "T-2"')
+        result = self.validated_triple(text)
+        self.assertTrue(any("three distinct task ids" in error for error in result.errors),
+                        result.errors)
+
+    def test_triple_requires_github_pushed_local_merge_shipping(self):
+        for source, replacement, expected in (
+            ('adapter = "github"', 'adapter = "markdown"', 'tracker.adapter github'),
+            ('mode = "local_merge"', 'mode = "pr_terminal"', 'shipping.mode local_merge'),
+            ('[shipping]\nmode = "local_merge"',
+             '[shipping]\nmode = "local_merge"\npush = false',
+             'shipping.push = true'),
+        ):
+            with self.subTest(expected=expected):
+                result = self.validated_triple(self.triple().replace(source, replacement, 1))
+                self.assertTrue(any(expected in error for error in result.errors), result.errors)
 
 
 class NegativeManifests(ManifestCase):
@@ -354,11 +428,7 @@ class Backends(ManifestCase):
         self.assertEqual([t.backend for t in m.tasks], ["codex", "claude"])
         self.assertEqual(other_errors(mf.validate(m)), [])
 
-    def test_native_mode_refuses_a_task_on_a_backend_with_no_review_skill(self):
-        """Decided 2026-09-07, grok admitted 2026-09-11. The remaining refusal is Codex. It
-        names the task, the backend, and the missing step, not "claude only", and fires on an
-        excluded task and on an inherited [defaults] backend too, so nothing can launch there
-        later. A grok Task with a grok model validates."""
+    def test_native_mode_accepts_codex_direct_review_and_refuses_no_review_contract(self):
         grok = self.retarget(self.base, "T-1", "grok", '\nreason = "fixture: grok Task"')
         result = mf.validate(self.load(grok))
         self.assertTrue(result.ok, result.errors)
@@ -367,25 +437,28 @@ class Backends(ManifestCase):
         mixed = self._with_unenforced_gate(
             self.retarget(self.base, "T-1", "codex", '\nreason = "fixture: mixed Codex Task"'))
         result = mf.validate(self.load(mixed))
-        self.assertFalse(result.ok)
-        refusals = [error for error in result.errors if NATIVE_REFUSAL in error]
-        self.assertEqual(len(refusals), 1, result.errors)
-        self.assertIn("T-1", refusals[0])
-        self.assertIn("codex", refusals[0])
-        self.assertNotIn("claude only", refusals[0])
+        self.assertEqual(other_errors(result), [], result.errors)
+        self.assertFalse(any(NATIVE_REFUSAL in error for error in result.errors), result.errors)
 
         excluded = self.retarget(self.base, "T-2", "codex")
         self.assertTrue(self.load(excluded).tasks[1].excluded, "the fixture's T-2 is the excluded one")
         result = mf.validate(self.load(self._with_unenforced_gate(excluded)))
-        self.assertTrue(any(NATIVE_REFUSAL in error and "T-2" in error for error in result.errors),
-                        result.errors)
+        self.assertFalse(any(NATIVE_REFUSAL in error for error in result.errors), result.errors)
 
         inherited = self.base.replace("[[tasks]]", '[defaults]\nbackend = "codex"\n\n[[tasks]]', 1)
         for task_id in ("T-1", "T-2"):
             inherited = self.remodel(inherited, task_id, BACKEND_MODELS["codex"])
         inherited = self._with_unenforced_gate(inherited)
         result = mf.validate(self.load(inherited))
-        self.assertEqual(sum(NATIVE_REFUSAL in error for error in result.errors), 2, result.errors)
+        self.assertFalse(any(NATIVE_REFUSAL in error for error in result.errors), result.errors)
+
+        codex = backends.build("codex")
+        no_review = replace(codex.CAPABILITY, review_argv=())
+        with mock.patch.object(codex, "CAPABILITY", no_review):
+            result = mf.validate(self.load(mixed))
+        refusals = [error for error in result.errors if NATIVE_REFUSAL in error]
+        self.assertEqual(len(refusals), 1, result.errors)
+        self.assertIn("T-1", refusals[0])
 
         self.assertTrue(mf.validate(self.load()).ok)
 

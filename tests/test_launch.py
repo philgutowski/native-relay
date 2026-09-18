@@ -165,6 +165,30 @@ class PopenContract(LaunchCase):
         self.assertTrue(seen["kwargs"]["start_new_session"])
         self.assertEqual(seen["kwargs"]["cwd"], os.path.realpath(self.repo))
 
+    def test_an_explicit_worker_clone_is_the_only_process_cwd_and_transcript_identity(self):
+        seen = {}
+        worker = _repo.make_repo(self.tmp.name, name="worker")
+
+        class Recording:
+            def __init__(inner, args, **kwargs):
+                seen["args"] = args
+                seen["kwargs"] = kwargs
+                inner.proc = subprocess.Popen(args, **kwargs)
+
+            def __getattr__(inner, name):
+                return getattr(inner.proc, name)
+
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        result = self.go(repo=worker, popen=Recording)
+        self.assertEqual(seen["kwargs"]["cwd"], os.path.realpath(worker))
+        self.assertNotEqual(seen["kwargs"]["cwd"], os.path.realpath(self.repo))
+        self.assertIsNotNone(result.pid)
+        self.assertIsNotNone(result.process_group_id)
+        self.assertTrue(result.transcript_present)
+        self.assertEqual(result.transcript_path,
+                         contracts.transcript_path(self.home, os.path.realpath(worker),
+                                                   result.session_id))
+
 
 class SuccessfulRun(LaunchCase):
     def test_the_transcript_lands_at_the_derived_path_and_the_log_is_written(self):
@@ -461,6 +485,15 @@ class PerBackendArguments(LaunchCase):
             self.assertNotIn("-c", args, name)
             self.assertNotIn("--strict-config", args, name)
             self.assertNotIn("sandbox_workspace_write.network_access=true", " ".join(args), name)
+
+    def test_codex_writable_git_directory_follows_the_explicit_worker_clone(self):
+        worker = _repo.make_repo(self.tmp.name, name="worker")
+        codex, _ = self.args_for("codex", repo=worker)
+        self.assertEqual(os.path.realpath(codex[codex.index("-C") + 1]), os.path.realpath(worker))
+        self.assertEqual(os.path.realpath(codex[codex.index("--add-dir") + 1]),
+                         os.path.realpath(os.path.join(worker, ".git")))
+        self.assertNotIn(os.path.realpath(os.path.join(self.repo, ".git")),
+                         [os.path.realpath(arg) for arg in codex])
 
     def test_a_backend_without_a_deny_flag_omits_it_and_still_resolves_the_disallow_list(self):
         args, _ = self.args_for("codex")

@@ -78,14 +78,12 @@ class ReviewStep(BriefCase):
                           "ce-compound", "lfg"):
                 self.assertNotIn(token, text, "%s %s names %s" % (backend, mode, token))
 
-    def test_a_backend_with_no_review_skill_renders_the_self_review_fallback(self):
-        """validate refuses Codex in native mode, so no real process reads this; the brief
-        still renders so the launch seam stays under test until the refusal lifts."""
+    def test_codex_brief_requires_the_exact_foreground_native_review_command(self):
         text = self.render(backend="codex")
-        self.assertIn(brief.REVIEW_RULE_FALLBACK, text)
-        self.assertIn(brief.REVIEW_STEP_FALLBACK, steps_section(text))
-        self.assertNotIn(REVIEW, text)
-        self.assertNotIn("/review", text)
+        command = "codex exec review --base main"
+        self.assertIn(brief.REVIEW_RULE_COMMAND % command, text)
+        self.assertIn("Run `%s` on the branch's diff" % command, steps_section(text))
+        self.assertIn("no shell wrapper", text)
 
     def test_the_grok_brief_names_review_and_does_not_promise_a_skip_report(self):
         """KTD4. Grok names `/review` and lists skip as undetectable, so the brief must not
@@ -97,9 +95,9 @@ class ReviewStep(BriefCase):
         self.assertNotRegex(text, r"(?i)reported to the operator")
         self.assertIn(brief.REVIEW_RULE_UNDETECTABLE % "/review", text)
 
-    def test_no_brief_claims_the_review_call_is_recorded_on_an_undetectable_backend(self):
-        for backend in ("codex", "grok"):
-            self.assertNotRegex(self.render(backend=backend), r"(?i)reported to the operator")
+    def test_only_grok_has_an_undetectable_review_step(self):
+        self.assertNotRegex(self.render(backend="grok"), r"(?i)reported to the operator")
+        self.assertIn("records this direct command", self.render(backend="codex"))
 
     def test_the_brief_forbids_backgrounding_work_and_ending_the_turn(self):
         """The first Cratekit run: the task backgrounded the mutation driver, ended its turn
@@ -158,6 +156,13 @@ class LocalMergeTemplate(BriefCase):
         steps = steps_section(text)
         self.assertIn("Create `T-1` from", steps)
         self.assertNotIn("relay/T-1", steps)
+
+    def test_a_triple_worker_verifies_its_assigned_clone_and_branch(self):
+        manifest = dataclasses.replace(self.manifest(), execution=mf.Execution("triple"))
+        steps = steps_section(brief.render(manifest, manifest.tasks[0], CARD))
+        self.assertIn("worker clone is already on `relay/T-1`", steps)
+        self.assertIn("git branch --show-current", steps)
+        self.assertNotIn("Create `relay/T-1`", steps)
 
     def test_the_brief_orders_the_pipeline_and_keeps_the_runner_owned_steps_out(self):
         text = self.render()

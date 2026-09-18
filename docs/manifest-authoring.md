@@ -85,6 +85,23 @@ whole run stays on the machine and you decide afterwards what reaches the remote
   local default branch;
 - the summary ends by saying nothing was pushed and naming the one `git push` that ships it.
 
+## Triple execution mode
+
+For one simultaneous Claude, Grok, and Codex run from a GitHub Projects board, add:
+
+```toml
+[execution]
+mode = "triple"
+```
+
+This is an exact three-card profile, not a general concurrency setting. It requires GitHub,
+`local_merge`, `push = true`, three independent nonexcluded tasks, and explicit assignments of
+`claude`, `grok`, and `codex` exactly once. Relay claims all three cards and an integration fence
+in one atomic remote Git operation before starting any worker. Each worker receives a private,
+disconnected clone; landing remains serial and follows the usual gate, verification, and Closeout
+sequence. If a worker, board snapshot, or lease diverges, Relay retains the evidence rather than
+starting a replacement or deleting a claim automatically.
+
 ## 4. Permissions
 
 ```toml

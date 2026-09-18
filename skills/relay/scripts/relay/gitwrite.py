@@ -18,9 +18,12 @@ settings' remote checks differ.
 Nothing here writes to a tracker (R19), and nothing here decides whether a task landed. That
 verdict is verify.py, from git and the tracker alone.
 """
+import hashlib
 import os
+import shutil
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 
 from . import contracts, gitread
@@ -99,6 +102,70 @@ class PushResult:
     ok: bool
     returncode: int
     output: str
+
+
+@dataclass(frozen=True)
+class RemoteLease:
+    """One remote ref and the public object id that fences updates to it."""
+    ref: str
+    token: str
+
+
+@dataclass
+class RemoteLeaseResult:
+    """Result of a remote claim transaction.
+
+    `reason` is stable, actionable vocabulary for the coordinator.  The unabridged server
+    response remains in `output`, while callers can safely put the ref names and object ids in
+    durable state because neither is a credential.
+    """
+    ok: bool
+    reason: str | None = None
+    output: str = ""
+    returncode: int | None = None
+    claim_key: str | None = None
+    card_leases: tuple = ()
+    integration_lease: RemoteLease | None = None
+    observed: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkerClone:
+    """An independently cloned Task workspace owned by one triple coordinator.
+
+    The values retained here are deliberately sufficient to reject a later cleanup that is
+    aimed at the wrong directory, a linked worktree, or a clone whose branch/remotes were
+    altered by a worker.  They contain no remote URL or credentials because workers are
+    intentionally disconnected before an agent runs.
+    """
+    path: str
+    root: str
+    task_id: str
+    branch: str
+    baseline_sha: str
+    canonical_git_dir: str
+    git_dir: str
+
+
+@dataclass(frozen=True)
+class WorkerProcess:
+    """The process identity captured synchronously by the launcher for cleanup fencing."""
+    pid: int
+    process_group_id: int
+
+
+@dataclass
+class WorkerCloneResult:
+    ok: bool
+    worker: WorkerClone | None = None
+    reason: str | None = None
+    output: str = ""
+
+
+@dataclass
+class WorkerCleanupResult:
+    removed: bool
+    retained_reason: str | None = None
 
 
 @dataclass
@@ -202,6 +269,503 @@ def push(repo, args, ops=None, task_id=None, env=None, timeout=None):
                    timeout=push_timeout_for(timeout))
     output = (proc.stdout or "") + (proc.stderr or "")
     return PushResult(proc.returncode == 0, proc.returncode, output)
+
+
+# Triple worker clones ------------------------------------------------------
+#
+# A linked worktree is not a worker isolation boundary: its .git file resolves into the
+# canonical checkout's common Git directory.  Triple mode therefore uses a normal local clone
+# with Git's explicit no-hardlink switch, then removes every remote before the backend starts.
+# The coordinator, not a worker, later imports the stopped branch into its canonical checkout.
+
+
+def _within(parent, child):
+    """True only when child is strictly below parent after resolving filesystem links."""
+    try:
+        return os.path.commonpath((parent, child)) == parent and parent != child
+    except ValueError:
+        return False
+
+
+def worker_clone_path(root, task_id):
+    """A stable, path-safe name for one worker beneath its coordinator-owned root."""
+    task_id = _identity_text(task_id, "task_id")
+    return os.path.join(os.path.realpath(root), "worker-" + hashlib.sha256(
+        task_id.encode("utf-8")).hexdigest()[:24])
+
+
+def _worker_clone_safety(worker, require_branch=True):
+    """Return ``None`` only when this still looks like the clone we created.
+
+    This intentionally treats uncertainty as unsafe.  In particular, a worker that adds a
+    remote or switches branches leaves its clone for inspection instead of making cleanup
+    erase the most useful evidence of what it did.
+    """
+    if not isinstance(worker, WorkerClone):
+        return "worker_identity_missing"
+    if not _within(worker.root, worker.path):
+        return "worker_path_outside_owned_root"
+    if _within(worker.path, worker.root) or os.path.islink(worker.path):
+        return "worker_path_identity_changed"
+    if not os.path.isdir(worker.path):
+        return "worker_path_missing"
+    dot_git = os.path.join(worker.path, ".git")
+    if not os.path.isdir(dot_git) or os.path.islink(dot_git):
+        return "worker_git_dir_not_private"
+    if os.path.realpath(dot_git) != worker.git_dir:
+        return "worker_git_dir_identity_changed"
+    actual_git_dir = gitread.git_dir(worker.path)
+    if actual_git_dir != worker.git_dir:
+        return "worker_git_dir_identity_changed"
+    if actual_git_dir == worker.canonical_git_dir:
+        return "worker_git_dir_shared_with_canonical"
+    try:
+        if gitread.remotes(worker.path):
+            return "worker_remote_present"
+        if require_branch and gitread.current_branch(worker.path) != worker.branch:
+            return "worker_branch_changed"
+    except (gitread.GitError, OSError, subprocess.SubprocessError):
+        return "worker_git_state_unreadable"
+    return None
+
+
+def create_worker_clone(repo, worker_root, task_id, branch, baseline_sha, default_branch,
+                        ops=None, env=None):
+    """Create a disconnected, independent clone prepared on one task branch.
+
+    ``worker_root`` belongs to the coordinator and must sit outside the canonical checkout.
+    The branch is created locally from the frozen build baseline.  No remote survives this
+    function, so even an agent with broad tool access can only alter its own clone until the
+    coordinator imports its stopped branch deliberately.
+    """
+    canonical = os.path.realpath(repo)
+    root = os.path.realpath(worker_root)
+    if not os.path.isdir(canonical):
+        return WorkerCloneResult(False, reason="canonical_repo_missing")
+    if _within(canonical, root) or root == canonical:
+        return WorkerCloneResult(False, reason="worker_root_inside_canonical")
+    if not isinstance(branch, str) or not branch.strip() or "\n" in branch:
+        return WorkerCloneResult(False, reason="worker_branch_invalid")
+    check_branch = gitread.run(canonical, ["check-ref-format", "--branch", branch], check=False,
+                              env=env)
+    if check_branch.returncode != 0:
+        return WorkerCloneResult(False, reason="worker_branch_invalid",
+                                 output=(check_branch.stdout or "") + (check_branch.stderr or ""))
+    baseline = gitread.rev_parse(canonical, baseline_sha)
+    if baseline is None:
+        return WorkerCloneResult(False, reason="worker_baseline_missing")
+    canonical_git_dir = gitread.git_dir(canonical)
+    if canonical_git_dir is None:
+        return WorkerCloneResult(False, reason="canonical_git_dir_missing")
+    try:
+        os.makedirs(root, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        return WorkerCloneResult(False, reason="worker_root_unavailable", output=str(exc))
+    path = worker_clone_path(root, task_id)
+    if os.path.lexists(path):
+        return WorkerCloneResult(False, reason="worker_path_exists")
+
+    clone_args = ["git", "clone", "--quiet", "--no-hardlinks", "--branch", default_branch,
+                  canonical, path]
+    _record(ops, task_id, "create_worker_clone", "intent",
+            {"path": path, "branch": branch, "baseline": baseline})
+    try:
+        proc = subprocess.run(clone_args, capture_output=True, text=True, env=env,
+                              timeout=gitread.GIT_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _record(ops, task_id, "create_worker_clone", "result",
+                {"returncode": None, "output": str(exc)})
+        return WorkerCloneResult(False, reason="worker_clone_failed", output=str(exc))
+    output = (proc.stdout or "") + (proc.stderr or "")
+    _record(ops, task_id, "create_worker_clone", "result",
+            {"returncode": proc.returncode, "output": output[-2000:]})
+    if proc.returncode != 0:
+        return WorkerCloneResult(False, reason="worker_clone_failed", output=output)
+
+    try:
+        prepared = _mutate(path, "prepare_worker_branch",
+                            ["checkout", "--quiet", "-B", branch, baseline], ops=ops,
+                            task_id=task_id, env=env)
+        if prepared.returncode != 0:
+            return WorkerCloneResult(False, reason="worker_branch_prepare_failed",
+                                     output=(prepared.stdout or "") + (prepared.stderr or ""))
+        for remote in gitread.remotes(path):
+            removed = _mutate(path, "disconnect_worker_remote", ["remote", "remove", remote],
+                              ops=ops, task_id=task_id, env=env)
+            if removed.returncode != 0:
+                return WorkerCloneResult(False, reason="worker_remote_remove_failed",
+                                         output=(removed.stdout or "") + (removed.stderr or ""))
+    except (gitread.GitError, OSError, subprocess.SubprocessError) as exc:
+        return WorkerCloneResult(False, reason="worker_prepare_failed", output=str(exc))
+
+    worker_git_dir = gitread.git_dir(path)
+    worker = WorkerClone(path=os.path.realpath(path), root=root, task_id=task_id, branch=branch,
+                         baseline_sha=baseline, canonical_git_dir=canonical_git_dir,
+                         git_dir=worker_git_dir or "")
+    reason = _worker_clone_safety(worker)
+    if reason is not None:
+        return WorkerCloneResult(False, worker=worker, reason=reason)
+    return WorkerCloneResult(True, worker=worker)
+
+
+def worker_process_stopped(process):
+    """Return ``(True, None)`` only after the detached worker group is gone.
+
+    The launcher starts a new session, making the child pid its process-group id.  If that
+    identity does not still hold we retain the clone.  A surviving group after its leader exits
+    is also retained; it may contain a subagent that still has the clone open.
+    """
+    if not isinstance(process, WorkerProcess):
+        return False, "worker_process_identity_missing"
+    if process.pid <= 0 or process.process_group_id <= 0 or process.pid != process.process_group_id:
+        return False, "worker_process_identity_invalid"
+    try:
+        current_group = os.getpgid(process.pid)
+    except ProcessLookupError:
+        current_group = None
+    except (PermissionError, OSError):
+        return False, "worker_process_identity_unreadable"
+    if current_group is not None:
+        if current_group != process.process_group_id:
+            return False, "worker_process_identity_changed"
+        return False, "worker_process_running"
+    try:
+        os.killpg(process.process_group_id, 0)
+    except ProcessLookupError:
+        return True, None
+    except (PermissionError, OSError):
+        return False, "worker_process_group_unreadable"
+    return False, "worker_process_group_running"
+
+
+def cleanup_worker_clone(worker, process):
+    """Remove only an identity-verified clone whose complete worker group has stopped."""
+    stopped, reason = worker_process_stopped(process)
+    if not stopped:
+        return WorkerCleanupResult(False, reason)
+    reason = _worker_clone_safety(worker)
+    if reason is not None:
+        return WorkerCleanupResult(False, reason)
+    try:
+        shutil.rmtree(worker.path)
+    except OSError as exc:
+        return WorkerCleanupResult(False, "worker_cleanup_failed: %s" % exc)
+    return WorkerCleanupResult(True)
+
+
+def import_worker_branch(repo, worker, process, ops=None, task_id=None, env=None):
+    """Import one stopped, disconnected worker branch into the canonical checkout.
+
+    A worker never receives the canonical checkout's remote, but it can still rewrite its own
+    branch.  Import is therefore deliberately later than process completion and refuses every
+    uncertain identity.  ``git fetch <local-path>`` copies objects without making the worker a
+    persistent remote in the coordinator repository.
+    """
+    stopped, reason = worker_process_stopped(process)
+    if not stopped:
+        return WorkerCloneResult(False, worker=worker, reason=reason)
+    reason = _worker_clone_safety(worker)
+    if reason is not None:
+        return WorkerCloneResult(False, worker=worker, reason=reason)
+    if gitread.branch_exists(repo, worker.branch):
+        return WorkerCloneResult(False, worker=worker, reason="canonical_branch_exists")
+    head = gitread.rev_parse(worker.path, worker.branch)
+    if not head:
+        return WorkerCloneResult(False, worker=worker, reason="worker_branch_missing")
+    if not gitread.is_ancestor(worker.path, worker.baseline_sha, worker.branch):
+        return WorkerCloneResult(False, worker=worker, reason="worker_branch_not_from_baseline")
+    proc = _mutate(repo, "import_worker_branch",
+                   ["fetch", "--quiet", "--no-tags", worker.path,
+                    "%s:refs/heads/%s" % (worker.branch, worker.branch)],
+                   ops=ops, task_id=task_id, env=env)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return WorkerCloneResult(False, worker=worker, reason="worker_import_failed",
+                                 output=output)
+    if gitread.rev_parse(repo, worker.branch) != head:
+        return WorkerCloneResult(False, worker=worker, reason="worker_import_identity_changed")
+    return WorkerCloneResult(True, worker=worker)
+
+
+def rebase_worker_branch(repo, branch, onto, ops=None, task_id=None, env=None):
+    """Rebase an imported worker branch onto the current serialized landing base.
+
+    All triple workers begin from one frozen build baseline.  Later slots must not merge that
+    stale base back over an earlier landing, so the coordinator rebases only after the worker
+    has stopped and its branch has been imported.  A conflict is aborted and left as a named
+    refusal with both branches intact for an operator to inspect.
+    """
+    checkout(repo, branch, ops=ops, task_id=task_id, env=env)
+    proc = _mutate(repo, "rebase_worker_branch", ["rebase", onto], ops=ops,
+                   task_id=task_id, env=env)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode == 0:
+        return MergeResult(True, 0, output, sha=gitread.rev_parse(repo, branch))
+    # An aborted rebase restores the imported branch, so no half-rebased index blocks the next
+    # operator action.  The original worker clone is retained independently by the coordinator.
+    _mutate(repo, "rebase_abort", ["rebase", "--abort"], ops=ops, task_id=task_id, env=env)
+    return MergeResult(False, proc.returncode, output, conflict=True)
+
+
+# Remote triple ownership ---------------------------------------------------
+#
+# The local StateStore lease tells a second process on this machine to wait.  It cannot tell a
+# coordinator in another clone or on another machine to wait, and GitHub Projects has no
+# compare-and-swap mutation for a card.  These helpers use the Git server's all-or-nothing ref
+# update instead.  Do not add a clock based expiry here: an old laptop with a wrong clock must
+# never decide that it may take over a still running coordinator.
+
+
+def _identity_text(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("%s must be a non-empty canonical node id" % label)
+    return value.strip()
+
+
+def canonical_claim_key(repository_node_id, project_node_id):
+    """Return an opaque, deterministic namespace for a GitHub repo plus ProjectV2.
+
+    Repository names, URLs, and project numbers can be renamed or reused.  GitHub node ids are
+    immutable, so this hash is both safe in a Git ref component and stable across those display
+    changes.  Length prefixes make the encoding unambiguous without relying on a delimiter that
+    might occur in a node id.
+    """
+    repository_node_id = _identity_text(repository_node_id, "repository_node_id")
+    project_node_id = _identity_text(project_node_id, "project_node_id")
+    payload = "%d:%s%d:%s" % (len(repository_node_id), repository_node_id,
+                               len(project_node_id), project_node_id)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ref_component(value, label):
+    """A node id cannot be trusted as a ref component, so use its full digest."""
+    value = _identity_text(value, label)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def card_claim_ref(claim_key, project_item_node_id):
+    """The deterministic remote claim ref for one immutable ProjectV2 item."""
+    if not isinstance(claim_key, str) or len(claim_key) != 64:
+        raise ValueError("claim_key must be the canonical claim key")
+    return "%s/%s/cards/%s" % (contracts.REMOTE_CLAIM_REF_PREFIX, claim_key,
+                                 _ref_component(project_item_node_id, "project_item_node_id"))
+
+
+def integration_lease_ref(claim_key):
+    """The deterministic repository integration fence for one GitHub Project namespace."""
+    if not isinstance(claim_key, str) or len(claim_key) != 64:
+        raise ValueError("claim_key must be the canonical claim key")
+    return "%s/%s" % (contracts.REMOTE_INTEGRATION_REF_PREFIX, claim_key)
+
+
+def _remote_refs(repo, refs, remote="origin", env=None):
+    """Read only the exact requested remote refs, returning {ref: object-id}.
+
+    `ls-remote --refs` does not consult a stale local tracking ref.  The caller still attaches
+    force-with-lease expectations to the subsequent push because another coordinator can race
+    this read; this read makes the normal collision explanation precise.
+    """
+    refs = tuple(refs)
+    proc = gitread.run(repo, ["ls-remote", "--refs", remote] + list(refs), check=False, env=env)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return None, proc.returncode, output
+    found = {}
+    wanted = set(refs)
+    for line in (proc.stdout or "").splitlines():
+        oid, separator, ref = line.partition("\t")
+        if separator and ref in wanted and oid:
+            found[ref] = oid
+    return found, 0, output
+
+
+def _token_commit(repo, purpose, env=None, nonce=None):
+    """Create an unreachable, unique, non-secret commit to use as a fencing token.
+
+    This changes only the local object database, not HEAD, the index, or any branch.  The random
+    nonce prevents two otherwise identical `commit-tree` invocations in one second from sharing
+    an object id.  It is explicitly an ownership label, not authentication material.
+    """
+    if not isinstance(purpose, str) or not purpose.strip() or "\n" in purpose:
+        raise ValueError("token purpose must be one non-empty line")
+    tree = gitread.run(repo, ["rev-parse", "HEAD^{tree}"], check=False, env=env)
+    if tree.returncode != 0 or not (tree.stdout or "").strip():
+        return None, (tree.stdout or "") + (tree.stderr or "")
+    parent = gitread.run(repo, ["rev-parse", "HEAD"], check=False, env=env)
+    if parent.returncode != 0 or not (parent.stdout or "").strip():
+        return None, (parent.stdout or "") + (parent.stderr or "")
+    # uuid4 is public randomness.  The remote ref's object id is the durable fencing value; no
+    # credential is generated, persisted, or required to release a lease.
+    nonce = nonce or uuid.uuid4().hex
+    message = "relay triple lease\npurpose: %s\nnonce: %s\n" % (purpose.strip(), nonce)
+    proc = gitread.run(repo, ["commit-tree", (tree.stdout or "").strip(), "-p",
+                              (parent.stdout or "").strip(), "-m", message],
+                       check=False, env=env)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return None, output
+    token = (proc.stdout or "").strip()
+    return token or None, output
+
+
+def _remote_failure_reason(output):
+    folded = output.lower()
+    if "atomic push" in folded and ("not support" in folded or "not available" in folded):
+        return "atomic_push_unsupported"
+    if "does not support --atomic" in folded or "atomic pushes are not supported" in folded:
+        return "atomic_push_unsupported"
+    if "remote rejected" in folded or "hook declined" in folded or "deny updating" in folded:
+        return "custom_ref_rejected"
+    if "stale info" in folded or "force-with-lease" in folded or "failed to push some refs" in folded:
+        return "lease_conflict"
+    return "remote_push_failed"
+
+
+def _new_remote_leases(repo, card_refs, integration_ref_name, env=None):
+    leases = []
+    for ref in card_refs:
+        token, output = _token_commit(repo, "card claim %s" % ref, env=env)
+        if token is None:
+            return None, output
+        leases.append(RemoteLease(ref, token))
+    token, output = _token_commit(repo, "integration lease %s" % integration_ref_name, env=env)
+    if token is None:
+        return None, output
+    return (tuple(leases), RemoteLease(integration_ref_name, token)), ""
+
+
+def acquire_remote_leases(repo, repository_node_id, project_node_id, project_item_node_ids,
+                          remote="origin", ops=None, task_id=None, env=None):
+    """Atomically create every card claim and the integration lease, or create none.
+
+    The exact absence read makes a pre-existing holder understandable.  The empty
+    force-with-lease expectations make that same absence a server-enforced condition during the
+    atomic push, which closes the race between the read and the write.
+    """
+    item_ids = tuple(project_item_node_ids)
+    if len(item_ids) != 3:
+        raise ValueError("triple acquisition requires exactly three ProjectV2 item node ids")
+    if len(set(item_ids)) != len(item_ids):
+        raise ValueError("triple acquisition requires distinct ProjectV2 item node ids")
+    claim_key = canonical_claim_key(repository_node_id, project_node_id)
+    card_refs = tuple(card_claim_ref(claim_key, item) for item in item_ids)
+    integration_ref_name = integration_lease_ref(claim_key)
+    refs = card_refs + (integration_ref_name,)
+    observed, returncode, output = _remote_refs(repo, refs, remote=remote, env=env)
+    if observed is None:
+        return RemoteLeaseResult(False, "remote_read_failed", output, returncode,
+                                 claim_key=claim_key)
+    if observed:
+        reason = "integration_lease_held" if integration_ref_name in observed else "card_claim_held"
+        return RemoteLeaseResult(False, reason, output, returncode, claim_key=claim_key,
+                                 observed=observed)
+    made, output = _new_remote_leases(repo, card_refs, integration_ref_name, env=env)
+    if made is None:
+        return RemoteLeaseResult(False, "token_creation_failed", output, claim_key=claim_key)
+    card_leases, integration = made
+    # A single push transaction gets no partial success.  The `ref:` form means the ref must
+    # still be absent; Git rejects the whole batch if another coordinator creates any one ref.
+    args = ["push", "--atomic"]
+    args.extend("--force-with-lease=%s:" % ref for ref in refs)
+    args.append(remote)
+    args.extend("%s:%s" % (lease.token, lease.ref) for lease in card_leases + (integration,))
+    proc = _mutate(repo, "acquire_remote_leases", args, ops=ops, task_id=task_id, env=env,
+                   timeout=push_timeout_for())
+    pushed = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return RemoteLeaseResult(False, _remote_failure_reason(pushed), pushed, proc.returncode,
+                                 claim_key=claim_key, observed=observed)
+    return RemoteLeaseResult(True, output=pushed, returncode=proc.returncode, claim_key=claim_key,
+                             card_leases=card_leases, integration_lease=integration,
+                             observed=observed)
+
+
+def renew_integration_lease_and_push(repo, default_branch, expected_default_oid,
+                                     integration_lease, remote="origin", ops=None,
+                                     task_id=None, env=None, timeout=None):
+    """Atomically push a default-branch change and rotate its exact integration fence.
+
+    A caller must provide the remote default object id it based the merge or Closeout on and the
+    current integration token.  Both are checked before and during the push.  A missing or
+    replaced token therefore blocks landing even if the local StateStore lease still looks live.
+    """
+    if not isinstance(integration_lease, RemoteLease):
+        raise ValueError("integration_lease must be a RemoteLease")
+    default_ref = "refs/heads/%s" % default_branch
+    refs = (default_ref, integration_lease.ref)
+    observed, returncode, output = _remote_refs(repo, refs, remote=remote, env=env)
+    if observed is None:
+        return RemoteLeaseResult(False, "remote_read_failed", output, returncode,
+                                 integration_lease=integration_lease)
+    if observed.get(default_ref) != expected_default_oid:
+        return RemoteLeaseResult(False, "default_branch_advanced", output, returncode,
+                                 integration_lease=integration_lease, observed=observed)
+    if observed.get(integration_lease.ref) != integration_lease.token:
+        return RemoteLeaseResult(False, "integration_lease_lost", output, returncode,
+                                 integration_lease=integration_lease, observed=observed)
+    next_token, output = _token_commit(repo, "integration renewal %s" % integration_lease.ref,
+                                       env=env)
+    if next_token is None:
+        return RemoteLeaseResult(False, "token_creation_failed", output,
+                                 integration_lease=integration_lease, observed=observed)
+    next_lease = RemoteLease(integration_lease.ref, next_token)
+    local_default = gitread.rev_parse(repo, default_branch)
+    if local_default is None:
+        return RemoteLeaseResult(False, "local_default_missing", integration_lease=integration_lease,
+                                 observed=observed)
+    args = ["push", "--atomic",
+            "--force-with-lease=%s:%s" % (default_ref, expected_default_oid),
+            "--force-with-lease=%s:%s" % (integration_lease.ref, integration_lease.token),
+            remote,
+            "%s:%s" % (local_default, default_ref),
+            "%s:%s" % (next_lease.token, next_lease.ref)]
+    proc = _mutate(repo, "renew_integration_lease_and_push", args, ops=ops, task_id=task_id,
+                   env=env, timeout=timeout or push_timeout_for())
+    pushed = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return RemoteLeaseResult(False, _remote_failure_reason(pushed), pushed, proc.returncode,
+                                 integration_lease=integration_lease, observed=observed)
+    return RemoteLeaseResult(True, output=pushed, returncode=proc.returncode,
+                             integration_lease=next_lease, observed=observed)
+
+
+def release_remote_leases(repo, leases, remote="origin", ops=None, task_id=None, env=None):
+    """Delete only refs that still equal these exact public fencing tokens.
+
+    This is used for normal release and for an explicit operator break after the operator has
+    independently established that the old coordinator is dead.  It intentionally has no
+    timestamp takeover path and cannot erase a successor token.
+    """
+    leases = tuple(leases)
+    if not leases or any(not isinstance(lease, RemoteLease) for lease in leases):
+        raise ValueError("leases must be one or more RemoteLease values")
+    refs = tuple(lease.ref for lease in leases)
+    if len(set(refs)) != len(refs):
+        raise ValueError("leases must name distinct refs")
+    observed, returncode, output = _remote_refs(repo, refs, remote=remote, env=env)
+    if observed is None:
+        return RemoteLeaseResult(False, "remote_read_failed", output, returncode, observed={})
+    mismatched = {lease.ref: observed.get(lease.ref) for lease in leases
+                  if observed.get(lease.ref) != lease.token}
+    if mismatched:
+        return RemoteLeaseResult(False, "lease_token_mismatch", output, returncode,
+                                 observed=mismatched)
+    args = ["push", "--atomic"]
+    args.extend("--force-with-lease=%s:%s" % (lease.ref, lease.token) for lease in leases)
+    args.append(remote)
+    args.extend(":%s" % lease.ref for lease in leases)
+    proc = _mutate(repo, "release_remote_leases", args, ops=ops, task_id=task_id, env=env,
+                   timeout=push_timeout_for())
+    pushed = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return RemoteLeaseResult(False, _remote_failure_reason(pushed), pushed, proc.returncode,
+                                 observed=observed)
+    return RemoteLeaseResult(True, output=pushed, returncode=proc.returncode, observed=observed)
+
+
+def break_remote_leases(repo, leases, remote="origin", ops=None, task_id=None, env=None):
+    """The explicit operator-break primitive; aliases exact-token release by design."""
+    return release_remote_leases(repo, leases, remote=remote, ops=ops, task_id=task_id, env=env)
 
 
 def mirror_push(repo, mirror, ops=None, task_id=None, env=None, timeout=None):

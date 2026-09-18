@@ -395,8 +395,10 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
             return launch.LaunchResult(session_id="s1", exit_code=0,
                                        transcript_path="/nonexistent.jsonl", log_path=log_path)
 
-        def fake_classify(transcript_path, launch_result, write_tool_patterns=None, backend=None):
+        def fake_classify(transcript_path, launch_result, write_tool_patterns=None, backend=None,
+                          review_required=True):
             seen["classify_backend"] = backend
+            seen["review_required"] = review_required
             return {"findings": [], "last_message_tail": contracts.CLOSEOUT_SKIPPED_LINE,
                     "last_message": contracts.CLOSEOUT_SKIPPED_LINE}
 
@@ -417,6 +419,7 @@ class OneBackendValueReachesEveryConsumer(CloseoutCase):
             seen = self.go_spied(backend)
             self.assertEqual(seen["task_backend"], backend)
             self.assertEqual(seen["classify_backend"], backend)
+            self.assertFalse(seen["review_required"])
             self.assertIn(contracts.CLOSEOUT_SKIPPED_LINE, seen["brief"])
 
     def test_an_explicit_claude_backend_reaches_every_consumer(self):

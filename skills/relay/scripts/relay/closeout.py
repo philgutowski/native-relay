@@ -278,7 +278,8 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
     # launched on one CLI whose evidence is normalized as another decodes nothing, so `parse()`
     # sees no terminal line and every run appends a CLOSEOUT_UNFINISHED finding.
     closeout_digest = classify.classify(launch_result.transcript_path, launch_result,
-                                        adapter.write_tool_patterns(), backend=backend)
+                                        adapter.write_tool_patterns(), backend=backend,
+                                        review_required=False)
     findings = [finding for finding in closeout_digest.get("findings") or []
                 if finding.get("class") != contracts.HALT_NO_ENVELOPE]
     result = RESULT_UNFINISHED if launch_result.timed_out else parse(closeout_digest.get("last_message_tail"))

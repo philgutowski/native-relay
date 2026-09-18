@@ -66,14 +66,25 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 
 ## Backends
 
-Native mode runs on `claude` and `grok`. The review step is the backend's built in skill,
-`/code-review` on Claude and `/review` on grok. Codex has no verified equivalent reachable from
-a headless run, so `validate` refuses a task naming `codex` before anything launches, with an
-error that names the missing step. Codex's launch seam stays in the runner, pinned against the
-CLI version it was observed on, so that refusal can lift once a review step is verified live. A
-manifest written for `compound-relay` that names Codex is refused with that sentence rather than
-as an unknown name. Grok's skip is undetectable: the digest lists `review_skipped` as not
-checked.
+Native mode runs on `claude`, `grok`, and `codex`. The review step is `/code-review` on Claude,
+`/review` on Grok, and the direct foreground command `codex exec review --base <branch>` on
+Codex. Relay accepts the Codex step only when its transcript records the exact argv, a zero exit
+status, and retained review output. Grok's skip is undetectable: the digest lists
+`review_skipped` as not checked.
+
+## Triple GitHub Projects runs
+
+Set `[execution] mode = "triple"` to run exactly three independent GitHub Projects cards from one
+`relay run` command, with one explicit task each for Claude, Grok, and Codex. Relay atomically
+claims the three immutable ProjectV2 items and a repository integration fence, launches each
+backend in a disconnected independent clone, then imports, gates, merges, pushes, verifies, and
+closes out the results in manifest order. A normal manifest remains serial.
+
+Triple mode requires `tracker.adapter = "github"`, `shipping.mode = "local_merge"`,
+`shipping.push = true`, three distinct nonexcluded task ids, and each backend exactly once. The
+Git host must permit atomic pushes of Relay's custom claim refs. Claims never expire by clock;
+after a crashed coordinator, inspect the retained state and worker evidence. Relay deliberately
+does not reclaim a remote claim automatically.
 
 Jira pairs with `claude` and `grok`. Both write the card through Atlassian MCP, not through
 `JIRA_API_TOKEN` (that token is for the runner's reads, and is scrubbed from every child). Grok

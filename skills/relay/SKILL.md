@@ -169,6 +169,10 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    Write `[closeout] docs_root` when the project keeps its documentation somewhere other than
    `docs/`; the closeout writes a learning under `<docs_root>/solutions/` and may commit only
    inside the docs root, `CONCEPTS.md`, the markdown tracker file, and `closeout.allowed_paths`.
+   For a simultaneous three-card GitHub Projects run, add `[execution] mode = "triple"`; require
+   exactly three independent, nonexcluded cards and assign `claude`, `grok`, and `codex` once
+   each. It requires pushed local-merge shipping and an origin that accepts atomic Relay claim
+   refs. Relay creates isolated disconnected worker clones and serializes landing itself.
 
 The examples under `docs/examples/` are the three shapes, one per adapter.
 
@@ -339,7 +343,6 @@ never started.
 | Error text | What it means | What the operator does |
 |---|---|---|
 | `backend <name> binary <binary> is missing from PATH` | that backend's CLI is not installed, or not on `PATH` | install the backend's CLI and put it on `PATH` |
-| `tasks[i] (<id>) names backend <name>, which has no verified native review step, see README` | the manifest names `codex` | set the Task's backend to `claude` or `grok`, with a model that backend serves, and remove the `reason` if it no longer differs from the default |
 | `tracker.adapter jira is incompatible with backend <name>` | the Task names Codex on a Jira tracker | set that Task's backend to `claude` or `grok` |
 | `atlassian MCP handshake failed on grok` / `needs the atlassian MCP server connected` | grok cannot write the Jira card yet | `grok mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2`, complete the browser login, then `validate` again |
 

@@ -133,6 +133,10 @@ class StateStore:
             "terminal": None,
             "git_ops": [],
             "audit": None,
+            # Triple's cross-machine ownership is recorded only after the remote atomic push
+            # succeeds.  Object ids are public fencing tokens, never credentials, and there is
+            # intentionally no local expiry timestamp that could authorize a takeover.
+            "remote_leases": None,
         }
 
     def read(self):
@@ -448,6 +452,72 @@ class StateStore:
     def lease(self):
         state = self.read()
         return (state or {}).get("lease")
+
+    # Remote triple ownership.  This is deliberately separate from the expiring local process
+    # lease above: a remote Git ref survives a crashed coordinator until an explicit exact-token
+    # break, whereas the local lease is only a same-machine liveness convenience.
+    def write_remote_leases(self, claim_key, card_leases, integration_lease):
+        """Persist successful remote ownership without adding a client-clock expiry.
+
+        `card_leases` is an iterable of mapping-like values with `ref` and `token` fields.  The
+        run coordinator calls this only after `gitwrite.acquire_remote_leases()` reports success,
+        so a failed atomic push cannot leave a misleading local claim record behind.
+        """
+        def plain(lease):
+            if isinstance(lease, dict):
+                ref, token = lease.get("ref"), lease.get("token")
+            else:
+                ref, token = getattr(lease, "ref", None), getattr(lease, "token", None)
+            if not isinstance(ref, str) or not isinstance(token, str) or not ref or not token:
+                raise ValueError("remote leases require non-empty ref and token strings")
+            return {"ref": ref, "token": token}
+
+        if not isinstance(claim_key, str) or not claim_key:
+            raise ValueError("claim_key must be a non-empty string")
+        cards = [plain(lease) for lease in card_leases]
+        if len(cards) != 3 or len({card["ref"] for card in cards}) != 3:
+            raise ValueError("triple state requires exactly three distinct card leases")
+        integration = plain(integration_lease)
+        if integration["ref"] in {card["ref"] for card in cards}:
+            raise ValueError("integration lease must not reuse a card claim ref")
+        record = {"claim_key": claim_key, "card_leases": cards,
+                  "integration_lease": integration}
+        self._mutate(lambda state: state.update(remote_leases=record))
+        return self.remote_leases()
+
+    def update_integration_lease(self, integration_lease):
+        """Rotate only the integration token after its guarded atomic default push."""
+        if isinstance(integration_lease, dict):
+            ref, token = integration_lease.get("ref"), integration_lease.get("token")
+        else:
+            ref, token = getattr(integration_lease, "ref", None), getattr(integration_lease, "token", None)
+        if not isinstance(ref, str) or not isinstance(token, str) or not ref or not token:
+            raise ValueError("integration lease requires non-empty ref and token strings")
+
+        def fn(state):
+            remote = state.get("remote_leases")
+            if not isinstance(remote, dict):
+                raise ValueError("cannot rotate an integration lease that was not persisted")
+            remote["integration_lease"] = {"ref": ref, "token": token}
+
+        self._mutate(fn)
+        return self.remote_leases()
+
+    def remote_leases(self):
+        """A copy of the persisted remote fencing record, or None before acquisition."""
+        remote = (self.read() or {}).get("remote_leases")
+        if not isinstance(remote, dict):
+            return None
+        return json.loads(json.dumps(remote))
+
+    def clear_remote_leases(self):
+        """Forget a successfully released triple fence from this local run record.
+
+        The remote deletion is performed first and checked against exact fencing tokens by
+        ``gitwrite``.  This method only prevents a completed run's state file from looking like
+        it still owns those already deleted public refs.
+        """
+        self._mutate(lambda current: current.update(remote_leases=None))
 
     # Records.
     def validate(self):

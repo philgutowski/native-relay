@@ -150,8 +150,10 @@ class Capability:
     deny_flag: str | None
     enforces_at_launch: bool
     # The built in review skill the native brief names on this backend, or None where no
-    # verified equivalent exists. None is what makes manifest.validate refuse the backend.
+    # verified equivalent exists. A direct review argv is the alternative evidence contract for
+    # CLIs such as Codex that expose review as a subcommand rather than a Skill event.
     review_skill: str | None
+    review_argv: tuple
     evidence: str
     credential_prefixes: tuple
     credential_file: str
@@ -178,15 +180,18 @@ class Capability:
     known_models: tuple = ()
 
 
-def review_command(capability):
+def review_command(capability, default_branch=None):
     """The invocation the native brief's review step names, and the string a REVIEW_SKIPPED
     finding prints, built in one place so the brief and the classifier cannot disagree. None on
     a backend with no review skill: `manifest.validate` refuses such a backend before a real
     process is launched, and the brief renders a self review fallback for it so the launch seam
     stays exercisable by the suite until the refusal lifts."""
-    if not capability.review_skill:
-        return None
-    return "/" + capability.review_skill
+    if capability.review_skill:
+        return "/" + capability.review_skill
+    if capability.review_argv:
+        base = default_branch or "<default branch>"
+        return " ".join(capability.review_argv + ("--base", base))
+    return None
 
 
 # Capability fields that do not come from `contracts.BACKEND_PINS`. Named here so the pins

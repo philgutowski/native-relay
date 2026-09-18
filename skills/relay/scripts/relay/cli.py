@@ -230,11 +230,19 @@ def cmd_run(args, env, out):
         # `--follow` implies `--detach`: a foreground run is already in the foreground, so there
         # would be nothing to follow.
         return _detach(args, manifest, env, out)
-    outcome = run_module.run(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
-                             retry_blocked=args.retry_blocked,
-                             wait_for_lease_seconds=_wait_seconds(args),
-                             stream=lambda line: out.write(line + "\n"),
-                             notifier=notify.build(getattr(args, "notify", False)))
+    run_kwargs = {
+        "adapter": adapter,
+        "home": env.get("HOME"),
+        "base_env": env,
+        "retry_blocked": args.retry_blocked,
+        "wait_for_lease_seconds": _wait_seconds(args),
+        "stream": lambda line: out.write(line + "\n"),
+        "notifier": notify.build(getattr(args, "notify", False)),
+    }
+    # U1's routing seam is intentionally this narrow: U4 supplies the coordinator while the
+    # serial runner and all of its call arguments remain byte-for-byte the established path.
+    runner = run_module.run_triple if manifest.execution.mode == "triple" else run_module.run
+    outcome = runner(manifest, **run_kwargs)
     if outcome.message:
         out.write("%s\n" % outcome.message)
     if outcome.store is not None:

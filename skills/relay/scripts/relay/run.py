@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from . import (adapters, audit, backends, brief, classify, closeout, contracts, gitread,
                gitwrite, launch, manifest as manifest_module, progress, state, summary, verify,
                worktree)
+from .adapters import github as github_adapter
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -214,6 +215,439 @@ def _audit_cards(cfg):
 
 
 LEASE_POLL_SECONDS = 60
+
+
+@dataclass
+class _TripleWorker:
+    """One immutable allocation and the private workspace/process it owns."""
+    task: object
+    card: dict
+    expected_card: dict
+    branch: str
+    baseline_sha: str
+    baseline_comment_id: object
+    worker: object = None
+    brief_text: str | None = None
+    brief_sha: str | None = None
+    launched: object = None
+    digest: dict = field(default_factory=dict)
+    findings: list = field(default_factory=list)
+    collision: dict | None = None
+
+
+def _triple_halt(task_id, halt_class, message, store, env=None):
+    """Write the one safe terminal shape for a batch refusal."""
+    if task_id:
+        store.upsert(task_id, status=contracts.STATUS_HALTED, halt_class=halt_class,
+                     halt_message=message)
+    _write_terminal(store, env or {}, contracts.RUN_HALTED, task_id, halt_class)
+    return RunOutcome(EXIT_HALTED, task_id, halt_class, message, store, store.records())
+
+
+def _triple_release(repo, leases, store, env):
+    """Release every exact remote fence only after the coordinator is done with it."""
+    if not leases:
+        return None
+    result = gitwrite.release_remote_leases(repo, leases, ops=store, env=env)
+    if result.ok:
+        store.clear_remote_leases()
+    return result
+
+
+def _triple_worker_root(store):
+    """State is outside the canonical checkout, so a worker cannot mutate it through git."""
+    return store.path("workers")
+
+
+def _triple_workers_stopped(workers):
+    """Remote claims may be released only after every started worker group is gone."""
+    for item in workers:
+        launched = getattr(item, "launched", None)
+        if (launched is None or not getattr(launched, "pid", None)
+                or not getattr(launched, "process_group_id", None)):
+            # A failed Popen has no child group.  A partial identity is unsafe: retain the
+            # remote claims rather than guessing whether a descendant still owns the clone.
+            if launched is not None and getattr(launched, "pid", None):
+                return False
+            continue
+        process = gitwrite.WorkerProcess(launched.pid, launched.process_group_id)
+        stopped, _reason = gitwrite.worker_process_stopped(process)
+        if not stopped:
+            return False
+    return True
+
+
+def _triple_launch_worker(cfg, item):
+    """Thread target.  launch itself is synchronous; three threads make starts concurrent."""
+    item.launched = launch.launch(
+        cfg.manifest, item.task, item.brief_text,
+        cfg.store.path("logs", item.task.id + ".stdout.log"),
+        cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
+        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream,
+        # A lane losing its own process is not authority to release the coordinator lease:
+        # two sibling lanes may still be running and the remote fence is still held.  Only the
+        # coordinator's finally block releases either lease after all worker groups stop.
+        heartbeat=cfg.store.heartbeat, on_release=None,
+        repo=item.worker.path, **cfg.launch_kwargs)
+    if not item.launched.launch_error:
+        cfg.used_backends.add(item.task.backend)
+
+
+def _triple_classify(cfg, item):
+    """Classify from each worker's own evidence, never from the canonical checkout."""
+    launched = item.launched
+    if launched is None:
+        item.collision = {"kind": "worker", "reason": "worker_not_launched"}
+        return
+    capability = backends.build(item.task.backend).CAPABILITY
+    disallow = (manifest_module.resolved_disallowed(cfg.manifest)
+                if not capability.enforces_at_launch else None)
+    digest = classify.classify(launched.transcript_path, launched,
+                               cfg.adapter.write_tool_patterns(), backend=item.task.backend,
+                               disallow_patterns=disallow,
+                               review_base=cfg.manifest.project.default_branch)
+    digest["task_id"] = item.task.id
+    item.digest = digest
+    item.findings = list(digest.get("findings") or [])
+    classify.write_digest(digest, cfg.store.path("digests", item.task.id + ".json"))
+    cfg.store.upsert(item.task.id, session_id=launched.session_id,
+                     transcript_path=launched.transcript_path,
+                     wall_seconds=launched.wall_seconds, active_seconds=launched.active_seconds,
+                     findings=item.findings, binary_path=launched.binary_path, args=launched.args)
+    if launched.launch_error:
+        item.collision = {"kind": "worker", "reason": "launch_error",
+                          "detail": launched.launch_error}
+    elif launched.lease_lost:
+        item.collision = {"kind": "worker", "reason": "local_lease_lost"}
+
+
+def _triple_integrate(cfg, item, integration_lease, expected_remote):
+    """Import, rebase, gate and land one completed worker under the remote integration fence."""
+    if not item.launched or not item.launched.pid or not item.launched.process_group_id:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_UNCLEAN_EXIT,
+            "worker process identity is unavailable for %s" % item.task.id,
+            {"branch": item.branch, "reason": "worker_process_identity_missing"})
+    if not backends.build(item.task.backend).CAPABILITY.enforces_at_launch:
+        allowed = manifest_module.task_allowed_paths(cfg.manifest)
+        if allowed is not None:
+            offenders = gitwrite.task_scope_offenders(item.worker.path, item.baseline_sha,
+                                                       item.branch, allowed)
+            if offenders:
+                return None, expected_remote, _Halt(item.task.id, contracts.HALT_PATH_GATE,
+                    "worker branch touched paths outside its declared bound",
+                    {"branch": item.branch, "paths": ", ".join(offenders)})
+    process = gitwrite.WorkerProcess(item.launched.pid, item.launched.process_group_id)
+    imported = gitwrite.import_worker_branch(cfg.repo, item.worker, process, ops=cfg.store,
+                                              task_id=item.task.id, env=cfg.env)
+    if not imported.ok:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_UNCLEAN_EXIT,
+            "could not safely import %s: %s" % (item.task.id, imported.reason),
+            {"branch": item.branch, "reason": imported.reason})
+    rebased = gitwrite.rebase_worker_branch(cfg.repo, item.branch, cfg.default, ops=cfg.store,
+                                             task_id=item.task.id, env=cfg.env)
+    if not rebased.ok:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+            "could not rebase %s onto the current landing base" % item.task.id,
+            {"branch": item.branch, "merge_output": rebased.output[-2000:]})
+    landing_base = gitread.rev_parse(cfg.repo, cfg.default)
+    tail = gitwrite.local_merge_tail(
+        cfg.repo, item.task.id, cfg.default, landing_base, list(cfg.manifest.gate.command),
+        cfg.store.path("gate", item.task.id + ".log"), ops=cfg.store, env=cfg.env,
+        gate_timeout_seconds=cfg.overrides.get("gate_seconds"),
+        still_ours=cfg.store.heartbeat, branch=item.branch, pushes=False)
+    if not tail.ok:
+        return None, expected_remote, _Halt(item.task.id, tail.halt_class,
+            summary.cause_line(tail.halt_class, tail.evidence), tail.evidence)
+    pushed = gitwrite.renew_integration_lease_and_push(
+        cfg.repo, cfg.default, expected_remote, integration_lease, ops=cfg.store,
+        task_id=item.task.id, env=cfg.env, timeout=cfg.overrides.get("gate_seconds"))
+    if not pushed.ok:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+            "guarded landing push refused for %s: %s" % (item.task.id, pushed.reason),
+            {"branch": cfg.default, "reason": pushed.reason, "push_output": pushed.output[-2000:]})
+    cfg.store.update_integration_lease(pushed.integration_lease)
+    cfg.store.upsert(item.task.id, landing_ref=tail.merge_sha)
+    ctx = _Context(task=item.task, card=item.card, branch=item.branch,
+                   baseline_sha=landing_base, baseline_comment_id=item.baseline_comment_id,
+                   digest=item.digest, launched=item.launched, findings=item.findings, **vars(cfg))
+    closeout_push = {}
+
+    def guarded_closeout_push():
+        result = gitwrite.renew_integration_lease_and_push(
+            cfg.repo, cfg.default, tail.merge_sha, pushed.integration_lease, ops=cfg.store,
+            task_id=item.task.id, env=cfg.env, timeout=cfg.overrides.get("gate_seconds"))
+        if result.ok:
+            closeout_push["lease"] = result.integration_lease
+            cfg.store.update_integration_lease(result.integration_lease)
+        return result
+
+    _run_closeout(ctx, closeout.OUTCOME_LANDED, landing_ref=tail.merge_sha,
+                  commit_range="%s..%s" % (landing_base[:7], (tail.merge_sha or "")[:7]),
+                  gate={"ok": True, "returncode": 0,
+                        "log": cfg.store.path("gate", item.task.id + ".log")},
+                  guarded_push=guarded_closeout_push)
+    final = verify.verify(cfg.manifest, cfg.store.get(item.task.id), cfg.adapter,
+                          scope=verify.SCOPE_FULL, do_fetch=True, env=cfg.env, now=cfg.now)
+    cfg.store.upsert(item.task.id, verify=final.as_dict())
+    if not final.landed:
+        return None, expected_remote, _Halt(item.task.id,
+            final.halt_class or contracts.HALT_PARTIAL_LANDING,
+            "%s did not verify as landed" % item.task.id,
+            {"branch": cfg.default, "checks": final.checks})
+    # A Closeout normally commits documentation or tracker evidence.  If it did not create a
+    # commit, the task landing's token remains current; otherwise guarded_closeout_push rotated it.
+    next_lease = closeout_push.get("lease", pushed.integration_lease)
+    cfg.store.upsert(item.task.id, status=contracts.STATUS_LANDED,
+                     halt_class=contracts.HALT_LANDED, branch=None)
+    return next_lease, gitread.rev_parse(cfg.repo, cfg.default), None
+
+
+def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
+    """Preserve a stopped blocked branch and run its tracker-only Closeout under the fence."""
+    if not item.launched or not item.launched.pid or not item.launched.process_group_id:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_UNCLEAN_EXIT,
+            "worker process identity is unavailable for %s" % item.task.id,
+            {"branch": item.branch, "reason": "worker_process_identity_missing"})
+    process = gitwrite.WorkerProcess(item.launched.pid, item.launched.process_group_id)
+    imported = gitwrite.import_worker_branch(cfg.repo, item.worker, process, ops=cfg.store,
+                                              task_id=item.task.id, env=cfg.env)
+    if not imported.ok:
+        return None, expected_remote, _Halt(item.task.id, contracts.HALT_UNCLEAN_EXIT,
+            "could not preserve blocked worker %s: %s" % (item.task.id, imported.reason),
+            {"branch": item.branch, "reason": imported.reason})
+    stranded = gitwrite.blocked_path(cfg.repo, cfg.default, item.branch, ops=cfg.store,
+                                     task_id=item.task.id, env=cfg.env)
+    ctx = _Context(task=item.task, card=item.card, branch=item.branch,
+                   baseline_sha=item.baseline_sha, baseline_comment_id=item.baseline_comment_id,
+                   digest=item.digest, launched=item.launched, findings=item.findings, **vars(cfg))
+    pushed = {}
+
+    def guarded_closeout_push():
+        result = gitwrite.renew_integration_lease_and_push(
+            cfg.repo, cfg.default, expected_remote, integration_lease, ops=cfg.store,
+            task_id=item.task.id, env=cfg.env, timeout=cfg.overrides.get("gate_seconds"))
+        if result.ok:
+            pushed["lease"] = result.integration_lease
+            cfg.store.update_integration_lease(result.integration_lease)
+        return result
+
+    return_to = closeout.return_to_for(cfg.manifest, cfg.store.get(item.task.id) or {})
+    _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"],
+                  return_to=return_to, guarded_push=guarded_closeout_push)
+    finding = closeout.confirm_blocked_comment(cfg.adapter, item.task.id, item.baseline_comment_id)
+    if finding:
+        item.findings.append(finding)
+    if return_to:
+        finding = closeout.confirm_card_returned(cfg.adapter, cfg.manifest, item.task.id, return_to)
+        if finding:
+            item.findings.append(finding)
+    cfg.store.upsert(item.task.id, status=contracts.STATUS_BLOCKED,
+                     halt_class=item.digest.get("halt_class") or contracts.HALT_BLOCKED_ENVELOPE,
+                     branch=stranded["branch"], findings=item.findings)
+    return pushed.get("lease", integration_lease), gitread.rev_parse(cfg.repo, cfg.default), None
+
+
+def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
+               retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
+               notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
+               sleep=time.sleep, clock=time.monotonic):
+    """Run exactly three declared cards concurrently, then integrate them in manifest order.
+
+    This is intentionally a coordinator rather than a parallel version of ``run``: the workers
+    never share a Git directory and never receive a remote.  GitHub is read before and after the
+    atomic remote claim; all subsequent repository writes are serial and atomically rotate the
+    remote integration token.  A refusal leaves evidence and branches in place instead of trying
+    a best-effort cleanup that could erase an active worker's work.
+    """
+    if manifest.execution.mode != "triple":
+        return run(manifest, adapter=adapter, store=store, home=home, base_env=base_env,
+                   stream=stream, retry_blocked=retry_blocked,
+                   timeout_overrides=timeout_overrides, launch_kwargs=launch_kwargs, now=now,
+                   notifier=notifier, wait_for_lease_seconds=wait_for_lease_seconds,
+                   lease_poll_seconds=lease_poll_seconds, sleep=sleep, clock=clock)
+    repo, default = manifest.project.repo, verify.default_branch_of(manifest)
+    overrides, launch_kwargs = timeout_overrides or {}, dict(launch_kwargs or {})
+    env = launch.child_env(manifest, base_env, home)
+    try:
+        adapter = adapter or adapters.build(manifest, env=base_env)
+    except adapters.ConfigurationError as exc:
+        return RunOutcome(EXIT_CONFIG, message=str(exc))
+    store = store or state.StateStore(manifest.path, repo, home=home)
+    acquired = _acquire(store, stream, wait_for_lease_seconds, lease_poll_seconds, sleep, clock)
+    if acquired.code == state.LOCKED:
+        return RunOutcome(EXIT_LEASE, message="another runner holds the lease")
+    cfg = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
+               retry_blocked, overrides, launch_kwargs, now,
+               tuple(manifest_module.completed_allowed_paths(manifest)))
+    leases = ()
+    workers = ()
+    wrote_terminal = False
+    try:
+        # The pre-read is retained as durable evidence, but only the exact re-read after the
+        # atomic claims authorizes launches.  A client-side card write cannot race past a ref CAS.
+        before = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        if before["reason"]:
+            return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, before["reason"], store)
+        snapshot = before["snapshot"]
+        baseline = gitread.rev_parse(repo, default)
+        remote_baseline = gitread.rev_parse(repo, "origin/" + default)
+        if not baseline or baseline != remote_baseline:
+            return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED,
+                               "canonical default is not exactly at origin/%s" % default, store)
+        for task in manifest.tasks:
+            preflight = gitwrite.preflight(repo, default,
+                                            gitwrite.task_branch_for(task.id, manifest.project.branch_prefix),
+                                            env=env, pushes=True)
+            if not preflight.ok:
+                return _triple_halt(task.id, contracts.HALT_UNCLEAN_EXIT,
+                                   "triple preflight refused on %s" % preflight.failed, store)
+        claimed = gitwrite.acquire_remote_leases(
+            repo, snapshot["repository_id"], snapshot["project_id"],
+            [card["item_id"] for card in snapshot["cards"]], ops=store, env=env)
+        if not claimed.ok:
+            return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED,
+                               "triple remote claim refused: %s" % claimed.reason, store)
+        leases = claimed.card_leases + (claimed.integration_lease,)
+        store.write_remote_leases(claimed.claim_key, claimed.card_leases, claimed.integration_lease)
+        after = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        if after["reason"]:
+            return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, after["reason"], store)
+        for expected, observed in zip(snapshot["cards"], after["snapshot"]["cards"]):
+            collision = github_adapter.collision_evidence(expected, observed)
+            if collision:
+                return _triple_halt(expected["id"], contracts.HALT_REMOTE_ADVANCED,
+                                   "board changed while triple claims were acquired", store)
+
+        workers = []
+        for task, card in zip(manifest.tasks, snapshot["cards"]):
+            branch = gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
+            comments = card.get("comments") or []
+            item = _TripleWorker(task, dict(card, comments=comments), card, branch, baseline,
+                                 comments[-1]["id"] if comments else None)
+            item.brief_text = brief.render(manifest, task, item.card, branch=branch)
+            hits = brief.scan(item.card, item.brief_text)
+            if hits:
+                return _triple_halt(task.id, contracts.HALT_UNCLEAN_EXIT,
+                                   "triple brief refused: %s" % brief.exclusion_reason(hits), store)
+            _path, item.brief_sha = brief.write(store, task.id, item.brief_text)
+            made = gitwrite.create_worker_clone(repo, _triple_worker_root(store), task.id, branch,
+                                                 baseline, default, ops=store, env=env)
+            if not made.ok:
+                return _triple_halt(task.id, contracts.HALT_UNCLEAN_EXIT,
+                                   "could not create isolated worker: %s" % made.reason, store)
+            item.worker = made.worker
+            capability = backends.build(task.backend).CAPABILITY
+            store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline,
+                         baseline_tracker_status=card.get("status"),
+                         baseline_comment_id=item.baseline_comment_id, branch=branch,
+                         brief_sha256=item.brief_sha, findings=[], backend=task.backend,
+                         model=task.model, halt_class=None,
+                         unenforced_restrictions=(_unenforced_scalar(manifest, capability)
+                                                  if not capability.enforces_at_launch else None))
+            workers.append(item)
+
+        threads = [threading.Thread(target=_triple_launch_worker, args=(cfg, item), daemon=True)
+                   for item in workers]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        for item in workers:
+            _triple_classify(cfg, item)
+            if item.collision:
+                return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,
+                                   "triple worker refused: %s" % item.collision["reason"], store)
+
+        observed = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        if observed["reason"]:
+            return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, observed["reason"], store)
+        integration = claimed.integration_lease
+        expected_remote = remote_baseline
+        for item, card in zip(workers, observed["snapshot"]["cards"]):
+            next_expected, collision = github_adapter.capture_task_delta(
+                item.expected_card, card, manifest.tracker.in_review_status, item.branch)
+            if collision:
+                return _triple_halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                                   "board task transition was not exclusive", store)
+            item.expected_card = next_expected
+            if not item.digest.get("routable"):
+                integration, expected_remote, halt = _triple_close_blocked(
+                    cfg, item, integration, expected_remote)
+                if halt:
+                    return _triple_halt(halt.task_id, halt.halt_class, halt.message, store)
+                post_closeout = github_adapter.read_triple_snapshot(
+                    adapter, [task.id for task in manifest.tasks])
+                if post_closeout["reason"]:
+                    return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,
+                                       post_closeout["reason"], store)
+                blocked_card = post_closeout["snapshot"]["cards"][workers.index(item)]
+                return_to = closeout.return_to_for(manifest, store.get(item.task.id) or {})
+                next_expected, collision = github_adapter.capture_closeout_delta(
+                    item.expected_card, blocked_card, closeout.OUTCOME_BLOCKED,
+                    return_to=return_to)
+                if collision:
+                    return _triple_halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                                       "board Closeout transition was not exclusive", store)
+                item.expected_card = next_expected
+                leases = claimed.card_leases + (integration,)
+                continue
+            integration, expected_remote, halt = _triple_integrate(
+                cfg, item, integration, expected_remote)
+            if halt:
+                return _triple_halt(halt.task_id, halt.halt_class, halt.message, store)
+            post_closeout = github_adapter.read_triple_snapshot(adapter,
+                                                                 [task.id for task in manifest.tasks])
+            if post_closeout["reason"]:
+                return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,
+                                   post_closeout["reason"], store)
+            landed_card = post_closeout["snapshot"]["cards"][workers.index(item)]
+            next_expected, collision = github_adapter.capture_closeout_delta(
+                item.expected_card, landed_card, closeout.OUTCOME_LANDED,
+                landing_ref=store.get(item.task.id).get("landing_ref"))
+            if collision:
+                return _triple_halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                                   "board Closeout transition was not exclusive", store)
+            item.expected_card = next_expected
+            # The card now has durable Closeout proof and the default has passed full verify.
+            # Only at that point may a coordinator delete its imported branch or its private
+            # clone.  A failed cleanup is intentionally non-fatal and leaves inspection data.
+            if gitread.branch_exists(repo, item.branch):
+                gitwrite.delete_branch(repo, item.branch, ops=store, task_id=item.task.id, env=env)
+            gitwrite.cleanup_worker_clone(
+                item.worker,
+                gitwrite.WorkerProcess(item.launched.pid, item.launched.process_group_id))
+            # The next guarded push must delete/rotate the new token, never the token acquired
+            # before any landings.  Card claims never rotate during one batch.
+            leases = claimed.card_leases + (integration,)
+        # A run is not complete until its exact remote claims are gone.  Do this before the
+        # completed terminal record so a deletion race or server refusal cannot be reported as
+        # a successful batch while blocking future coordinators indefinitely.
+        if not _triple_workers_stopped(workers):
+            return _triple_halt(None, contracts.HALT_RUNNER_CRASHED,
+                               "a triple worker process group survived its coordinator", store)
+        released = _triple_release(repo, leases, store, env)
+        if released is None or not released.ok:
+            return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED,
+                               "triple remote lease could not be released", store)
+        leases = ()
+        _write_terminal(store, env, contracts.RUN_COMPLETED, used_backends=cfg.used_backends)
+        wrote_terminal = True
+        return RunOutcome(EXIT_OK, store=store, records=store.records())
+    finally:
+        # A failed release is a collision boundary: retain its state and report the run halt;
+        # never delete local evidence or manufacture a stale-success terminal.
+        if leases and _triple_workers_stopped(workers):
+            released = _triple_release(repo, leases, store, env)
+            if released is not None and not released.ok and stream is not None:
+                stream("triple remote lease retained: %s" % released.reason)
+        elif leases and stream is not None:
+            stream("triple remote lease retained: a worker process group may still be running")
+        if not wrote_terminal and not ((store.read() or {}).get("terminal")):
+            try:
+                _write_terminal(store, env, contracts.RUN_CRASHED)
+            except Exception:
+                pass
+        store.release()
 
 
 def _holder_phrase(acquired):
@@ -825,7 +1259,8 @@ def _complete_task(cfg, begun, launched):
                 if not capability.enforces_at_launch else None)
     digest = classify.classify(launched.transcript_path, launched,
                                adapter.write_tool_patterns(), backend=task.backend,
-                               disallow_patterns=disallow)
+                               disallow_patterns=disallow,
+                               review_base=manifest.project.default_branch)
     digest["task_id"] = task.id
     raw_findings = digest.get("findings")
     if raw_findings is not None:
@@ -1331,7 +1766,7 @@ def _blocked_route(ctx, halt_class):
 
 
 def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None, gate=None,
-                  halt_class=None, cause_line=None, return_to=None):
+                  halt_class=None, cause_line=None, return_to=None, guarded_push=None):
     """Launch the closeout, then bound what it committed before anything is pushed (R53).
 
     The order matters: the check runs against the local head before the push, so a commit
@@ -1384,12 +1819,13 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
     # the landing it records; the scope check above still bounded it.
     if (manifest_module.pushes(ctx.manifest)
             and gitread.rev_parse(ctx.repo, "HEAD") != pre_closeout_head):
-        pushed = gitwrite.push(ctx.repo, ["origin", ctx.default], ops=ctx.store,
-                               task_id=ctx.task.id, env=ctx.env,
-                               timeout=ctx.overrides.get("gate_seconds"))
+        pushed = (guarded_push() if guarded_push is not None else
+                  gitwrite.push(ctx.repo, ["origin", ctx.default], ops=ctx.store,
+                                task_id=ctx.task.id, env=ctx.env,
+                                timeout=ctx.overrides.get("gate_seconds")))
         if not pushed.ok:
             raise _Halt(ctx.task.id, contracts.HALT_GATE_REFUSED,
-                        "the push of the closeout commit was refused for %s" % ctx.task.id,
+                         "the push of the closeout commit was refused for %s" % ctx.task.id,
                         {"branch": ctx.default, "sha": gitread.rev_parse(ctx.repo, "HEAD"),
                          "log": ctx.store.path("gate", ctx.task.id + ".log"),
                          "push_output": pushed.output})
