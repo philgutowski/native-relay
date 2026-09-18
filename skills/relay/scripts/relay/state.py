@@ -133,6 +133,9 @@ class StateStore:
             "terminal": None,
             "git_ops": [],
             "audit": None,
+            # Read-only pre-launch scheduling evidence for dispatch. It contains task ids,
+            # waves, and conflict reasons only; never tracker credentials or card contents.
+            "schedule": None,
             # Triple's cross-machine ownership is recorded only after the remote atomic push
             # succeeds.  Object ids are public fencing tokens, never credentials, and there is
             # intentionally no local expiry timestamp that could authorize a takeover.
@@ -551,6 +554,10 @@ class StateStore:
         # transition rule stamps `started_at` or `ended_at` after `fn` returns, so a copy taken
         # in there would be missing the record's own timings.
         return self.get(task_id)
+
+    def write_schedule(self, schedule):
+        """Persist the frozen, non-secret dispatch schedule before the first worker starts."""
+        self._mutate(lambda state: state.update(schedule=schedule))
 
     def get(self, task_id):
         state = self.read() or {}

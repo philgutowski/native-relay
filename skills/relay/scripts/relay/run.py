@@ -31,8 +31,8 @@ import time
 from dataclasses import dataclass, field
 
 from . import (adapters, audit, backends, brief, classify, closeout, contracts, gitread,
-               gitwrite, launch, manifest as manifest_module, progress, state, summary, verify,
-               worktree)
+               gitwrite, launch, manifest as manifest_module, progress, scheduler, state, summary,
+               verify, worktree)
 from .adapters import github as github_adapter
 from .adapters import jira as jira_adapter
 
@@ -64,6 +64,9 @@ class _Run:
     # Dispatch only. SHA of the default branch after the last landing this coordinator made.
     # The merge tail compares against this so a sibling landing is not a foreign mover.
     expected_default: str | None = None
+    # Dispatch-only frozen, read-only scheduling evidence.  The loop treats every edge as a
+    # full-settlement dependency, not merely a build-order hint.
+    schedule: object = None
 
 
 @dataclass
@@ -920,12 +923,12 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
 def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
              retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
              notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
-             sleep=time.sleep, clock=time.monotonic):
-    """Drive a mixed Manifest with one in flight Task process per native backend.
+             sleep=time.sleep, clock=time.monotonic, policy="serial"):
+    """Drive a manifest under a frozen conservative serial or parallel schedule.
 
-    Builds overlap. Merges stay in Manifest order. Each build runs in a git worktree so the
-    primary checkout stays on the default branch and stays clean. Same leases, halt classes,
-    and closeout as `run`.
+    Parallel is opt-in and still fail-closed: only a scheduler wave with no conflict edge may
+    build together.  Merges stay in manifest order, so hooks, gates, and verification are
+    unchanged.  Each build runs in a distinct git worktree.
     """
     repo = manifest.project.repo
     default = verify.default_branch_of(manifest)
@@ -957,8 +960,36 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
                   len(acquired.reclaimed_ids), contracts.HALT_RUNNER_CRASHED))
 
     allowed_paths = tuple(manifest_module.completed_allowed_paths(manifest))
+    if policy not in scheduler.POLICIES:
+        return RunOutcome(EXIT_CONFIG, message="run policy must be serial or parallel")
+    # This is the entire pre-launch repository/card inspection.  It is intentionally read-only;
+    # a missing card text becomes an uncertainty edge and the ordinary launch read rechecks it.
+    task_text = {}
+    for task in manifest.tasks:
+        try:
+            card = adapter.read(task.id)
+        except Exception:
+            card = None
+        if not isinstance(card, dict) or card.get("skipped"):
+            task_text[task.id] = None
+        else:
+            comments = card.get("comments") or ()
+            task_text[task.id] = "\n".join(str(part) for part in (
+                card.get("title", ""), card.get("description", ""),
+                *(entry.get("body", "") for entry in comments if isinstance(entry, dict))))
+    schedule = scheduler.build_schedule(manifest.tasks, repo, task_text, policy=policy)
+    store.write_schedule({
+        "policy": schedule.policy,
+        "task_ids": list(schedule.task_ids),
+        "waves": [list(wave) for wave in schedule.waves],
+        "edges": [{"first": edge.first, "second": edge.second, "reason": edge.reason}
+                  for edge in schedule.edges],
+    })
+    if stream is not None:
+        for line in scheduler.render(schedule).splitlines():
+            stream(line)
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
-                  retry_blocked, overrides, launch_kwargs, now, allowed_paths)
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule)
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
@@ -1533,8 +1564,7 @@ def _record_halt(cfg, halt, task):
 
 
 def _concurrent_loop(cfg, announce):
-    """One in flight process per backend, merges in Manifest order. Returns a halted
-    RunOutcome or None when the pair completed."""
+    """Launch ready schedule waves, then merge strictly in manifest order."""
     tasks = list(cfg.manifest.tasks)
     n = len(tasks)
     by_id = {task.id: task for task in tasks}
@@ -1542,24 +1572,22 @@ def _concurrent_loop(cfg, announce):
     waiting = {}
     settled = set()
     next_merge = 0
+    predecessors = {task.id: set() for task in tasks}
+    for edge in getattr(cfg.schedule, "edges", ()):
+        predecessors[edge.second].add(edge.first)
 
     def in_play(task_id):
         if task_id in settled or task_id in waiting:
             return True
         return any(flight.begun.task.id == task_id for flight in slots.values())
 
-    def backend_busy(backend):
-        if backend in slots:
-            return True
-        # A finished build waiting its merge turn still owns this backend. Starting the next
-        # one would overlap two grok (or two claude) branches and steal the stub queue.
-        return any(begun.task.backend == backend for begun, _launched in waiting.values())
-
     def fill():
         for task in tasks:
             if in_play(task.id):
                 continue
-            if backend_busy(task.backend):
+            # An edge means the earlier task must have fully settled: its merge, gate, push,
+            # closeout, and verification all complete before the successor reads its baseline.
+            if not predecessors[task.id].issubset(settled):
                 continue
             begun = _begin_task(cfg, task)
             if begun is None:
@@ -1573,7 +1601,7 @@ def _concurrent_loop(cfg, announce):
                             "could not create a worktree for %s: %s" % (task.id, exc),
                             {"task": task.id, "error_type": "worktree", "error": str(exc)[:500]})
             begun.worktree = dest
-            slots[task.backend] = _spawn_flight(cfg, begun, dest)
+            slots[task.id] = _spawn_flight(cfg, begun, dest)
             if cfg.stream is not None:
                 cfg.stream("%s building on %s in a worktree" % (task.id, task.backend))
 

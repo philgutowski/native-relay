@@ -13,6 +13,7 @@ remote and identity checks; pass `check_repo=False` to skip those.
 """
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -165,6 +166,11 @@ class Task:
     # from the Task's own key, else [defaults] backend, else claude, so every Task carries a
     # concrete value and no consumer has to re-resolve it.
     backend: str = DEFAULT_BACKEND
+    # Optional, repository-relative paths the task author expects this Task to change. They are
+    # scheduling evidence, not authority to overlap work: the scheduler still inspects the
+    # repository and serializes uncertainty. Keep this separate from the run-wide
+    # task_allowed_paths landing bound.
+    declared_paths: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -209,6 +215,35 @@ class ValidationResult:
 
 def _tuple(value):
     return tuple(value) if isinstance(value, list) else value
+
+
+def _declared_paths(value):
+    """Return a stable repository-path spelling for a task declaration.
+
+    TOML supplies arrays as lists. Preserve a malformed non-array (and malformed entries) for
+    ``validate`` to name rather than quietly coercing it. Valid relative paths lose redundant
+    ``.`` and slash segments while retaining a trailing slash, because the scheduler needs to
+    distinguish a declared directory prefix from an exact file path.
+
+    Invalid empty, absolute, or escaping entries are deliberately left alone here. Normalizing
+    ``src/../other`` before validation would erase the unsafe ``..`` segment the operator wrote.
+    """
+    if not isinstance(value, list):
+        return value
+    normalized = []
+    for entry in value:
+        if not isinstance(entry, str):
+            normalized.append(entry)
+            continue
+        if (not entry.strip() or entry.startswith("/")
+                or ".." in entry.split("/")):
+            normalized.append(entry)
+            continue
+        clean = posixpath.normpath(entry)
+        if entry.endswith("/") and clean != ".":
+            clean += "/"
+        normalized.append(clean)
+    return tuple(normalized)
 
 
 def load(path):
@@ -327,6 +362,7 @@ def load(path):
             excluded=bool(entry.get("excluded", False)),
             reason=entry.get("reason"),
             backend=str(entry["backend"]) if "backend" in entry else str(default_backend),
+            declared_paths=_declared_paths(entry.get("declared_paths", [])),
         )
         for entry in raw_tasks
     )
@@ -611,6 +647,20 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         seen.add(task.id)
         if task.excluded and not (task.reason or "").strip():
             err("%s (%s) is excluded but carries no reason (R5)" % (label, task.id or "?"))
+        # A declaration is optional for a serial run. When the operator requests parallel
+        # scheduling, missing declarations are absence of evidence: the scheduler adds serial
+        # edges rather than treating an empty list as permission to run concurrently. A supplied
+        # declaration, however, must be usable repository-relative path evidence. Preserve the
+        # task landing bound's directory-prefix grammar without conflating the two contracts.
+        if not _is_string_list(task.declared_paths):
+            err("%s.declared_paths must be an array of repository-relative paths" % label)
+        else:
+            for path in task.declared_paths:
+                if not path.strip():
+                    err("%s.declared_paths must not contain an empty entry" % label)
+                elif path.startswith("/") or ".." in path.split("/"):
+                    err("%s.declared_paths entries are relative to the repository root and "
+                        "must not start with / or contain ..: %r" % (label, path))
         if (manifest.execution.mode != "triple" and task.backend in BACKENDS
                 and task.backend != resolved_default
                 and not (task.reason or "").strip()):

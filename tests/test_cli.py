@@ -405,10 +405,18 @@ reason = "mechanical work, a good use of the grok account"
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("valid pair", out)
 
-    def test_dispatch_of_a_single_backend_manifest_is_refused(self):
-        code, out = self.call("dispatch", self.manifest_path)
-        self.assertEqual(code, cli.EXIT_CONFIG, out)
-        self.assertIn("at least one claude task and one grok task", out)
+    def test_dispatch_accepts_a_single_backend_manifest_with_the_serial_default(self):
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.run_module, "dispatch", return_value=outcome) as dispatch:
+            code, out = self.call("dispatch", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("run policy: serial (noninteractive default)", out)
+        self.assertEqual(dispatch.call_args.kwargs["policy"], "serial")
+
+    def test_dispatch_policy_is_carried_to_the_detached_child(self):
+        argv = cli.detach_command("/x/relay_cli.py", "/x/manifest.toml", False,
+                                 verb="dispatch", policy="parallel")
+        self.assertEqual(argv[-2:], ["--policy", "parallel"])
 
 
 class FollowedRun(CliCase):

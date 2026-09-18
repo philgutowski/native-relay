@@ -85,6 +85,7 @@ class CompleteManifest(ManifestCase):
         self.assertEqual(m.timeouts.task_minutes, 90)
         self.assertEqual(m.tasks[0].id, "T-1")
         self.assertTrue(m.tasks[1].excluded)
+        self.assertEqual(m.tasks[0].declared_paths, ())
         self.assertTrue(m.on_blocked.merge_partial)
         self.assertEqual(m.execution.mode, "serial")
         result = mf.validate(m)
@@ -153,6 +154,38 @@ class CompleteManifest(ManifestCase):
         result = mf.validate(m)
         self.assertTrue(result.ok, result.errors)
         self.assertFalse(any("branch_prefix" in d for d in result.defaults_applied))
+
+
+class DeclaredTaskPaths(ManifestCase):
+    """Per-task path declarations are optional scheduler evidence, never a landing bound."""
+
+    def _with_paths(self, value):
+        return self.base.replace('effort = "high"',
+                                 'effort = "high"\ndeclared_paths = %s' % value, 1)
+
+    def test_declared_paths_are_optional_and_normalized_when_present(self):
+        manifest = self.load(self._with_paths('["./src//relay/", "README.md"]'))
+        self.assertEqual(manifest.tasks[0].declared_paths, ("src/relay/", "README.md"))
+        result = mf.validate(manifest)
+        self.assertTrue(result.ok, result.errors)
+
+    def test_empty_declaration_means_no_scheduler_evidence(self):
+        manifest = self.load(self._with_paths("[]"))
+        self.assertEqual(manifest.tasks[0].declared_paths, ())
+        result = mf.validate(manifest)
+        self.assertTrue(result.ok, result.errors)
+
+    def test_declared_paths_reject_invalid_container_and_entries(self):
+        for value, expected in (
+            ('"src/"', "must be an array"),
+            ("[1]", "must be an array"),
+            ('[""]', "empty entry"),
+            ('["/etc/passwd"]', "must not start with /"),
+            ('["src/../outside"]', "contain .."),
+        ):
+            with self.subTest(value=value):
+                result = mf.validate(self.load(self._with_paths(value)))
+                self.assertTrue(any(expected in error for error in result.errors), result.errors)
 
 
 class TripleExecution(ManifestCase):
