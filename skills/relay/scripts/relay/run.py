@@ -1359,6 +1359,7 @@ def _begin_task(cfg, task):
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
+                 halt_message=None,
                  excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,

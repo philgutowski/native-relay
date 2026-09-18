@@ -865,6 +865,30 @@ class ResumeAfterHalt(RunCase):
         self.assertEqual(records["T-2"]["status"], contracts.STATUS_LANDED)
         self.assertEqual(records["T-3"]["status"], contracts.STATUS_LANDED)
 
+    def test_a_relaunched_landing_drops_the_previous_halt_sentence_from_the_summary(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.queue_entry("success.jsonl", DIRTY_AND_HANG_SH)
+        first = self.go(timeout_overrides={"task_seconds": 2})
+        self.assertEqual(first.exit_code, runner.EXIT_HALTED)
+        self.assertTrue(first.message)
+
+        os.remove(os.path.join(self.repo, "src_half.py"))
+        if gitread.branch_exists(self.repo, "relay/T-2"):
+            _repo.git(self.repo, "branch", "-D", "relay/T-2")
+        self.assertTrue(gitread.is_clean(self.repo))
+
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        second = self.go()
+
+        self.assertEqual(second.exit_code, runner.EXIT_OK, second.message)
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
+        self.assertNotIn(first.message,
+                         summary_module.render(summary_module.build(self.manifest, self.store())))
+
     def test_a_landed_task_is_never_run_again(self):
         self.task_success("T-1")
         self.closeout_landed("T-1")
