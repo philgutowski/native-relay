@@ -367,6 +367,50 @@ class Jira(AdapterCase):
         self.assertEqual([card["item_id"] for card in snapshot["cards"]],
                          ["issue-1", "issue-2", "issue-3"])
 
+    def test_triple_transition_uses_label_and_requires_its_exact_destination_status(self):
+        adapter = self.jira(self.opener())
+        self.assertEqual(adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]}),
+            (True, None))
+        transitions = {"transitions": [{"id": "7", "name": "In Review",
+                                          "to": {"name": "In Progress"}}]}
+        with mock.patch.object(adapter, "_get", return_value=(transitions, None)), \
+             mock.patch.object(adapter, "_post", return_value=({}, None)) as post:
+            ok, reason = adapter._triple_transition({"item_id": "issue-1"}, "In Review", "In Progress")
+        self.assertTrue(ok, reason)
+        self.assertEqual(post.call_args.args[0], "/rest/api/3/issue/issue-1/transitions")
+
+    def test_triple_transition_fails_closed_for_missing_ambiguous_or_mismatched_labels(self):
+        adapter = self.jira(self.opener())
+        adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]})
+        cases = (
+            ([], "has 0 transitions labelled"),
+            ([{"id": "1", "name": "In Review", "to": {"name": "In Progress"}},
+              {"id": "2", "name": "In Review", "to": {"name": "In Progress"}}],
+             "has 2 transitions labelled"),
+            ([{"id": "1", "name": "In Review", "to": {"name": "Ready"}}], "not configured status"),
+        )
+        for transitions, expected in cases:
+            with self.subTest(expected=expected), mock.patch.object(
+                    adapter, "_get", return_value=({"transitions": transitions}, None)), \
+                    mock.patch.object(adapter, "_post") as post:
+                ok, reason = adapter._triple_transition(
+                    {"item_id": "issue-1"}, "In Review", "In Progress")
+            self.assertFalse(ok)
+            self.assertIn(expected, reason)
+            post.assert_not_called()
+
+    def test_triple_write_scope_refuses_unclaimed_issue_ids(self):
+        adapter = self.jira(self.opener())
+        adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]})
+        with mock.patch.object(adapter, "_post") as post:
+            ok, reason = adapter._triple_comment({"item_id": "issue-outside"}, "nope")
+        self.assertFalse(ok)
+        self.assertIn("outside claimed immutable issue ids", reason)
+        post.assert_not_called()
+
 
 class GitHub(AdapterCase):
     def run_for(self, **kwargs):

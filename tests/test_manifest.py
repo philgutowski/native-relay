@@ -217,9 +217,20 @@ class TripleExecution(ManifestCase):
     def test_triple_accepts_jira_but_refuses_other_trackers_or_unpushed_shipping(self):
         jira = self.triple().replace(
             'adapter = "github"\nowner = "relay"\nproject_number = 1\nstatus_field = "Status"',
-            'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "T"')
+            'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "T"\n'
+            'coordinator_rest_writes_authorized = true\nin_review_transition = "In Review"\n'
+            'transition_labels = { "in review" = "In Review", "done" = "Done" }')
         result = self.validated_triple(jira)
         self.assertTrue(result.ok, result.errors)
+        without_ack = jira.replace('coordinator_rest_writes_authorized = true\n', '')
+        result = self.validated_triple(without_ack)
+        self.assertTrue(any("coordinator_rest_writes_authorized" in error for error in result.errors), result.errors)
+        without_label = jira.replace('in_review_transition = "In Review"', '')
+        result = self.validated_triple(without_label)
+        self.assertTrue(any("in_review_transition" in error for error in result.errors), result.errors)
+        without_terminal_label = jira.replace(', "done" = "Done"', '')
+        result = self.validated_triple(without_terminal_label)
+        self.assertTrue(any("terminal status" in error for error in result.errors), result.errors)
         for source, replacement, expected in (
             ('adapter = "github"', 'adapter = "markdown"', 'tracker.adapter github or jira'),
             ('mode = "local_merge"', 'mode = "pr_terminal"', 'shipping.mode local_merge'),

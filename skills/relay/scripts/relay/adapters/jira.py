@@ -104,6 +104,9 @@ class JiraAdapter:
         pair = ("%s:%s" % (email, token)).encode("utf-8")
         self._authorization = "Basic " + base64.b64encode(pair).decode("ascii")
         self._opener = opener or urllib.request.build_opener()
+        # Set only after remote claims and a project-validated re-read.  Triple REST writes may
+        # never address an issue outside this frozen immutable-ID set.
+        self._triple_write_issue_ids = frozenset()
 
     # Transport.
     def _request(self, method, path, params=None, payload=None):
@@ -167,26 +170,51 @@ class JiraAdapter:
             if start >= total:
                 return found, None
 
-    def _transition(self, issue_id, target):
+    def _transition(self, issue_id, label, expected_status):
         payload, reason = self._get("/rest/api/3/issue/%s/transitions" % issue_id)
         if payload is None:
             return False, reason
         hits = [entry for entry in payload.get("transitions") or []
-                if str((entry.get("to") or {}).get("name") or "").lower() == str(target).lower()]
+                if str(entry.get("name") or "") == str(label)]
         if len(hits) != 1:
-            return False, "jira has %d transitions to %r" % (len(hits), target)
+            return False, "jira has %d transitions labelled %r" % (len(hits), label)
+        actual = str((hits[0].get("to") or {}).get("name") or "")
+        if actual != str(expected_status):
+            return False, "jira transition %r targets %r, not configured status %r" % (
+                label, actual, expected_status)
         _payload, reason = self._post("/rest/api/3/issue/%s/transitions" % issue_id,
                                       {"transition": {"id": hits[0].get("id")}})
         return (reason is None), reason
 
-    def _triple_transition(self, card, target):
-        return self._transition(card["item_id"], target)
+    def _authorize_triple_writes(self, snapshot):
+        """Fence REST writes to IDs taken from the claimed, project-validated snapshot."""
+        cards = (snapshot or {}).get("cards") or []
+        issue_ids = [str(card.get("item_id") or "") for card in cards]
+        if len(issue_ids) != 3 or len(set(issue_ids)) != 3 or any(not value for value in issue_ids):
+            return False, "Jira triple write scope needs exactly three immutable issue ids"
+        self._triple_write_issue_ids = frozenset(issue_ids)
+        return True, None
+
+    def _triple_issue_id(self, card):
+        issue_id = str((card or {}).get("item_id") or "")
+        if issue_id not in self._triple_write_issue_ids:
+            return None, "Jira coordinator write refused outside claimed immutable issue ids"
+        return issue_id, None
+
+    def _triple_transition(self, card, label, expected_status):
+        issue_id, reason = self._triple_issue_id(card)
+        if issue_id is None:
+            return False, reason
+        return self._transition(issue_id, label, expected_status)
 
     def _triple_comment(self, card, text):
+        issue_id, reason = self._triple_issue_id(card)
+        if issue_id is None:
+            return False, reason
         payload = {"body": {"type": "doc", "version": 1,
                             "content": [{"type": "paragraph", "content": [
                                 {"type": "text", "text": str(text)}]}]}}
-        _result, reason = self._post("/rest/api/3/issue/%s/comment" % card["item_id"], payload)
+        _result, reason = self._post("/rest/api/3/issue/%s/comment" % issue_id, payload)
         return (reason is None), reason
 
     # Interface.

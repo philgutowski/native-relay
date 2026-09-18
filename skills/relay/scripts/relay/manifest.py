@@ -72,6 +72,12 @@ class Tracker:
     email_env: str
     done_statuses: tuple
     in_review_status: str | None
+    # A Jira workflow transition's visible label can differ from its destination status.
+    in_review_transition: str | None
+    # Triple Jira REST writes are an explicit, opt-in coordinator exception.
+    coordinator_rest_writes_authorized: bool
+    # Destination status -> exact Jira transition label for coordinator terminal/return writes.
+    transition_labels: tuple
 
 
 @dataclass(frozen=True)
@@ -265,6 +271,10 @@ def load(path):
                    if t.get("adapter") == "jira" else str(t.get("email_env", ""))),
         done_statuses=_tuple(t.get("done_statuses", [])),
         in_review_status=t.get("in_review_status"),
+        in_review_transition=t.get("in_review_transition"),
+        coordinator_rest_writes_authorized=t.get("coordinator_rest_writes_authorized", False),
+        transition_labels=tuple((str(status), str(label))
+                                for status, label in (t.get("transition_labels") or {}).items()),
     )
     permissions = Permissions(
         allowed=_tuple(perms.get("allowed", [])),
@@ -653,6 +663,17 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
         if named_backends != required_backends or len(manifest.tasks) != len(named_backends):
             err("execution.mode triple requires each backend exactly once: claude, grok, codex "
                 "(got %s)" % ", ".join(task.backend for task in manifest.tasks))
+        if manifest.tracker.adapter == "jira":
+            if manifest.tracker.coordinator_rest_writes_authorized is not True:
+                err("Jira triple requires tracker.coordinator_rest_writes_authorized = true")
+            if not (manifest.tracker.in_review_transition or "").strip():
+                err("Jira triple requires tracker.in_review_transition; it is the workflow label, not the destination status")
+            labels = dict(manifest.tracker.transition_labels)
+            if labels.get(str(manifest.tracker.in_review_status)) != manifest.tracker.in_review_transition:
+                err("Jira triple requires tracker.transition_labels to map in_review_status to in_review_transition")
+            for status in manifest.tracker.done_statuses:
+                if not labels.get(str(status), "").strip():
+                    err("Jira triple requires tracker.transition_labels[%r] for terminal status" % status)
 
     # Parent R19. Any Task on a backend that cannot refuse tools at launch, including an
     # excluded one, requires the operator's sentence and a set Task path bound. Schema only.

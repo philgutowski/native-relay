@@ -264,9 +264,12 @@ def _triple_jira_start(cfg, tracker, expected):
     """Move claimed Jira cards before workers exist, checking each narrow write immediately."""
     cards = list(expected)
     for index, card in enumerate(cards):
-        ok, reason = cfg.adapter._triple_transition(card, cfg.manifest.tracker.in_review_status)
+        ok, reason = cfg.adapter._triple_transition(
+            card, cfg.manifest.tracker.in_review_transition,
+            cfg.manifest.tracker.in_review_status)
         if not ok:
-            return None, "could not transition %s to In Review: %s" % (card["id"], reason)
+            return None, "could not transition %s using Jira workflow label %r: %s" % (
+                card["id"], cfg.manifest.tracker.in_review_transition, reason)
         observed = tracker.read_triple_snapshot(cfg.adapter, [task.id for task in cfg.manifest.tasks])
         if observed["reason"]:
             return None, observed["reason"]
@@ -279,6 +282,14 @@ def _triple_jira_start(cfg, tracker, expected):
                 return None, "Jira changed while coordinator transitioned %s" % card["id"]
         cards = actual
     return cards, None
+
+
+def _triple_jira_label(manifest, expected_status):
+    """A coordinator can never infer a Jira transition label from its target status."""
+    label = dict(manifest.tracker.transition_labels).get(str(expected_status))
+    if not label:
+        return None, "Jira triple has no configured transition label for expected status %r" % expected_status
+    return label, None
 
 
 def _triple_jira_comment(cfg, tracker, item, text):
@@ -431,7 +442,11 @@ def _triple_integrate(cfg, item, integration_lease, expected_remote):
             return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
                 "Jira landing comment refused: %s" % reason, {"branch": cfg.default})
         terminal = cfg.manifest.tracker.done_statuses[0]
-        ok, reason = cfg.adapter._triple_transition(item.expected_card, terminal)
+        label, reason = _triple_jira_label(cfg.manifest, terminal)
+        if label is None:
+            return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                reason, {"branch": cfg.default})
+        ok, reason = cfg.adapter._triple_transition(item.expected_card, label, terminal)
         if not ok:
             return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
                 "Jira terminal transition refused: %s" % reason, {"branch": cfg.default})
@@ -491,7 +506,11 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
             return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
                 "Jira blocker comment refused: %s" % reason, {"branch": stranded["branch"]})
         if return_to:
-            ok, reason = cfg.adapter._triple_transition(item.expected_card, return_to)
+            label, reason = _triple_jira_label(cfg.manifest, return_to)
+            if label is None:
+                return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                    reason, {"branch": stranded["branch"]})
+            ok, reason = cfg.adapter._triple_transition(item.expected_card, label, return_to)
             if not ok:
                 return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
                     "Jira return transition refused: %s" % reason,
@@ -582,7 +601,10 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                                    "board changed while triple claims were acquired", store)
 
         if manifest.tracker.adapter == "jira":
-            snapshot, reason = _triple_jira_start(cfg, tracker, snapshot["cards"])
+            scoped, reason = adapter._authorize_triple_writes(after["snapshot"])
+            if not scoped:
+                return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED, reason, store)
+            snapshot, reason = _triple_jira_start(cfg, tracker, after["snapshot"]["cards"])
             if snapshot is None:
                 return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED, reason, store)
         else:
