@@ -1,7 +1,7 @@
 # Native Relay
 
 Run a list of pre-defined tasks through a native plan, build, review, verify, record pipeline,
-one fresh headless process per task, serially and unattended. No plugin sits in the loop: the
+one fresh headless process per task, serially by default and unattended. No plugin sits in the loop: the
 Task process plans in a message, builds, runs the CLI's built in code review, runs the project's
 own verification, records what the project's method says a unit records, and exits. The runner
 then runs the project gate, merges, pushes unless the manifest turns pushing off, verifies the
@@ -40,12 +40,13 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 
 ## Shape
 
-- **Runner:** a small script. Reads a manifest, pops the next task, launches that Task's backend
+- **Runner:** a small script. Reads a manifest, computes a conservative schedule when `dispatch`
+  was chosen, launches that Task's backend
   with the task's model, effort, and permission allowlist, waits, verifies the landed state, runs
   the closeout as a separate short process on the same backend, advances or halts. It holds no
-  project knowledge and never writes to a tracker. `run` is one Task at a time. `dispatch` on a
-  pair overlaps one claude build with one grok build, each in a git worktree, and still merges in
-  the listed order.
+  project knowledge and never writes to a tracker. `run` is one Task at a time. A normal
+  `dispatch` is serial unless the operator selects the conservative `parallel` policy; it can
+  schedule tasks on the same CLI. Workers use git worktrees and land in listed order.
 - **Manifest:** one file per project. Names the tracker adapter, the task list, the shipping
   mode, any mirror rule, the disallow patterns, and the docs root the closeout may write a
   learning under. Everything project-specific is data here, never code in the runner. One
@@ -72,13 +73,35 @@ Codex. Relay accepts the Codex step only when its transcript records the exact a
 status, and retained review output. Grok's skip is undetectable: the digest lists
 `review_skipped` as not checked.
 
+## Normal-manifest dispatch scheduling
+
+An ordinary manifest has a dispatch policy, separate from the exact three-backend triple profile.
+Before an attached normal dispatch, Relay offers the operator two choices: `serial` (the default) or
+`parallel`. A noninteractive, detached, or otherwise non-promptable launch defaults to `serial`;
+pass `dispatch --policy parallel` only when the operator has chosen it.
+
+`parallel` is a request for safe overlap, not permission to guess. Relay reads the repository and
+the task declarations before any worker starts, then prints a pre-launch schedule. A task may
+declare narrow repository-relative `declared_paths`; Relay can overlap a pair only when its
+deterministic evidence establishes disjoint, bounded work. An absent or broad declaration,
+ambiguous evidence, overlapping paths, or a change touching shared configuration, dependency
+manifests, migrations, CI, root documentation, or generated output creates a serialized edge.
+Read-only semantic analysis may add evidence but never authorizes overlap; uncertainty always
+serializes.
+
+Workers in a permitted concurrency group each receive an isolated worktree. Landing remains
+serial in manifest order, with the usual gate, hooks, verification, lease, and halt behavior.
+Relay displays every serialized edge and its reason before the first worker launches, then follows
+that schedule without asking for another authorization.
+
 ## Triple board runs
 
 Set `[execution] mode = "triple"` to run exactly three independent GitHub Projects or Jira cards
 from one `relay run` command, with one explicit task each for Claude, Grok, and Codex. Relay atomically
 claims the three immutable cards and a repository integration fence, launches each
 backend in a disconnected independent clone, then imports, gates, merges, pushes, verifies, and
-closes out the results in manifest order. A normal manifest remains serial.
+closes out the results in manifest order. It does not use the normal-manifest dispatch-policy prompt or
+scheduler.
 
 Triple mode requires `tracker.adapter = "github"` or `"jira"`, `shipping.mode = "local_merge"`,
 `shipping.push = true`, three distinct nonexcluded task ids, and each backend exactly once. The
