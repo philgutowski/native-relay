@@ -87,20 +87,25 @@ whole run stays on the machine and you decide afterwards what reaches the remote
 
 ## Triple execution mode
 
-For one simultaneous Claude, Grok, and Codex run from a GitHub Projects board, add:
+For one simultaneous Claude, Grok, and Codex run from a GitHub Projects or Jira board, add:
 
 ```toml
 [execution]
 mode = "triple"
 ```
 
-This is an exact three-card profile, not a general concurrency setting. It requires GitHub,
+This is an exact three-card profile, not a general concurrency setting. It requires GitHub Projects
+or Jira,
 `local_merge`, `push = true`, three independent nonexcluded tasks, and explicit assignments of
 `claude`, `grok`, and `codex` exactly once. Relay claims all three cards and an integration fence
 in one atomic remote Git operation before starting any worker. Each worker receives a private,
 disconnected clone; landing remains serial and follows the usual gate, verification, and Closeout
 sequence. If a worker, board snapshot, or lease diverges, Relay retains the evidence rather than
-starting a replacement or deleting a claim automatically.
+starting a replacement or deleting a claim automatically. Jira triples use the coordinator's
+Jira REST credential for the claimed cards' In Review, outcome-comment, and terminal/return
+transitions; workers never receive Jira credentials or write tools. The credential must be
+permitted to make those writes, and a workflow with no transition to the configured statuses
+refuses safely.
 
 ## 4. Permissions
 

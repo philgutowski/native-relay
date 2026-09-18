@@ -85,7 +85,7 @@ Codex is present as a launch backend but is currently refused because its native
 ### Scope Boundaries
 
 - Included: GitHub Projects, local merge shipping with `shipping.push = true`, exactly three slots, the three named backends, and target repositories whose `origin` accepts atomic custom ref updates.
-- Deferred: arbitrary worker counts, Jira and markdown triples, pull request terminal shipping, parallel gates or closeouts, automatic resolution of rebase conflicts, and a generic remote lock service.
+- Deferred: arbitrary worker counts, markdown triples, pull request terminal shipping, parallel gates or closeouts, automatic resolution of rebase conflicts, and a generic remote lock service.
 - Outside this product's identity: bypassing an external maintainer who edits a card manually. Relay detects changed card state and refuses to integrate, but cannot prevent a human from editing GitHub.
 
 ### Acceptance Examples
@@ -151,6 +151,37 @@ Every operation that mutates a clone, ref, branch, canonical checkout, or tracke
 - The three selected cards are genuinely independent in code and product scope. The triple profile does not make dependent cards safe.
 - A current Codex CLI exposes `codex exec review`, as verified locally on version `0.155.0`. The implementation must pin a tested version and capture real evidence before validation permits it.
 - A manual actor can still alter a card or its branch outside Relay. Digest and claim checks detect that conflict, but they cannot provide a lock against arbitrary GitHub UI edits.
+
+### Jira Triple Extension — 2026-09-18
+
+**Problem.** Jira is the primary board for the intended operator.  The first triple implementation
+incorrectly made GitHub Projects a hard requirement, and the pre-existing Jira policy rejects a
+Codex task because Codex has no verified Atlassian MCP Closeout tools.
+
+**Decision.** Triple mode accepts either GitHub Projects or Jira.  For Jira only, the coordinator
+uses the existing Jira REST credential held by the adapter (never copied into a worker environment)
+to make the three narrow tracker mutations that an exact Claude/Grok/Codex batch otherwise cannot
+delegate uniformly: transition a claimed issue to In Review before launch; write its landing or
+blocked outcome comment; and transition it to Done or its captured return status.  This is a
+profile-scoped exception to the serial runner's no-tracker-write rule.  Serial Jira runs retain
+their existing Task/Closeout MCP-only behavior.
+
+**Ownership and snapshots.** The Jira claim namespace is derived from normalized Jira site plus
+project key; each claim uses the immutable declared issue key.  Before and after remote atomic
+claim acquisition, Relay reads an exact three-issue snapshot including issue key, summary,
+description, status, full bounded comments, and a canonical digest.  Every coordinator transition
+or comment is read back and compared against the one allowed state delta.  Any unrelated status,
+text, or comment change halts and retains the remote claim and worker evidence.
+
+**Worker boundary.** Jira triple Task and Closeout briefs tell workers that the coordinator owns
+tracker movement and comments.  The workers receive no Jira credentials and no Jira write tool
+allowlist.  This prevents a Codex lane from needing unsupported MCP access and makes all three
+lanes follow one auditable tracker protocol.
+
+**Verification.** Unit coverage must prove Jira manifest acceptance with Codex only in triple
+mode; stable claim-key construction; snapshot/delta detection; successful and refused REST
+transitions/comments; and that serial Jira validation and closeout behavior remain unchanged.
+A live Jira proof is required before the Jira profile is described as released.
 
 ### Risks and Dependencies
 

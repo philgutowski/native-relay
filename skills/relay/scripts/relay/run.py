@@ -34,6 +34,7 @@ from . import (adapters, audit, backends, brief, classify, closeout, contracts, 
                gitwrite, launch, manifest as manifest_module, progress, state, summary, verify,
                worktree)
 from .adapters import github as github_adapter
+from .adapters import jira as jira_adapter
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -254,6 +255,43 @@ def _triple_release(repo, leases, store, env):
     return result
 
 
+def _triple_tracker(manifest):
+    """The optional tracker-specific snapshot transport; generic adapters stay eight-method."""
+    return jira_adapter if manifest.tracker.adapter == "jira" else github_adapter
+
+
+def _triple_jira_start(cfg, tracker, expected):
+    """Move claimed Jira cards before workers exist, checking each narrow write immediately."""
+    cards = list(expected)
+    for index, card in enumerate(cards):
+        ok, reason = cfg.adapter._triple_transition(card, cfg.manifest.tracker.in_review_status)
+        if not ok:
+            return None, "could not transition %s to In Review: %s" % (card["id"], reason)
+        observed = tracker.read_triple_snapshot(cfg.adapter, [task.id for task in cfg.manifest.tasks])
+        if observed["reason"]:
+            return None, observed["reason"]
+        actual = observed["snapshot"]["cards"]
+        wanted = dict(card)
+        wanted["status"] = cfg.manifest.tracker.in_review_status
+        for position, candidate in enumerate(actual):
+            baseline = wanted if position == index else cards[position]
+            if github_adapter.collision_evidence(baseline, candidate):
+                return None, "Jira changed while coordinator transitioned %s" % card["id"]
+        cards = actual
+    return cards, None
+
+
+def _triple_jira_comment(cfg, tracker, item, text):
+    ok, reason = cfg.adapter._triple_comment(item.expected_card, text)
+    if not ok:
+        return None, reason
+    observed = tracker.read_triple_snapshot(cfg.adapter, [task.id for task in cfg.manifest.tasks])
+    if observed["reason"]:
+        return None, observed["reason"]
+    card = observed["snapshot"]["cards"][[task.id for task in cfg.manifest.tasks].index(item.task.id)]
+    return card, None
+
+
 def _triple_worker_root(store):
     """State is outside the canonical checkout, so a worker cannot mutate it through git."""
     return store.path("workers")
@@ -386,6 +424,17 @@ def _triple_integrate(cfg, item, integration_lease, expected_remote):
                   gate={"ok": True, "returncode": 0,
                         "log": cfg.store.path("gate", item.task.id + ".log")},
                   guarded_push=guarded_closeout_push)
+    if cfg.manifest.tracker.adapter == "jira":
+        ok, reason = cfg.adapter._triple_comment(
+            item.expected_card, "Relay triple landed at %s" % tail.merge_sha)
+        if not ok:
+            return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                "Jira landing comment refused: %s" % reason, {"branch": cfg.default})
+        terminal = cfg.manifest.tracker.done_statuses[0]
+        ok, reason = cfg.adapter._triple_transition(item.expected_card, terminal)
+        if not ok:
+            return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                "Jira terminal transition refused: %s" % reason, {"branch": cfg.default})
     final = verify.verify(cfg.manifest, cfg.store.get(item.task.id), cfg.adapter,
                           scope=verify.SCOPE_FULL, do_fetch=True, env=cfg.env, now=cfg.now)
     cfg.store.upsert(item.task.id, verify=final.as_dict())
@@ -434,6 +483,19 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
     return_to = closeout.return_to_for(cfg.manifest, cfg.store.get(item.task.id) or {})
     _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"],
                   return_to=return_to, guarded_push=guarded_closeout_push)
+    if cfg.manifest.tracker.adapter == "jira":
+        ok, reason = cfg.adapter._triple_comment(
+            item.expected_card, "Relay triple blocked: %s" %
+            (item.digest.get("halt_class") or contracts.HALT_BLOCKED_ENVELOPE))
+        if not ok:
+            return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                "Jira blocker comment refused: %s" % reason, {"branch": stranded["branch"]})
+        if return_to:
+            ok, reason = cfg.adapter._triple_transition(item.expected_card, return_to)
+            if not ok:
+                return None, expected_remote, _Halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                    "Jira return transition refused: %s" % reason,
+                    {"branch": stranded["branch"]})
     finding = closeout.confirm_blocked_comment(cfg.adapter, item.task.id, item.baseline_comment_id)
     if finding:
         item.findings.append(finding)
@@ -482,10 +544,11 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
     leases = ()
     workers = ()
     wrote_terminal = False
+    tracker = _triple_tracker(manifest)
     try:
         # The pre-read is retained as durable evidence, but only the exact re-read after the
         # atomic claims authorizes launches.  A client-side card write cannot race past a ref CAS.
-        before = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        before = tracker.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
         if before["reason"]:
             return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, before["reason"], store)
         snapshot = before["snapshot"]
@@ -509,7 +572,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                                "triple remote claim refused: %s" % claimed.reason, store)
         leases = claimed.card_leases + (claimed.integration_lease,)
         store.write_remote_leases(claimed.claim_key, claimed.card_leases, claimed.integration_lease)
-        after = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        after = tracker.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
         if after["reason"]:
             return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, after["reason"], store)
         for expected, observed in zip(snapshot["cards"], after["snapshot"]["cards"]):
@@ -518,8 +581,14 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                 return _triple_halt(expected["id"], contracts.HALT_REMOTE_ADVANCED,
                                    "board changed while triple claims were acquired", store)
 
+        if manifest.tracker.adapter == "jira":
+            snapshot, reason = _triple_jira_start(cfg, tracker, snapshot["cards"])
+            if snapshot is None:
+                return _triple_halt(None, contracts.HALT_REMOTE_ADVANCED, reason, store)
+        else:
+            snapshot = snapshot["cards"]
         workers = []
-        for task, card in zip(manifest.tasks, snapshot["cards"]):
+        for task, card in zip(manifest.tasks, snapshot):
             branch = gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
             comments = card.get("comments") or []
             item = _TripleWorker(task, dict(card, comments=comments), card, branch, baseline,
@@ -558,14 +627,25 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                 return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,
                                    "triple worker refused: %s" % item.collision["reason"], store)
 
-        observed = github_adapter.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
+        observed = tracker.read_triple_snapshot(adapter, [task.id for task in manifest.tasks])
         if observed["reason"]:
             return _triple_halt(None, contracts.HALT_UNEXPECTED_ERROR, observed["reason"], store)
         integration = claimed.integration_lease
         expected_remote = remote_baseline
         for item, card in zip(workers, observed["snapshot"]["cards"]):
-            next_expected, collision = github_adapter.capture_task_delta(
-                item.expected_card, card, manifest.tracker.in_review_status, item.branch)
+            if manifest.tracker.adapter == "jira":
+                next_expected, collision = item.expected_card, github_adapter.collision_evidence(
+                    item.expected_card, card)
+                if not collision:
+                    updated, reason = _triple_jira_comment(cfg, tracker, item, item.branch)
+                    if updated is None:
+                        return _triple_halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
+                                           "Jira branch comment refused: %s" % reason, store)
+                    next_expected, collision = github_adapter.capture_task_delta(
+                        item.expected_card, updated, manifest.tracker.in_review_status, item.branch)
+            else:
+                next_expected, collision = github_adapter.capture_task_delta(
+                    item.expected_card, card, manifest.tracker.in_review_status, item.branch)
             if collision:
                 return _triple_halt(item.task.id, contracts.HALT_REMOTE_ADVANCED,
                                    "board task transition was not exclusive", store)
@@ -575,7 +655,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                     cfg, item, integration, expected_remote)
                 if halt:
                     return _triple_halt(halt.task_id, halt.halt_class, halt.message, store)
-                post_closeout = github_adapter.read_triple_snapshot(
+                post_closeout = tracker.read_triple_snapshot(
                     adapter, [task.id for task in manifest.tasks])
                 if post_closeout["reason"]:
                     return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,
@@ -595,7 +675,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                 cfg, item, integration, expected_remote)
             if halt:
                 return _triple_halt(halt.task_id, halt.halt_class, halt.message, store)
-            post_closeout = github_adapter.read_triple_snapshot(adapter,
+            post_closeout = tracker.read_triple_snapshot(adapter,
                                                                  [task.id for task in manifest.tasks])
             if post_closeout["reason"]:
                 return _triple_halt(item.task.id, contracts.HALT_UNEXPECTED_ERROR,

@@ -169,7 +169,7 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    Write `[closeout] docs_root` when the project keeps its documentation somewhere other than
    `docs/`; the closeout writes a learning under `<docs_root>/solutions/` and may commit only
    inside the docs root, `CONCEPTS.md`, the markdown tracker file, and `closeout.allowed_paths`.
-   For a simultaneous three-card GitHub Projects run, add `[execution] mode = "triple"`; require
+   For a simultaneous three-card GitHub Projects or Jira run, add `[execution] mode = "triple"`; require
    exactly three independent, nonexcluded cards and assign `claude`, `grok`, and `codex` once
    each. It requires pushed local-merge shipping and an origin that accepts atomic Relay claim
    refs. Relay creates isolated disconnected worker clones and serializes landing itself.

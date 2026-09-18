@@ -72,24 +72,24 @@ Codex. Relay accepts the Codex step only when its transcript records the exact a
 status, and retained review output. Grok's skip is undetectable: the digest lists
 `review_skipped` as not checked.
 
-## Triple GitHub Projects runs
+## Triple board runs
 
-Set `[execution] mode = "triple"` to run exactly three independent GitHub Projects cards from one
-`relay run` command, with one explicit task each for Claude, Grok, and Codex. Relay atomically
-claims the three immutable ProjectV2 items and a repository integration fence, launches each
+Set `[execution] mode = "triple"` to run exactly three independent GitHub Projects or Jira cards
+from one `relay run` command, with one explicit task each for Claude, Grok, and Codex. Relay atomically
+claims the three immutable cards and a repository integration fence, launches each
 backend in a disconnected independent clone, then imports, gates, merges, pushes, verifies, and
 closes out the results in manifest order. A normal manifest remains serial.
 
-Triple mode requires `tracker.adapter = "github"`, `shipping.mode = "local_merge"`,
+Triple mode requires `tracker.adapter = "github"` or `"jira"`, `shipping.mode = "local_merge"`,
 `shipping.push = true`, three distinct nonexcluded task ids, and each backend exactly once. The
 Git host must permit atomic pushes of Relay's custom claim refs. Claims never expire by clock;
 after a crashed coordinator, inspect the retained state and worker evidence. Relay deliberately
 does not reclaim a remote claim automatically.
 
-Jira pairs with `claude` and `grok`. Both write the card through Atlassian MCP, not through
-`JIRA_API_TOKEN` (that token is for the runner's reads, and is scrubbed from every child). Grok
-needs its own Atlassian login; Claude's stored token does not travel. `validate` and `run` probe
-`grok mcp doctor --json` and refuse until that handshake is healthy. Codex stays refused on Jira.
+Serial Jira pairs with `claude` and `grok`, which write through Atlassian MCP. In a Jira triple,
+the coordinator uses its already-scrubbed Jira REST credential for exact claimed-card transitions
+and outcome comments; workers, including Codex, receive neither that credential nor Jira write
+tools. The credential must have Jira transition/comment permissions. Serial Codex stays refused.
 
 ## Platform
 

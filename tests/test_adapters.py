@@ -10,6 +10,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest import mock
 
 import _paths
 import _repo
@@ -287,6 +288,14 @@ class Jira(AdapterCase):
         self.assertEqual(timeout, adapters.NETWORK_TIMEOUT_SECONDS)
         self.assertTrue(any(key.lower() == "authorization" for key in headers))
 
+    def test_a_successful_empty_jira_transition_response_is_not_a_json_failure(self):
+        adapter = self.jira(self.opener())
+        adapter._opener = mock.Mock()
+        adapter._opener.open.return_value = _Body("")
+        payload, reason = adapter._post("/rest/api/3/issue/ABC-83/transitions", {"transition": {"id": "1"}})
+        self.assertEqual(payload, {})
+        self.assertIsNone(reason)
+
     def test_a_read_that_raises_becomes_a_skipped_result_rather_than_an_exception(self):
         adapter = self.jira(FakeOpener({}, error=OSError("connection refused")))
         result = adapter.status("ABC-83")
@@ -340,6 +349,23 @@ class Jira(AdapterCase):
             self.assertIn("cloudId", text, outcome)
             self.assertIn("getAccessibleAtlassianResources", text, outcome)
             self.assertRegex(text, r"(?i)never call getAccessibleAtlassianResources")
+
+    def test_triple_snapshot_uses_immutable_jira_issue_and_project_ids(self):
+        adapter = self.jira(self.opener())
+        def issue(key):
+            number = key.rsplit("-", 1)[1]
+            return ({"id": "issue-" + number, "key": key, "fields": {
+                "project": {"id": "project-9", "key": "IW"},
+                "summary": "Card " + number, "description": {"type": "doc", "content": []},
+                "status": {"name": "To Do"}}}, None)
+        with mock.patch.object(adapter, "_issue", side_effect=issue), \
+             mock.patch.object(adapter, "_all_comments", return_value=([], None)):
+            result = jira_adapter.read_triple_snapshot(adapter, ("IW-1", "IW-2", "IW-3"))
+        self.assertIsNone(result["reason"])
+        snapshot = result["snapshot"]
+        self.assertEqual(snapshot["project_id"], "jira-project:project-9")
+        self.assertEqual([card["item_id"] for card in snapshot["cards"]],
+                         ["issue-1", "issue-2", "issue-3"])
 
 
 class GitHub(AdapterCase):

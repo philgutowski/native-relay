@@ -564,7 +564,7 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
 
     # KTD10, R22: Jira's Closeout writes through Claude's configured Atlassian MCP tools. This
     # is a manifest-shape error, so it remains visible to schema-only validation.
-    if adapter == "jira":
+    if adapter == "jira" and manifest.execution.mode != "triple":
         for task in manifest.tasks:
             if task.backend in BACKENDS and not backends.build(task.backend).CAPABILITY.jira_closeout:
                 err("tracker.adapter jira is incompatible with backend %s: its Closeout tools "
@@ -627,8 +627,8 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
     # shape.  Keep these checks profile-specific so serial manifests continue to use their
     # established backend-default and reassignment rules unchanged.
     if manifest.execution.mode == "triple":
-        if manifest.tracker.adapter != "github":
-            err("execution.mode triple requires tracker.adapter github")
+        if manifest.tracker.adapter not in ("github", "jira"):
+            err("execution.mode triple requires tracker.adapter github or jira")
         if manifest.shipping_mode != "local_merge":
             err("execution.mode triple requires shipping.mode local_merge")
         if manifest.shipping_push is not True:

@@ -214,9 +214,14 @@ class TripleExecution(ManifestCase):
         self.assertTrue(any("three distinct task ids" in error for error in result.errors),
                         result.errors)
 
-    def test_triple_requires_github_pushed_local_merge_shipping(self):
+    def test_triple_accepts_jira_but_refuses_other_trackers_or_unpushed_shipping(self):
+        jira = self.triple().replace(
+            'adapter = "github"\nowner = "relay"\nproject_number = 1\nstatus_field = "Status"',
+            'adapter = "jira"\nsite = "example.atlassian.net"\nproject_key = "T"')
+        result = self.validated_triple(jira)
+        self.assertTrue(result.ok, result.errors)
         for source, replacement, expected in (
-            ('adapter = "github"', 'adapter = "markdown"', 'tracker.adapter github'),
+            ('adapter = "github"', 'adapter = "markdown"', 'tracker.adapter github or jira'),
             ('mode = "local_merge"', 'mode = "pr_terminal"', 'shipping.mode local_merge'),
             ('[shipping]\nmode = "local_merge"',
              '[shipping]\nmode = "local_merge"\npush = false',
