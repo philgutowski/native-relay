@@ -21,8 +21,18 @@ the Runner may overlap only Tasks the schedule establishes as high-confidence in
 landings remain in Manifest order.
 
 The Runner holds no project knowledge of its own. Everything project-specific reaches it as
-Manifest data. It reads the Tracker but does not write to it, so a defect in the Runner can never
-move a card.
+Manifest data. On every normal Manifest it reads the Tracker and does not write to it, so a defect
+in the Runner can never move a card; every write goes through a Task or Closeout process with the
+adapter's instructions.
+
+Triple execution is the one exception, and it is deliberate. A Jira triple's workers hold no Jira
+credentials and no Jira write tools at all, so the card writes have nowhere else to live: the
+coordinator makes them itself over REST, gated on
+`tracker.coordinator_rest_writes_authorized`. It never infers a transition from a target status.
+It chooses a configured `transition_labels` label, performs the transition, then reads the card
+back and confirms the exact destination status, and a disagreement is a halt rather than a
+continue. So the property that survives is not that the Runner cannot move a card, it is that the
+Runner cannot move a card anywhere it did not verify it landed.
 
 A Runner reports two of the three Phase event moments: a Task's status moving, and the run
 reaching its terminal record, which it announces with the run's counts. It always writes them to

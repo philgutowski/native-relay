@@ -122,7 +122,7 @@ class AdapterCase(unittest.TestCase):
 
     def jira_manifest(self):
         text = self.toml.replace('adapter = "markdown"', 'adapter = "jira"')
-        text = text.replace('file = "tracker.md"', 'site = "example.atlassian.net"\nproject_key = "IW"')
+        text = text.replace('file = "tracker.md"', 'site = "example.atlassian.net"\nproject_key = "EX"')
         return self.manifest(text.replace('done_statuses = ["done"]', 'done_statuses = ["Done", "Closed"]'),
                              name="jira.toml")
 
@@ -355,12 +355,12 @@ class Jira(AdapterCase):
         def issue(key):
             number = key.rsplit("-", 1)[1]
             return ({"id": "issue-" + number, "key": key, "fields": {
-                "project": {"id": "project-9", "key": "IW"},
+                "project": {"id": "project-9", "key": "EX"},
                 "summary": "Card " + number, "description": {"type": "doc", "content": []},
                 "status": {"name": "To Do"}}}, None)
         with mock.patch.object(adapter, "_issue", side_effect=issue), \
              mock.patch.object(adapter, "_all_comments", return_value=([], None)):
-            result = jira_adapter.read_triple_snapshot(adapter, ("IW-1", "IW-2", "IW-3"))
+            result = jira_adapter.read_triple_snapshot(adapter, ("EX-1", "EX-2", "EX-3"))
         self.assertIsNone(result["reason"])
         snapshot = result["snapshot"]
         self.assertEqual(snapshot["project_id"], "jira-project:project-9")
