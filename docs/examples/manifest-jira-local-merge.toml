@@ -30,6 +30,14 @@ done_statuses = ["Done", "Closed"]
 # The status the task process moves a card to before it exits. The runner uses it to route a task
 # that finished its work but did not print a return envelope.
 in_review_status = "In Review"
+# A triple Jira manifest must acknowledge coordinator-owned REST writes explicitly.  The
+# transition label can differ from the destination status (for example, label "In Review" can
+# target expected status "In Progress").  Leave these absent for serial Jira runs.
+# coordinator_rest_writes_authorized = true
+# in_review_transition = "In Review"
+# [tracker.transition_labels]
+# "In Progress" = "In Review"
+# "Done" = "Done"
 
 [shipping]
 mode = "local_merge"

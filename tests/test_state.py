@@ -645,3 +645,36 @@ class CardAudit(StateCase):
         self.assertEqual(store.audit()["count"], 0)
         self.assertEqual(store.audit()["findings"], [])
         store.release()
+
+
+class RemoteLeases(StateCase):
+    def test_remote_leases_persist_only_public_fencing_tokens_without_an_expiry(self):
+        store = self.store()
+        store.acquire()
+        cards = [
+            {"ref": "refs/relay/claims/key/cards/a", "token": "a" * 40},
+            {"ref": "refs/relay/claims/key/cards/b", "token": "b" * 40},
+            {"ref": "refs/relay/claims/key/cards/c", "token": "c" * 40},
+        ]
+        record = store.write_remote_leases(
+            "key", cards, {"ref": "refs/relay/integration/key", "token": "d" * 40})
+        self.assertEqual(record["card_leases"], cards)
+        self.assertNotIn("expires_at", record)
+        self.assertNotIn("heartbeat_at", record)
+        self.assertEqual(store.read()["remote_leases"], record)
+        store.release()
+
+    def test_integration_rotation_keeps_card_claims_and_rejects_missing_acquisition(self):
+        store = self.store()
+        store.acquire()
+        with self.assertRaisesRegex(ValueError, "not persisted"):
+            store.update_integration_lease({"ref": "refs/relay/integration/key", "token": "x"})
+        cards = [{"ref": "refs/relay/claims/key/cards/%s" % item, "token": item}
+                 for item in ("a", "b", "c")]
+        store.write_remote_leases("key", cards,
+                                  {"ref": "refs/relay/integration/key", "token": "old"})
+        record = store.update_integration_lease(
+            {"ref": "refs/relay/integration/key", "token": "new"})
+        self.assertEqual(record["card_leases"], cards)
+        self.assertEqual(record["integration_lease"]["token"], "new")
+        store.release()

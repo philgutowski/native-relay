@@ -2443,3 +2443,53 @@ class NoPushRun(RunCase):
         self.go()
         self.assertEqual(self.pushes_recorded(), [])
         self.assertEqual(self.bare_refs(), before)
+
+
+class TripleCoordinator(RunCase):
+    """The prelaunch boundary is intentionally hermetic: no board or network writes here."""
+
+    def test_board_change_after_atomic_claim_starts_no_worker(self):
+        from unittest import mock
+
+        models = (("claude", "opus"), ("grok", "grok-4.6"), ("codex", "gpt-5-codex"))
+        manifest = replace(
+            self.manifest,
+            execution=mf.Execution("triple"),
+            tasks=tuple(replace(task, backend=backend, model=model)
+                        for task, (backend, model) in zip(self.manifest.tasks, models)),
+        )
+        cards = [
+            {"id": task.id, "item_id": "PVTI_%s" % task.id, "content_id": "I_%s" % task.id,
+             "title": task.id, "description": "work", "status": "todo", "issue_state": "OPEN",
+             "comments": []}
+            for task in manifest.tasks
+        ]
+        changed = [dict(card) for card in cards]
+        changed[1]["status"] = "in progress"
+        before = {"repository_id": "R_test", "project_id": "PVT_test", "cards": cards}
+        after = {"repository_id": "R_test", "project_id": "PVT_test", "cards": changed}
+        card_leases = tuple(gitwrite.RemoteLease("refs/relay/test/%d" % number,
+                                                 "%040d" % number)
+                            for number in range(1, 4))
+        integration = gitwrite.RemoteLease("refs/relay/integration/test", "f" * 40)
+        acquired = gitwrite.RemoteLeaseResult(
+            True, claim_key="a" * 64, card_leases=card_leases, integration_lease=integration)
+        store = self.store()
+        with mock.patch.object(runner.github_adapter, "read_triple_snapshot",
+                               side_effect=({"snapshot": before, "reason": None},
+                                            {"snapshot": after, "reason": None})), \
+             mock.patch.object(runner.gitwrite, "preflight",
+                               return_value=gitwrite.PreflightResult(True, None)), \
+             mock.patch.object(runner.gitwrite, "acquire_remote_leases", return_value=acquired), \
+             mock.patch.object(runner.gitwrite, "release_remote_leases",
+                               return_value=gitwrite.RemoteLeaseResult(True)) as release, \
+             mock.patch.object(runner.gitwrite, "create_worker_clone") as create_worker, \
+             mock.patch.object(runner.launch, "launch") as launch_worker, \
+             mock.patch.object(runner, "_write_terminal"):
+            outcome = runner.run_triple(manifest, adapter=object(), store=store,
+                                        home=self.home, base_env=self.base_env(), stream=None)
+        self.assertEqual(outcome.exit_code, runner.EXIT_HALTED)
+        self.assertEqual(outcome.halt_task, "T-2")
+        create_worker.assert_not_called()
+        launch_worker.assert_not_called()
+        release.assert_called_once()

@@ -1,7 +1,7 @@
 # Native Relay
 
 Run a list of pre-defined tasks through a native plan, build, review, verify, record pipeline,
-one fresh headless process per task, serially and unattended. No plugin sits in the loop: the
+one fresh headless process per task, serially by default and unattended. No plugin sits in the loop: the
 Task process plans in a message, builds, runs the CLI's built in code review, runs the project's
 own verification, records what the project's method says a unit records, and exits. The runner
 then runs the project gate, merges, pushes unless the manifest turns pushing off, verifies the
@@ -40,12 +40,13 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 
 ## Shape
 
-- **Runner:** a small script. Reads a manifest, pops the next task, launches that Task's backend
+- **Runner:** a small script. Reads a manifest, computes a conservative schedule when `dispatch`
+  was chosen, launches that Task's backend
   with the task's model, effort, and permission allowlist, waits, verifies the landed state, runs
   the closeout as a separate short process on the same backend, advances or halts. It holds no
-  project knowledge and never writes to a tracker. `run` is one Task at a time. `dispatch` on a
-  pair overlaps one claude build with one grok build, each in a git worktree, and still merges in
-  the listed order.
+  project knowledge and never writes to a tracker. `run` is one Task at a time. A normal
+  `dispatch` is serial unless the operator selects the conservative `parallel` policy; it can
+  schedule tasks on the same CLI. Workers use git worktrees and land in listed order.
 - **Manifest:** one file per project. Names the tracker adapter, the task list, the shipping
   mode, any mirror rule, the disallow patterns, and the docs root the closeout may write a
   learning under. Everything project-specific is data here, never code in the runner. One
@@ -66,19 +67,58 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 
 ## Backends
 
-Native mode runs on `claude` and `grok`. The review step is the backend's built in skill,
-`/code-review` on Claude and `/review` on grok. Codex has no verified equivalent reachable from
-a headless run, so `validate` refuses a task naming `codex` before anything launches, with an
-error that names the missing step. Codex's launch seam stays in the runner, pinned against the
-CLI version it was observed on, so that refusal can lift once a review step is verified live. A
-manifest written for `compound-relay` that names Codex is refused with that sentence rather than
-as an unknown name. Grok's skip is undetectable: the digest lists `review_skipped` as not
-checked.
+Native mode runs on `claude`, `grok`, and `codex`. The review step is `/code-review` on Claude,
+`/review` on Grok, and the direct foreground command `codex exec review --base <branch>` on
+Codex. Relay accepts the Codex step only when its transcript records the exact argv, a zero exit
+status, and retained review output. Grok's skip is undetectable: the digest lists
+`review_skipped` as not checked.
 
-Jira pairs with `claude` and `grok`. Both write the card through Atlassian MCP, not through
-`JIRA_API_TOKEN` (that token is for the runner's reads, and is scrubbed from every child). Grok
-needs its own Atlassian login; Claude's stored token does not travel. `validate` and `run` probe
-`grok mcp doctor --json` and refuse until that handshake is healthy. Codex stays refused on Jira.
+## Normal-manifest dispatch scheduling
+
+An ordinary manifest has a dispatch policy, separate from the exact three-backend triple profile.
+Before an attached normal dispatch, Relay offers the operator two choices: `serial` (the default) or
+`parallel`. A noninteractive, detached, or otherwise non-promptable launch defaults to `serial`;
+pass `dispatch --policy parallel` only when the operator has chosen it.
+
+`parallel` is a request for safe overlap, not permission to guess. Relay reads the repository and
+the task declarations before any worker starts, then prints a pre-launch schedule. A task may
+declare narrow repository-relative `declared_paths`; Relay can overlap a pair only when its
+deterministic evidence establishes disjoint, bounded work. An absent or broad declaration,
+ambiguous evidence, overlapping paths, or a change touching shared configuration, dependency
+manifests, migrations, CI, root documentation, or generated output creates a serialized edge.
+Read-only semantic analysis may add evidence but never authorizes overlap; uncertainty always
+serializes.
+
+Workers in a permitted concurrency group each receive an isolated worktree. Landing remains
+serial in manifest order, with the usual gate, hooks, verification, lease, and halt behavior.
+Relay displays every serialized edge and its reason before the first worker launches, then follows
+that schedule without asking for another authorization.
+
+## Triple board runs
+
+Set `[execution] mode = "triple"` to run exactly three independent GitHub Projects or Jira cards
+from one `relay run` command, with one explicit task each for Claude, Grok, and Codex. Relay atomically
+claims the three immutable cards and a repository integration fence, launches each
+backend in a disconnected independent clone, then imports, gates, merges, pushes, verifies, and
+closes out the results in manifest order. It does not use the normal-manifest dispatch-policy prompt or
+scheduler.
+
+Triple mode requires `tracker.adapter = "github"` or `"jira"`, `shipping.mode = "local_merge"`,
+`shipping.push = true`, three distinct nonexcluded task ids, and each backend exactly once. The
+Git host must permit atomic pushes of Relay's custom claim refs. Claims never expire by clock;
+after a crashed coordinator, inspect the retained state and worker evidence. Relay deliberately
+does not reclaim a remote claim automatically. Custom-ref pushes preserve the target
+repository's normal pre-push hooks; their cost or failure is a remote operational constraint, and
+a failed release retains exact-token claims for explicit guarded recovery.
+
+Serial Jira pairs with `claude` and `grok`, which write through Atlassian MCP. In a Jira triple,
+the coordinator uses its already-scrubbed Jira REST credential for exact claimed-card transitions
+and outcome comments; workers, including Codex, receive neither that credential nor Jira write
+tools. A Jira triple manifest must explicitly set `tracker.coordinator_rest_writes_authorized = true`
+and name `tracker.in_review_transition`; Relay selects that workflow label and verifies that its
+target status exactly equals `tracker.in_review_status`. Its `tracker.transition_labels` map must
+also name exact labels for the expected in-review, terminal, and possible return statuses. The credential must have Jira
+transition/comment permissions. Serial Codex stays refused.
 
 ## Platform
 

@@ -238,8 +238,8 @@ class Validate(CliCase):
         self.assertIn("claude", out)
         self.assertIn("binary", out)
 
-    def test_a_codex_task_exits_config_naming_the_missing_review_step(self):
-        """Codex still has no verified review step; the CLI names that before anything launches."""
+    def test_a_codex_task_validates_with_its_direct_review_contract(self):
+        """Codex has an exact native review receipt contract, so validation admits it."""
         with open(self.manifest_path) as handle:
             text = handle.read()
         text = re.sub(r'id = "T-1"\nmodel = "[^"]*"',
@@ -251,12 +251,26 @@ class Validate(CliCase):
             handle.write(text)
         with mock.patch.object(manifest_module.shutil, "which", return_value="/test-bin/x"):
             code, out = self.call("validate", self.manifest_path)
-        self.assertEqual(code, cli.EXIT_CONFIG)
-        self.assertIn("codex", out)
-        self.assertIn("native", out)
+        self.assertEqual(code, cli.EXIT_OK, out)
 
 
 class RunVerb(CliCase):
+    def test_a_triple_profile_routes_to_the_coordinator_seam(self):
+        """U1 owns selection of the runner; U4 will supply the coordinator implementation."""
+        with open(self.manifest_path) as handle:
+            text = handle.read()
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text.replace('[permissions]', '[execution]\nmode = "triple"\n\n[permissions]', 1))
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.manifest_module, "validate",
+                               return_value=manifest_module.ValidationResult()):
+            with mock.patch.object(cli, "_adapter_for", return_value=(SimpleNamespace(), None)):
+                with mock.patch.object(cli.run_module, "run_triple", return_value=outcome,
+                                       create=True) as run_triple:
+                    code, out = self.call("run", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        run_triple.assert_called_once()
+
     def test_a_complete_run_exits_ok_and_prints_the_summary(self):
         code, out = self.complete_run()
         self.assertEqual(code, cli.EXIT_OK, out)
@@ -391,10 +405,18 @@ reason = "mechanical work, a good use of the grok account"
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("valid pair", out)
 
-    def test_dispatch_of_a_single_backend_manifest_is_refused(self):
-        code, out = self.call("dispatch", self.manifest_path)
-        self.assertEqual(code, cli.EXIT_CONFIG, out)
-        self.assertIn("at least one claude task and one grok task", out)
+    def test_dispatch_accepts_a_single_backend_manifest_with_the_serial_default(self):
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.run_module, "dispatch", return_value=outcome) as dispatch:
+            code, out = self.call("dispatch", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("run policy: serial (noninteractive default)", out)
+        self.assertEqual(dispatch.call_args.kwargs["policy"], "serial")
+
+    def test_dispatch_policy_is_carried_to_the_detached_child(self):
+        argv = cli.detach_command("/x/relay_cli.py", "/x/manifest.toml", False,
+                                 verb="dispatch", policy="parallel")
+        self.assertEqual(argv[-2:], ["--policy", "parallel"])
 
 
 class FollowedRun(CliCase):

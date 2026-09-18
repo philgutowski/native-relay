@@ -1,8 +1,8 @@
-"""The operator interface (U10, R45): ten verbs, no prompts.
+"""The operator interface (U10, R45).
 
-Every verb is a subcommand and none of them asks a question, because the `/relay` skill drives
-them and a skill session cannot answer one either. There is no operation that exists only inside
-the skill's conversation: what the skill can do, an operator at a terminal can do the same way.
+Every verb is a subcommand.  Dispatch alone may ask a terminal operator to choose its run policy;
+automation supplies `--policy` and detached children receive the resolved choice, so they never
+wait on stdin.
 
 Exit codes are the contract, since a detached runner is read by its exit status before anyone
 reads its log: 0 fine, 1 the manifest or the environment is wrong, 2 the run halted and needs a
@@ -119,6 +119,8 @@ def build_parser():
     dispatch_verb.add_argument("target", help="a pair file, or a mixed manifest")
     dispatch_verb.add_argument("--retry-blocked", action="store_true",
                                help="retry tasks whose records read blocked")
+    dispatch_verb.add_argument("--policy", choices=("serial", "parallel"),
+                               help="run policy; default is an interactive serial-default choice, or serial without a TTY")
     dispatch_verb.add_argument("--detach", action="store_true",
                                help="start the dispatch in its own session, logging to the state "
                                     "directory, and return at once")
@@ -230,11 +232,19 @@ def cmd_run(args, env, out):
         # `--follow` implies `--detach`: a foreground run is already in the foreground, so there
         # would be nothing to follow.
         return _detach(args, manifest, env, out)
-    outcome = run_module.run(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
-                             retry_blocked=args.retry_blocked,
-                             wait_for_lease_seconds=_wait_seconds(args),
-                             stream=lambda line: out.write(line + "\n"),
-                             notifier=notify.build(getattr(args, "notify", False)))
+    run_kwargs = {
+        "adapter": adapter,
+        "home": env.get("HOME"),
+        "base_env": env,
+        "retry_blocked": args.retry_blocked,
+        "wait_for_lease_seconds": _wait_seconds(args),
+        "stream": lambda line: out.write(line + "\n"),
+        "notifier": notify.build(getattr(args, "notify", False)),
+    }
+    # U1's routing seam is intentionally this narrow: U4 supplies the coordinator while the
+    # serial runner and all of its call arguments remain byte-for-byte the established path.
+    runner = run_module.run_triple if manifest.execution.mode == "triple" else run_module.run
+    outcome = runner(manifest, **run_kwargs)
     if outcome.message:
         out.write("%s\n" % outcome.message)
     if outcome.store is not None:
@@ -248,7 +258,7 @@ def _wait_seconds(args):
 
 
 def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_minutes=None,
-                   verb="run"):
+                   verb="run", policy=None):
     """The argv for a detached runner.
 
     `-u` is load-bearing. The child's stdout is `runner.log`, and a block buffered Python writes
@@ -274,6 +284,8 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
         # Issue #23. The child waits, so the operator's shell returns at once and the queue
         # outlives it, which is what a hand written watcher loop was standing in for.
         command += ["--wait-for-lease", str(wait_minutes)]
+    if policy:
+        command += ["--policy", policy]
     return command
 
 
@@ -288,7 +300,7 @@ def _detach(args, manifest, env, out, verb="run"):
     command = detach_command(entry, os.path.abspath(args.manifest), args.retry_blocked,
                              notify_on=getattr(args, "notify", False),
                              wait_minutes=getattr(args, "wait_for_lease", None),
-                             verb=verb)
+                             verb=verb, policy=getattr(args, "policy", None))
     if shutil.which("caffeinate"):
         command = ["caffeinate", "-i"] + command
     following = getattr(args, "follow", False)
@@ -530,8 +542,7 @@ def _validate_pair_path(path, env, out):
 
 
 def _load_dispatch_target(path, env, out):
-    """A pair file becomes one combined Manifest. A mixed Manifest is used as is once it
-    names both backends."""
+    """A pair file remains compatible; any ordinary validated manifest may dispatch."""
     if pair_module.is_pair_file(path):
         try:
             loaded = pair_module.load(path)
@@ -558,10 +569,8 @@ def _load_dispatch_target(path, env, out):
             out.write("error: %s\n" % error)
         out.write("refusing to dispatch an invalid manifest; fix it and run validate again\n")
         return None, EXIT_CONFIG
-    try:
-        pair_module.from_manifest(manifest)
-    except pair_module.PairError as exc:
-        out.write("%s\n" % exc)
+    if manifest.execution.mode == "triple":
+        out.write("execution.mode triple has its own exact coordinator; use relay run\n")
         return None, EXIT_CONFIG
     return manifest, None
 
@@ -598,11 +607,17 @@ def cmd_dispatch(args, env, out):
     adapter, failure = _adapter_for(manifest, env, out)
     if failure:
         return failure
+    if manifest.execution.mode == "triple" and getattr(args, "policy", None):
+        out.write("execution.mode triple owns its exact coordinator schedule; --policy is unavailable\n")
+        return EXIT_CONFIG
+    policy = getattr(args, "policy", None) or _choose_dispatch_policy(out)
+    args.policy = policy
     if getattr(args, "detach", False) or getattr(args, "follow", False):
         args.manifest = args.target
         return _detach(args, manifest, env, out, verb="dispatch")
     outcome = run_module.dispatch(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
                                   retry_blocked=args.retry_blocked,
+                                  policy=policy,
                                   wait_for_lease_seconds=_wait_seconds(args),
                                   stream=lambda line: out.write(line + "\n"),
                                   notifier=notify.build(getattr(args, "notify", False)))
@@ -611,6 +626,23 @@ def cmd_dispatch(args, env, out):
     if outcome.store is not None:
         out.write(summary.render(summary.build(manifest, outcome.store)) + "\n")
     return outcome.exit_code
+
+
+def _choose_dispatch_policy(out, input_fn=input, stdin=None):
+    """Ask only a real terminal operator.  EOF and every noninteractive path are serial."""
+    source = sys.stdin if stdin is None else stdin
+    if not getattr(source, "isatty", lambda: False)():
+        out.write("run policy: serial (noninteractive default)\n")
+        return "serial"
+    out.write("Run policy:\n  1. Serial (default) — one task settles before the next\n"
+              "  2. Parallel — Relay overlaps only proven-independent tasks\n")
+    try:
+        choice = input_fn("Choose [1]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = ""
+    policy = "parallel" if choice in ("2", "parallel") else "serial"
+    out.write("run policy: %s\n" % policy)
+    return policy
 
 
 VERBS = {

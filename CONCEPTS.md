@@ -14,12 +14,25 @@ Shipping mode named in the Manifest decides what landing means for that project.
 ## The loop
 
 ### Runner
-The Relay process that drives a Manifest to completion: it launches one Task process per Task in
-order, decides each outcome, and halts rather than continuing past an outcome it cannot confirm.
+The Relay process that drives a Manifest to completion: it selects a dispatch policy when dispatching, computes a
+conservative schedule, launches Task processes, decides each outcome, and halts rather than
+continuing past an outcome it cannot confirm. `serial` is the default policy. Under `parallel`,
+the Runner may overlap only Tasks the schedule establishes as high-confidence independent;
+landings remain in Manifest order.
 
 The Runner holds no project knowledge of its own. Everything project-specific reaches it as
-Manifest data. It reads the Tracker but does not write to it, so a defect in the Runner can never
-move a card.
+Manifest data. On every normal Manifest it reads the Tracker and does not write to it, so a defect
+in the Runner can never move a card; every write goes through a Task or Closeout process with the
+adapter's instructions.
+
+Triple execution is the one exception, and it is deliberate. A Jira triple's workers hold no Jira
+credentials and no Jira write tools at all, so the card writes have nowhere else to live: the
+coordinator makes them itself over REST, gated on
+`tracker.coordinator_rest_writes_authorized`. It never infers a transition from a target status.
+It chooses a configured `transition_labels` label, performs the transition, then reads the card
+back and confirms the exact destination status, and a disagreement is a halt rather than a
+continue. So the property that survives is not that the Runner cannot move a card, it is that the
+Runner cannot move a card anywhere it did not verify it landed.
 
 A Runner reports two of the three Phase event moments: a Task's status moving, and the run
 reaching its terminal record, which it announces with the run's counts. It always writes them to
@@ -92,6 +105,22 @@ The single file, one per project, carrying every project-specific fact a Runner 
 list, the Tracker adapter to use, the Shipping mode, the permission allowlist and disallow list,
 per-Task timeouts, and how each of the project's qualifying properties is satisfied.
 
+### Run policy
+The operator's per-launch choice for a normal Manifest dispatch: `serial` or `parallel`. An attached dispatch
+offers both choices with `serial` selected by default. A noninteractive or detached run without
+an explicit policy uses `serial`. Triple execution is a separate exact profile and has no normal
+dispatch-policy choice.
+
+### Schedule
+The Runner's pre-launch, deterministic explanation of when normal-manifest Tasks may start. A
+parallel schedule is conservative: it contains a serial dependency for every pair whose declared
+paths, repository evidence, or read-only semantic analysis does not establish disjoint bounded
+work with high confidence. Broad or unknown scope and shared configuration, dependency manifests,
+migrations, CI, root documentation, and generated output serialize with peers. The Runner prints
+the policy, concurrency groups, and every serial edge with its reason before launching, then
+executes that schedule without another approval. A permitted concurrent Task still receives its
+own worktree; the gate, verification, and landing sequence remain serial.
+
 ### Pair
 Two Manifests that partition one Task list across `claude` and `grok`, share the project, tracker,
 qualifying sentences, shipping, and gate, and name the original Task order as the merge sequence.
@@ -121,6 +150,11 @@ it. A Task the Runner declines at launch, because its card could not be read, wa
 terminal, or names a `.claude/` path, reads skipped instead, and every later run checks it again,
 so fixing the card is the repair. The same `reason` field is required when a Task's
 backend differs from the manifest default. A Task that matches the default needs none.
+
+`declared_paths` is optional repository-relative scheduling evidence on a Task: exact files or
+directory prefixes it expects to write. It is neither a tool permission nor a waiver of the
+conservative rule. A missing, broad, or ambiguous declaration means the Scheduler serializes the
+Task with potentially affected peers.
 
 ### Task process
 The single headless agent invocation that carries one Task from plan to landing. It starts with an

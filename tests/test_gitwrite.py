@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 import _paths
 import _repo
@@ -83,6 +84,115 @@ class TaskBranchName(unittest.TestCase):
             for match in one_arg.finditer(text):
                 hits.append("%s: %s" % (name, match.group(0)))
         self.assertEqual(hits, [], hits)
+
+
+class WorkerClones(unittest.TestCase):
+    """Triple workers are normal clones, not linked worktrees sharing one .git directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = _repo.make_repo(self.tmp.name)
+        self.root = os.path.join(self.tmp.name, "relay-workers")
+        self.task_id = "T-1"
+        self.branch = gitwrite.task_branch_for(self.task_id)
+        self.baseline = gitread.rev_parse(self.repo, "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def create(self):
+        return gitwrite.create_worker_clone(
+            self.repo, self.root, self.task_id, self.branch, self.baseline, "main",
+        )
+
+    def stopped_process(self):
+        proc = subprocess.Popen(["sh", "-c", "sleep 1"], start_new_session=True,
+                                stdin=subprocess.DEVNULL)
+        group_id = os.getpgid(proc.pid)
+        proc.terminate()
+        proc.wait(timeout=5)
+        return gitwrite.WorkerProcess(proc.pid, group_id)
+
+    def test_clone_is_an_independent_disconnected_git_directory_on_the_frozen_branch(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        worker = result.worker
+        self.assertIsNotNone(worker)
+        self.assertEqual(gitread.current_branch(worker.path), self.branch)
+        self.assertEqual(gitread.rev_parse(worker.path, "HEAD"), self.baseline)
+        self.assertEqual(gitread.remotes(worker.path), [])
+        self.assertTrue(os.path.isdir(os.path.join(worker.path, ".git")))
+        self.assertNotEqual(worker.git_dir, gitread.git_dir(self.repo))
+        self.assertEqual(worker.git_dir, os.path.realpath(os.path.join(worker.path, ".git")))
+
+        # The fixture's initial commit remains a loose object.  ``--no-hardlinks`` must give
+        # the worker a distinct inode even though its source is a local checkout.
+        object_path = os.path.join(self.repo, ".git", "objects", self.baseline[:2],
+                                   self.baseline[2:])
+        worker_object = os.path.join(worker.git_dir, "objects", self.baseline[:2],
+                                     self.baseline[2:])
+        self.assertTrue(os.path.exists(object_path))
+        self.assertTrue(os.path.exists(worker_object))
+        self.assertNotEqual(os.stat(object_path).st_ino, os.stat(worker_object).st_ino)
+
+    def test_rejects_a_worker_root_inside_the_canonical_checkout(self):
+        result = gitwrite.create_worker_clone(
+            self.repo, os.path.join(self.repo, "relay-workers"), self.task_id, self.branch,
+            self.baseline, "main",
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "worker_root_inside_canonical")
+
+    def test_a_duplicate_worker_path_is_refused_without_reusing_a_previous_clone(self):
+        first = self.create()
+        self.assertTrue(first.ok, first)
+        second = self.create()
+        self.assertFalse(second.ok)
+        self.assertEqual(second.reason, "worker_path_exists")
+        self.assertTrue(os.path.isdir(first.worker.path))
+
+    def test_cleanup_removes_only_the_identity_verified_clone_after_its_group_has_stopped(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        cleaned = gitwrite.cleanup_worker_clone(result.worker, self.stopped_process())
+        self.assertTrue(cleaned.removed, cleaned)
+        self.assertFalse(os.path.exists(result.worker.path))
+
+    def test_cleanup_retains_a_clone_when_the_worker_added_a_remote(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        _repo.git(result.worker.path, "remote", "add", "unexpected", "/tmp/not-a-remote")
+        cleaned = gitwrite.cleanup_worker_clone(result.worker, self.stopped_process())
+        self.assertFalse(cleaned.removed)
+        self.assertEqual(cleaned.retained_reason, "worker_remote_present")
+        self.assertTrue(os.path.isdir(result.worker.path))
+
+    def test_cleanup_retains_when_no_launch_identity_was_captured(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        cleaned = gitwrite.cleanup_worker_clone(result.worker, None)
+        self.assertFalse(cleaned.removed)
+        self.assertEqual(cleaned.retained_reason, "worker_process_identity_missing")
+        self.assertTrue(os.path.isdir(result.worker.path))
+
+    def test_stopped_private_worker_branch_imports_without_adding_a_remote(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        with open(os.path.join(result.worker.path, "worker.txt"), "w", encoding="utf-8") as handle:
+            handle.write("private worker output\n")
+        _repo.git(result.worker.path, "add", "worker.txt")
+        _repo.git(result.worker.path, "commit", "-q", "-m", "worker output")
+        imported = gitwrite.import_worker_branch(self.repo, result.worker, self.stopped_process())
+        self.assertTrue(imported.ok, imported)
+        self.assertTrue(gitread.branch_exists(self.repo, self.branch))
+        self.assertEqual(gitread.remotes(result.worker.path), [])
+
+    def test_import_refuses_a_live_or_identity_less_worker(self):
+        result = self.create()
+        self.assertTrue(result.ok, result)
+        imported = gitwrite.import_worker_branch(self.repo, result.worker, None)
+        self.assertFalse(imported.ok)
+        self.assertEqual(imported.reason, "worker_process_identity_missing")
 
 
 class PassingTail(TailBase):
@@ -790,3 +900,112 @@ class NoPushResumeDisposition(NoPushBase):
         self.advance_remote()
         _repo.git(self.repo, "fetch", "-q", "origin")
         self.assertEqual(self.disposition().failed, "remote_is_ancestor")
+
+
+class RemoteTripleLeases(unittest.TestCase):
+    """Hermetic protocol tests against a real local bare Git remote."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = _repo.make_repo(self.tmp.name)
+        self.repository_node = "R_kgDOexample"
+        self.project_node = "PVT_kwDOexample"
+        self.cards = ("PVTI_alpha", "PVTI_bravo", "PVTI_charlie")
+        self.key = gitwrite.canonical_claim_key(self.repository_node, self.project_node)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def remote_oid(self, ref):
+        proc = _repo.git(self.repo, "ls-remote", "--refs", "origin", ref)
+        if not proc.stdout.strip():
+            return None
+        return proc.stdout.split("\t", 1)[0]
+
+    def commit_default_change(self):
+        with open(os.path.join(self.repo, "next.txt"), "w", encoding="utf-8") as handle:
+            handle.write("next\n")
+        _repo.git(self.repo, "add", "next.txt")
+        _repo.git(self.repo, "commit", "-q", "-m", "next")
+
+    def acquire(self):
+        return gitwrite.acquire_remote_leases(
+            self.repo, self.repository_node, self.project_node, self.cards)
+
+    def test_claim_key_is_opaque_stable_and_node_identity_sensitive(self):
+        self.assertEqual(self.key, gitwrite.canonical_claim_key(self.repository_node, self.project_node))
+        self.assertNotEqual(self.key,
+                            gitwrite.canonical_claim_key(self.repository_node, "PVT_kwDOother"))
+        self.assertEqual(len(self.key), 64)
+        self.assertNotIn(self.cards[0], gitwrite.card_claim_ref(self.key, self.cards[0]))
+
+    def test_all_three_card_claims_and_integration_lease_arrive_together(self):
+        result = self.acquire()
+        self.assertTrue(result.ok, result.output)
+        self.assertEqual(len(result.card_leases), 3)
+        for lease in result.card_leases + (result.integration_lease,):
+            self.assertEqual(self.remote_oid(lease.ref), lease.token)
+
+    def test_existing_second_card_refuses_without_creating_any_other_claim(self):
+        existing_ref = gitwrite.card_claim_ref(self.key, self.cards[1])
+        _repo.git(self.repo, "push", "-q", "origin", "main:%s" % existing_ref)
+        result = self.acquire()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "card_claim_held")
+        self.assertEqual(self.remote_oid(existing_ref), gitread.rev_parse(self.repo, "main"))
+        self.assertIsNone(self.remote_oid(gitwrite.card_claim_ref(self.key, self.cards[0])))
+        self.assertIsNone(self.remote_oid(integration_ref := gitwrite.integration_lease_ref(self.key)))
+
+    def test_a_ref_created_after_the_absence_read_rejects_the_whole_atomic_batch(self):
+        existing_ref = gitwrite.card_claim_ref(self.key, self.cards[1])
+        _repo.git(self.repo, "push", "-q", "origin", "main:%s" % existing_ref)
+        with unittest.mock.patch("relay.gitwrite._remote_refs", return_value=({}, 0, "")):
+            result = self.acquire()
+        self.assertFalse(result.ok)
+        self.assertIn(result.reason, ("lease_conflict", "custom_ref_rejected", "remote_push_failed"),
+                      result.output)
+        self.assertEqual(self.remote_oid(existing_ref), gitread.rev_parse(self.repo, "main"))
+        self.assertIsNone(self.remote_oid(gitwrite.card_claim_ref(self.key, self.cards[0])))
+        self.assertIsNone(self.remote_oid(gitwrite.integration_lease_ref(self.key)))
+
+    def test_guarded_default_push_rotates_integration_token_in_the_same_transaction(self):
+        acquired = self.acquire()
+        self.assertTrue(acquired.ok, acquired.output)
+        before_default = self.remote_oid("refs/heads/main")
+        self.commit_default_change()
+        result = gitwrite.renew_integration_lease_and_push(
+            self.repo, "main", before_default, acquired.integration_lease)
+        self.assertTrue(result.ok, result.output)
+        self.assertEqual(self.remote_oid("refs/heads/main"), gitread.rev_parse(self.repo, "main"))
+        self.assertNotEqual(result.integration_lease.token, acquired.integration_lease.token)
+        self.assertEqual(self.remote_oid(result.integration_lease.ref), result.integration_lease.token)
+
+    def test_stolen_integration_token_blocks_default_push_before_any_remote_mutation(self):
+        acquired = self.acquire()
+        self.assertTrue(acquired.ok, acquired.output)
+        before_default = self.remote_oid("refs/heads/main")
+        self.commit_default_change()
+        _repo.git(self.repo, "push", "-q", "--force", "origin",
+                  "main:%s" % acquired.integration_lease.ref)
+        result = gitwrite.renew_integration_lease_and_push(
+            self.repo, "main", before_default, acquired.integration_lease)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "integration_lease_lost")
+        self.assertEqual(self.remote_oid("refs/heads/main"), before_default)
+
+    def test_exact_token_release_cannot_delete_a_successor(self):
+        acquired = self.acquire()
+        self.assertTrue(acquired.ok, acquired.output)
+        successor = gitread.rev_parse(self.repo, "main")
+        _repo.git(self.repo, "push", "-q", "--force", "origin",
+                  "%s:%s" % (successor, acquired.integration_lease.ref))
+        result = gitwrite.break_remote_leases(
+            self.repo, acquired.card_leases + (acquired.integration_lease,))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "lease_token_mismatch")
+        self.assertEqual(self.remote_oid(acquired.integration_lease.ref), successor)
+
+    def test_atomic_remote_capability_error_is_named_for_operator_remediation(self):
+        self.assertEqual(gitwrite._remote_failure_reason(
+            "fatal: the receiving end does not support --atomic push"),
+            "atomic_push_unsupported")

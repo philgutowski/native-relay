@@ -297,8 +297,45 @@ def parse_envelope(text):
     }
 
 
+def _codex_review_receipt(tool_use, capability, review_base):
+    """Return `(receipt, rejected)` for one possible Codex native review command.
+
+    The command must be a direct argv match, not text hidden behind a shell. Its completion
+    status and bounded output come from Codex's completed command event, so an `&& true`, a
+    lookalike prompt, or an in-progress command cannot turn a failed review into a receipt.
+    """
+    inp = tool_use.get("input") or {}
+    argv = inp.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
+        return None, None
+    prefix = list(capability.review_argv)
+    command = str(inp.get("command") or "")
+    attempt = argv[:len(prefix)] == prefix or (
+        "codex" in command and "review" in command)
+    if not attempt:
+        return None, None
+    expected = prefix + ["--base", review_base or ""]
+    if not review_base or argv != expected:
+        return None, {"reason": "not the exact direct command", "argv": argv}
+    if inp.get("status") != "completed" or inp.get("exit_code") != 0:
+        return None, {"reason": "nonzero or incomplete exit", "argv": argv,
+                      "exit_code": inp.get("exit_code"), "status": inp.get("status")}
+    output = str(inp.get("output") or "").strip()
+    if not output:
+        return None, {"reason": "missing review output", "argv": argv}
+    return {
+        "argv": argv,
+        "argv_source": inp.get("argv_source"),
+        "exit_code": 0,
+        "status": "completed",
+        "output": output,
+        "output_truncated": bool(inp.get("output_truncated")),
+        "line": tool_use.get("_line"),
+    }, None
+
+
 def classify(transcript_path, launch_result, write_tool_patterns=None, backend="claude",
-             disallow_patterns=None):
+             disallow_patterns=None, review_base=None, review_required=True):
     """Signature from plan U7, extended by Backends U6 with `backend`. `launch_result` needs
     `timed_out` and `exit_code` attributes; U6 also reads its `log_path` when present, since a
     backend's evidence can span more than one file (Codex's last-message file plus its stdout
@@ -320,6 +357,7 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
         "last_message": None,
         "halt_class": None,
         "routable": False,
+        "review_receipt": None,
     }
     module = backends.build(backend)
     log_path = getattr(launch_result, "log_path", None)
@@ -340,6 +378,7 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
     last_text = None
     review_skill = module.CAPABILITY.review_skill
     reviewed = False
+    review_rejection = None
     for number, obj in lines:
         kind = obj.get("type")
         message = obj.get("message")
@@ -376,6 +415,14 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
                         skill = str((block.get("input") or {}).get("skill", ""))
                         if review_ran(skill, review_skill):
                             reviewed = True
+                    if module.CAPABILITY.review_argv and block.get("name") == "Bash":
+                        receipt, rejected = _codex_review_receipt(
+                            tool_uses[block.get("id")], module.CAPABILITY, review_base)
+                        if receipt:
+                            reviewed = True
+                            result["review_receipt"] = receipt
+                        elif rejected and review_rejection is None:
+                            review_rejection = rejected
                 elif block.get("type") == "text":
                     texts.append(str(block.get("text", "")))
             if texts and not obj.get("isSidechain"):
@@ -475,11 +522,20 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
         # as a check by hand. Judged only on a backend that names a review skill and can
         # observe a Skill call. Grok names `/review` and lists skip as undetectable, so a
         # complete grok Task must not pick up a false skip here.
-        if (review_skill and not reviewed
-                and contracts.REVIEW_SKIPPED not in evidence.undetectable):
+        review = backends.review_command(module.CAPABILITY, review_base)
+        if review_required and module.CAPABILITY.review_argv and not reviewed:
+            finding = {
+                "class": contracts.REVIEW_FAILED if review_rejection else contracts.REVIEW_SKIPPED,
+                "review": review,
+            }
+            if review_rejection:
+                finding.update(review_rejection)
+            result["findings"].append(finding)
+        elif (review_required and review_skill and not reviewed
+              and contracts.REVIEW_SKIPPED not in evidence.undetectable):
             result["findings"].append({
                 "class": contracts.REVIEW_SKIPPED,
-                "review": backends.review_command(module.CAPABILITY),
+                "review": review,
             })
     elif envelope:
         result["halt_class"] = contracts.HALT_PATH_GATE if has_path_gate else contracts.HALT_BLOCKED_ENVELOPE

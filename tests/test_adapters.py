@@ -6,8 +6,11 @@ be absent from the machine entirely. The shared contract runs against all three.
 """
 import os
 import re
+import copy
+import json
 import tempfile
 import unittest
+from unittest import mock
 
 import _paths
 import _repo
@@ -119,7 +122,7 @@ class AdapterCase(unittest.TestCase):
 
     def jira_manifest(self):
         text = self.toml.replace('adapter = "markdown"', 'adapter = "jira"')
-        text = text.replace('file = "tracker.md"', 'site = "example.atlassian.net"\nproject_key = "IW"')
+        text = text.replace('file = "tracker.md"', 'site = "example.atlassian.net"\nproject_key = "EX"')
         return self.manifest(text.replace('done_statuses = ["done"]', 'done_statuses = ["Done", "Closed"]'),
                              name="jira.toml")
 
@@ -285,6 +288,14 @@ class Jira(AdapterCase):
         self.assertEqual(timeout, adapters.NETWORK_TIMEOUT_SECONDS)
         self.assertTrue(any(key.lower() == "authorization" for key in headers))
 
+    def test_a_successful_empty_jira_transition_response_is_not_a_json_failure(self):
+        adapter = self.jira(self.opener())
+        adapter._opener = mock.Mock()
+        adapter._opener.open.return_value = _Body("")
+        payload, reason = adapter._post("/rest/api/3/issue/ABC-83/transitions", {"transition": {"id": "1"}})
+        self.assertEqual(payload, {})
+        self.assertIsNone(reason)
+
     def test_a_read_that_raises_becomes_a_skipped_result_rather_than_an_exception(self):
         adapter = self.jira(FakeOpener({}, error=OSError("connection refused")))
         result = adapter.status("ABC-83")
@@ -338,6 +349,67 @@ class Jira(AdapterCase):
             self.assertIn("cloudId", text, outcome)
             self.assertIn("getAccessibleAtlassianResources", text, outcome)
             self.assertRegex(text, r"(?i)never call getAccessibleAtlassianResources")
+
+    def test_triple_snapshot_uses_immutable_jira_issue_and_project_ids(self):
+        adapter = self.jira(self.opener())
+        def issue(key):
+            number = key.rsplit("-", 1)[1]
+            return ({"id": "issue-" + number, "key": key, "fields": {
+                "project": {"id": "project-9", "key": "EX"},
+                "summary": "Card " + number, "description": {"type": "doc", "content": []},
+                "status": {"name": "To Do"}}}, None)
+        with mock.patch.object(adapter, "_issue", side_effect=issue), \
+             mock.patch.object(adapter, "_all_comments", return_value=([], None)):
+            result = jira_adapter.read_triple_snapshot(adapter, ("EX-1", "EX-2", "EX-3"))
+        self.assertIsNone(result["reason"])
+        snapshot = result["snapshot"]
+        self.assertEqual(snapshot["project_id"], "jira-project:project-9")
+        self.assertEqual([card["item_id"] for card in snapshot["cards"]],
+                         ["issue-1", "issue-2", "issue-3"])
+
+    def test_triple_transition_uses_label_and_requires_its_exact_destination_status(self):
+        adapter = self.jira(self.opener())
+        self.assertEqual(adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]}),
+            (True, None))
+        transitions = {"transitions": [{"id": "7", "name": "In Review",
+                                          "to": {"name": "In Progress"}}]}
+        with mock.patch.object(adapter, "_get", return_value=(transitions, None)), \
+             mock.patch.object(adapter, "_post", return_value=({}, None)) as post:
+            ok, reason = adapter._triple_transition({"item_id": "issue-1"}, "In Review", "In Progress")
+        self.assertTrue(ok, reason)
+        self.assertEqual(post.call_args.args[0], "/rest/api/3/issue/issue-1/transitions")
+
+    def test_triple_transition_fails_closed_for_missing_ambiguous_or_mismatched_labels(self):
+        adapter = self.jira(self.opener())
+        adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]})
+        cases = (
+            ([], "has 0 transitions labelled"),
+            ([{"id": "1", "name": "In Review", "to": {"name": "In Progress"}},
+              {"id": "2", "name": "In Review", "to": {"name": "In Progress"}}],
+             "has 2 transitions labelled"),
+            ([{"id": "1", "name": "In Review", "to": {"name": "Ready"}}], "not configured status"),
+        )
+        for transitions, expected in cases:
+            with self.subTest(expected=expected), mock.patch.object(
+                    adapter, "_get", return_value=({"transitions": transitions}, None)), \
+                    mock.patch.object(adapter, "_post") as post:
+                ok, reason = adapter._triple_transition(
+                    {"item_id": "issue-1"}, "In Review", "In Progress")
+            self.assertFalse(ok)
+            self.assertIn(expected, reason)
+            post.assert_not_called()
+
+    def test_triple_write_scope_refuses_unclaimed_issue_ids(self):
+        adapter = self.jira(self.opener())
+        adapter._authorize_triple_writes({"cards": [
+            {"item_id": "issue-1"}, {"item_id": "issue-2"}, {"item_id": "issue-3"}]})
+        with mock.patch.object(adapter, "_post") as post:
+            ok, reason = adapter._triple_comment({"item_id": "issue-outside"}, "nope")
+        self.assertFalse(ok)
+        self.assertIn("outside claimed immutable issue ids", reason)
+        post.assert_not_called()
 
 
 class GitHub(AdapterCase):
@@ -439,6 +511,118 @@ class GitHub(AdapterCase):
         run = self.run_for()
         self.github(run).status("12")
         self.assertTrue(run.calls)
+
+
+class TripleGitHubSnapshot(AdapterCase):
+    """The triple reader is deliberately outside the generic eight-method interface."""
+
+    class Run:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, args, timeout=None):
+            self.calls.append(list(args))
+            if args[:4] == ["gh", "repo", "view", "--json"]:
+                return _Proc(0, json.dumps({"id": "R_repo", "nameWithOwner": "example-org/relay"}), "")
+            if args[:3] == ["gh", "project", "list"]:
+                return _Proc(0, json.dumps([{"id": "PVT_board", "number": 4}]), "")
+            if args[:3] == ["gh", "issue", "view"]:
+                task_id = args[args.index("view") + 1]
+                return _Proc(0, json.dumps({
+                    "id": "I_" + task_id, "title": "Card " + task_id,
+                    "body": "Body " + task_id, "state": "OPEN",
+                    "comments": [{"id": "IC_base_" + task_id, "body": "baseline",
+                                  "createdAt": "2026-09-18T00:00:00Z"}],
+                }), "")
+            if args[:3] == ["gh", "api", "graphql"]:
+                query = next(value for value in args if value.startswith("query="))
+                number = next(value.split("=", 1)[1] for value in args if value.startswith("number="))
+                if "projectItems" in query:
+                    payload = {"data": {"repository": {"issue": {"projectItems": {
+                        "nodes": [{"id": "PVTI_" + number,
+                                   "project": {"id": "PVT_board", "number": 4},
+                                   "fieldValueByName": {"name": "Todo"}}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }}}}}
+                else:
+                    payload = {"data": {"repository": {"issue": {"comments": {
+                        "nodes": [{"id": "IC_base_" + number, "body": "baseline",
+                                   "createdAt": "2026-09-18T00:00:00Z"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }}}}}
+                return _Proc(0, json.dumps(payload), "")
+            raise AssertionError("unexpected gh call: %r" % (args,))
+
+    def adapter(self):
+        return gh_adapter.GitHubAdapter(self.github_manifest(), run=self.Run())
+
+    def test_snapshot_reads_exact_declared_cards_without_the_board_list_ceiling(self):
+        adapter = self.adapter()
+        result = gh_adapter.read_triple_snapshot(adapter, ("12", "13", "501"))
+        self.assertIsNone(result["reason"])
+        snapshot = result["snapshot"]
+        self.assertEqual(snapshot["repository_id"], "R_repo")
+        self.assertEqual(snapshot["project_id"], "PVT_board")
+        self.assertEqual([card["item_id"] for card in snapshot["cards"]],
+                         ["PVTI_12", "PVTI_13", "PVTI_501"])
+        self.assertTrue(snapshot["digest"])
+        self.assertFalse(any("item-list" in call for call in adapter._run.calls),
+                         "triple allocation must not truncate at gh project item-list's ceiling")
+
+    def test_snapshot_refuses_an_unreadable_declared_card(self):
+        adapter = self.adapter()
+        original = adapter._triple_card
+        adapter._triple_card = lambda repository, project, task_id: (None, "no project scope") if task_id == "13" else original(repository, project, task_id)
+        result = gh_adapter.read_triple_snapshot(adapter, ("12", "13", "14"))
+        self.assertIsNone(result["snapshot"])
+        self.assertIn("13 is unreadable", result["reason"])
+
+    def test_expected_state_rejects_identity_and_mixed_foreign_comment_changes(self):
+        card = gh_adapter.read_triple_snapshot(self.adapter(), ("12", "13", "14"))["snapshot"]["cards"][0]
+        expected = gh_adapter.card_state(card)
+        changed = copy.deepcopy(card)
+        changed["item_id"] = "PVTI_replaced"
+        evidence = gh_adapter.collision_evidence(expected, changed)
+        self.assertEqual(evidence["kind"], "card_collision")
+        self.assertIn("item_id", evidence["reason"])
+
+        changed = copy.deepcopy(card)
+        changed["comments"].append({"id": "IC_foreign", "body": "unrelated", "created": None})
+        evidence = gh_adapter.collision_evidence(expected, changed)
+        self.assertIn("comment", evidence["reason"])
+
+    def test_task_and_closeout_capture_exact_comment_ids_and_expected_transitions(self):
+        card = gh_adapter.read_triple_snapshot(self.adapter(), ("12", "13", "14"))["snapshot"]["cards"][0]
+        expected = gh_adapter.card_state(card)
+        task = copy.deepcopy(card)
+        task["status"] = "In review"
+        task["comments"].append({"id": "IC_task", "body": "head abc1234def", "created": None})
+        expected, evidence = gh_adapter.capture_task_delta(expected, task, "In review", "abc1234def")
+        self.assertIsNone(evidence)
+        self.assertEqual(expected["phase"], "task")
+        self.assertEqual(expected["comments"][-1]["id"], "IC_task")
+
+        closeout = copy.deepcopy(task)
+        closeout["issue_state"] = "CLOSED"
+        closeout["comments"].append({"id": "IC_closeout", "body": "landed abc1234def", "created": None})
+        expected, evidence = gh_adapter.capture_closeout_delta(expected, closeout, "landed",
+                                                                 terminal_status="Done",
+                                                                 landing_ref="abc1234def")
+        self.assertIsNone(evidence)
+        self.assertEqual(expected["phase"], "closeout")
+
+    def test_valid_task_change_mixed_with_foreign_comment_is_collision_evidence(self):
+        card = gh_adapter.read_triple_snapshot(self.adapter(), ("12", "13", "14"))["snapshot"]["cards"][0]
+        task = copy.deepcopy(card)
+        task["status"] = "In review"
+        task["comments"].extend([
+            {"id": "IC_task", "body": "head abc1234def", "created": None},
+            {"id": "IC_foreign", "body": "also changed", "created": None},
+        ])
+        _, evidence = gh_adapter.capture_task_delta(gh_adapter.card_state(card), task,
+                                                     "In review", "abc1234def")
+        self.assertEqual(evidence["kind"], "card_collision")
+        self.assertIn("missing, foreign", evidence["reason"])
 
 
 class Markdown(AdapterCase):

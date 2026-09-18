@@ -9,6 +9,7 @@ The launcher scrubs the same variables out of every child process env, so no tas
 or push ever sees the token.
 """
 import base64
+import hashlib
 import json
 import urllib.error
 import urllib.parse
@@ -17,7 +18,7 @@ import urllib.request
 from . import (ConfigurationError, NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED,
                reference_hit, skipped)
 
-ISSUE_FIELDS = "summary,description,status,comment"
+ISSUE_FIELDS = "summary,description,status,comment,project"
 # The issue endpoint is the one the plan pins. Enhanced search is the current Jira Cloud path for
 # a JQL query and backs `validate --list` only, so a change there degrades to a skipped listing
 # rather than a wrong landing verdict.
@@ -25,6 +26,8 @@ ISSUE_PATH = "/rest/api/3/issue/%s"
 SEARCH_PATH = "/rest/api/3/search/jql"
 SEARCH_PAGE_SIZE = 100
 SEARCH_PAGE_LIMIT = 20
+COMMENT_PAGE_SIZE = 100
+COMMENT_DIGEST_LIMIT = 200
 
 WRITE_TOOL_PREFIX = "mcp__atlassian__"
 # Grok's Atlassian MCP tools carry no mcp__ prefix. Classify matches on startswith, so both
@@ -52,6 +55,11 @@ GROK_TOOL_NAMES = (
     "atlassian__transitionJiraIssue",
     "atlassian__addCommentToJiraIssue",
 )
+
+
+def _canonical(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
 def _adf_text(node):
@@ -96,24 +104,39 @@ class JiraAdapter:
         pair = ("%s:%s" % (email, token)).encode("utf-8")
         self._authorization = "Basic " + base64.b64encode(pair).decode("ascii")
         self._opener = opener or urllib.request.build_opener()
+        # Set only after remote claims and a project-validated re-read.  Triple REST writes may
+        # never address an issue outside this frozen immutable-ID set.
+        self._triple_write_issue_ids = frozenset()
 
     # Transport.
-    def _get(self, path, params=None):
+    def _request(self, method, path, params=None, payload=None):
         """Returns (payload, None) or (None, reason). Never raises for a transport failure."""
         url = "https://%s%s" % (self._site, path)
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        request = urllib.request.Request(url, headers={
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=body, method=method, headers={
             "Authorization": self._authorization,
             "Accept": "application/json",
+            "Content-Type": "application/json",
         })
         try:
             with self._opener.open(request, timeout=NETWORK_TIMEOUT_SECONDS) as body:
-                return json.loads(body.read().decode("utf-8")), None
+                raw = body.read().decode("utf-8")
+                # Jira transitions conventionally succeed with HTTP 204.  Treat an empty
+                # successful body as an empty response rather than turning the write into a
+                # false collision merely because it is not JSON.
+                return (json.loads(raw) if raw.strip() else {}), None
         except urllib.error.HTTPError as exc:
             return None, "jira returned %s for %s" % (exc.code, path)
         except (OSError, ValueError) as exc:
             return None, "jira read failed: %s" % exc
+
+    def _get(self, path, params=None):
+        return self._request("GET", path, params=params)
+
+    def _post(self, path, payload):
+        return self._request("POST", path, payload=payload)
 
     def _issue(self, task_id):
         return self._get(ISSUE_PATH % task_id, {"fields": ISSUE_FIELDS})
@@ -125,6 +148,74 @@ class JiraAdapter:
         raw = ((payload.get("fields") or {}).get("comment") or {}).get("comments") or []
         return [{"id": str(entry.get("id")), "body": _adf_text(entry.get("body")).strip(),
                  "created": entry.get("created")} for entry in raw], None
+
+    def _all_comments(self, issue_id):
+        """Read the complete bounded history: a truncated history cannot fence a foreign edit."""
+        found, start = [], 0
+        while True:
+            payload, reason = self._get("/rest/api/3/issue/%s/comment" % issue_id,
+                                        {"startAt": start, "maxResults": COMMENT_PAGE_SIZE})
+            if payload is None:
+                return None, reason
+            for entry in payload.get("comments") or []:
+                comment_id = str(entry.get("id") or "").strip()
+                if not comment_id:
+                    return None, "jira returned a comment without an id"
+                found.append({"id": comment_id, "body": _adf_text(entry.get("body")).strip(),
+                              "created": entry.get("created")})
+                if len(found) > COMMENT_DIGEST_LIMIT:
+                    return None, "jira issue has more than %d comments; snapshot is unsafe" % COMMENT_DIGEST_LIMIT
+            total = int(payload.get("total", len(found)) or 0)
+            start += int(payload.get("maxResults", COMMENT_PAGE_SIZE) or COMMENT_PAGE_SIZE)
+            if start >= total:
+                return found, None
+
+    def _transition(self, issue_id, label, expected_status):
+        payload, reason = self._get("/rest/api/3/issue/%s/transitions" % issue_id)
+        if payload is None:
+            return False, reason
+        hits = [entry for entry in payload.get("transitions") or []
+                if str(entry.get("name") or "") == str(label)]
+        if len(hits) != 1:
+            return False, "jira has %d transitions labelled %r" % (len(hits), label)
+        actual = str((hits[0].get("to") or {}).get("name") or "")
+        if actual != str(expected_status):
+            return False, "jira transition %r targets %r, not configured status %r" % (
+                label, actual, expected_status)
+        _payload, reason = self._post("/rest/api/3/issue/%s/transitions" % issue_id,
+                                      {"transition": {"id": hits[0].get("id")}})
+        return (reason is None), reason
+
+    def _authorize_triple_writes(self, snapshot):
+        """Fence REST writes to IDs taken from the claimed, project-validated snapshot."""
+        cards = (snapshot or {}).get("cards") or []
+        issue_ids = [str(card.get("item_id") or "") for card in cards]
+        if len(issue_ids) != 3 or len(set(issue_ids)) != 3 or any(not value for value in issue_ids):
+            return False, "Jira triple write scope needs exactly three immutable issue ids"
+        self._triple_write_issue_ids = frozenset(issue_ids)
+        return True, None
+
+    def _triple_issue_id(self, card):
+        issue_id = str((card or {}).get("item_id") or "")
+        if issue_id not in self._triple_write_issue_ids:
+            return None, "Jira coordinator write refused outside claimed immutable issue ids"
+        return issue_id, None
+
+    def _triple_transition(self, card, label, expected_status):
+        issue_id, reason = self._triple_issue_id(card)
+        if issue_id is None:
+            return False, reason
+        return self._transition(issue_id, label, expected_status)
+
+    def _triple_comment(self, card, text):
+        issue_id, reason = self._triple_issue_id(card)
+        if issue_id is None:
+            return False, reason
+        payload = {"body": {"type": "doc", "version": 1,
+                            "content": [{"type": "paragraph", "content": [
+                                {"type": "text", "text": str(text)}]}]}}
+        _result, reason = self._post("/rest/api/3/issue/%s/comment" % issue_id, payload)
+        return (reason is None), reason
 
     # Interface.
     def candidates(self):
@@ -237,3 +328,53 @@ class JiraAdapter:
                      "and not JIRA_API_TOKEN; the token is not in this process."
                      % ", ".join(GROK_TOOL_NAMES))
         return text + tail
+
+
+# Triple coordinator snapshot ---------------------------------------------------------------
+#
+# This remains opt-in: Jira's normal adapter surface is deliberately read-only and serial runs
+# continue to hand tracker writes to their Task/Closeout process.  A triple batch needs one
+# deterministic view for all three backends because Codex has no Atlassian MCP closeout path.
+
+
+def read_triple_snapshot(adapter, task_ids):
+    if not isinstance(adapter, JiraAdapter):
+        return {"snapshot": None, "reason": "triple snapshots require JiraAdapter"}
+    task_ids = tuple(str(task_id) for task_id in task_ids)
+    if len(task_ids) != 3 or len(set(task_ids)) != 3 or any(not task_id for task_id in task_ids):
+        return {"snapshot": None, "reason": "triple snapshot requires exactly three distinct card ids"}
+    cards, project_id = [], None
+    for task_id in task_ids:
+        payload, reason = adapter._issue(task_id)
+        if payload is None:
+            return {"snapshot": None, "reason": "card %s is unreadable: %s" % (task_id, reason)}
+        fields = payload.get("fields") or {}
+        project = fields.get("project") or {}
+        issue_id = str(payload.get("id") or "").strip()
+        actual_key = str(payload.get("key") or "").strip()
+        actual_project = str(project.get("key") or "").strip()
+        actual_project_id = str(project.get("id") or "").strip()
+        if not issue_id or not actual_key or not actual_project_id:
+            return {"snapshot": None, "reason": "card %s has incomplete immutable Jira identity" % task_id}
+        if actual_key != task_id or actual_project != str(adapter._project_key):
+            return {"snapshot": None, "reason": "card %s is not in Jira project %s" % (task_id, adapter._project_key)}
+        if project_id is None:
+            project_id = actual_project_id
+        elif project_id != actual_project_id:
+            return {"snapshot": None, "reason": "declared Jira cards belong to different projects"}
+        comments, reason = adapter._all_comments(issue_id)
+        if comments is None:
+            return {"snapshot": None, "reason": "card %s comments are unreadable: %s" % (task_id, reason)}
+        card = {"id": task_id, "item_id": issue_id, "content_id": issue_id,
+                "title": fields.get("summary") or "",
+                "description": _adf_text(fields.get("description")).strip(),
+                "status": (fields.get("status") or {}).get("name"),
+                "issue_state": "OPEN", "comments": comments}
+        card["comments_digest"] = _canonical(comments)
+        card["digest"] = _canonical(card)
+        cards.append(card)
+    snapshot = {"repository_id": "jira:%s" % adapter._site.lower(),
+                "project_id": "jira-project:%s" % project_id,
+                "project_key": str(adapter._project_key), "cards": cards}
+    snapshot["digest"] = _canonical(snapshot)
+    return {"snapshot": snapshot, "reason": None}
