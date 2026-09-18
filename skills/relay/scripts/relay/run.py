@@ -978,8 +978,10 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
                 card.get("title", ""), card.get("description", ""),
                 *(entry.get("body", "") for entry in comments if isinstance(entry, dict))))
     schedule = scheduler.build_schedule(manifest.tasks, repo, task_text, policy=policy)
+    schedule_base = gitread.rev_parse(repo, default)
     store.write_schedule({
         "policy": schedule.policy,
+        "repo_head": schedule_base,
         "task_ids": list(schedule.task_ids),
         "waves": [list(wave) for wave in schedule.waves],
         "edges": [{"first": edge.first, "second": edge.second, "reason": edge.reason}
