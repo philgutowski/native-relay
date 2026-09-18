@@ -277,9 +277,10 @@ Task's class and a finding on a Task that landed, and the two mean different thi
 the Runner's verdict on why a Task did not land. A finding is one observation about a Task whose
 outcome it does not decide. The Envelope settles which a given observation becomes: a Task
 reporting itself complete goes to Verify-landed with its findings intact and no class at all, so a
-refusal the Task process worked around leaves a finding on a landed record and nothing else. Some
-findings reach the operator only through the run summary's check by hand list, which is why that
-list is read on a run that reports no halts at all.
+refusal the Task process worked around leaves a finding on a landed record and nothing else. A
+`path_gate` finding on a landed record is that complete Envelope case, and the repair is a follow
+up edit on a merged commit, not a resume. Some findings reach the operator only through the run
+summary's check by hand list, which is why that list is read on a run that reports no halts at all.
 
 ### Halt class
 The Runner's classification of one Task process exit, drawn from a closed set and decided from the

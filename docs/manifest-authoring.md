@@ -208,6 +208,12 @@ reason = "needs a design answer nobody can give unattended"
   the task does not edit there, describe the location without the literal segment, for example
   "the skills directory under the Claude config". `validate` reports every hit before launch.
 
+A card whose scope spans repo code and the `.claude/` skill package is a different case. The
+scan only trips on a mention in the card text, so a card that never names `.claude/` can still
+reach a skill file. Exclude that card, or split the source half from an attended follow up for
+the skill edit. Ordering it last buys nothing: a complete Envelope lands the Task, and the
+finding is a check by hand, not a halt.
+
 ## 10. Validate, then run
 
 ```bash
