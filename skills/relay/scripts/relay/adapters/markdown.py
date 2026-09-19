@@ -104,6 +104,15 @@ class MarkdownAdapter:
         return [{"id": task_id, "title": entry["title"], "description": "", "status": "open"}
                 for task_id, entry in tasks.items() if not entry["closed"]]
 
+    def ready(self, source):
+        """Every unchecked box. The file has no way to say one task waits on another, so under
+        this adapter ready means open, and `source` is accepted for the interface and unused."""
+        tasks, reason = self._tasks()
+        if reason:
+            return [], reason
+        return [{"id": task_id, "title": entry["title"], "description": "", "labels": ()}
+                for task_id, entry in tasks.items() if not entry["closed"]], None
+
     def read(self, task_id):
         tasks, reason = self._tasks()
         entry = tasks.get(task_id)

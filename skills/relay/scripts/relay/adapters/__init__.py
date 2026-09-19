@@ -7,11 +7,12 @@ tracker specific lives behind this interface, which is what keeps the runner pro
 No method here writes. That is the point of R19: the runner reads the tracker to decide whether
 a task landed, and every write goes through a Task or Closeout process instead, so a defect in
 the runner can never move a card. The shared test suite asserts that the public surface of every
-adapter is exactly the eight methods below.
+adapter is exactly the nine methods below.
 
 The interface, with the shapes each method returns:
 
     candidates()                  -> [{"id", "title", "description", "status"}, ...]
+    ready(source)                 -> ([{"id", "title", "description", "labels"}, ...], reason)
     read(id)                      -> {"id", "title", "description", "status"}
     status(id)                    -> {"status", "terminal", "reference", "skipped"}
     comments_since(id, baseline)  -> [{"id", "body", "created"}, ...] newer than baseline, in order
@@ -19,6 +20,13 @@ The interface, with the shapes each method returns:
     write_tool_patterns()         -> {"tools": (...), "bash": (...), "paths": (...)}
     closeout_allowed_tools(backend=None) -> (tool name, ...) explicit, never a wildcard
     closeout_instructions(outcome, backend=None) -> the duty one text for the closeout brief
+
+`ready` is the feeder's read (feeder plan, KTD3): the cards that can start now, by the tracker's
+own account. `source` is the `[ready]` table of the feeder's sidecar file, so what ready means is
+the project's data and never this package's code: labels for GitHub, a JQL query for Jira, and
+nothing at all for markdown, where an unchecked box is the whole answer. It returns a reason
+beside an empty list rather than raising, because "the tracker could not be read" and "nothing
+is ready" send the feeder down different paths and an empty list alone cannot tell them apart.
 
 `status` returning a `skipped` reason rather than raising is deliberate: a tracker that cannot be
 read must never be mistaken for either a landing or a failure to land, so verify turns a skip
@@ -39,6 +47,7 @@ SHA_TOKEN_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 INTERFACE = (
     "candidates",
+    "ready",
     "read",
     "status",
     "comments_since",
