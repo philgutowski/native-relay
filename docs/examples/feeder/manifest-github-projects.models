@@ -1,0 +1,9 @@
+# Which model a card runs on. One line per card: id, model, why.
+# Read fresh every time the feeder appends, so an edit takes effect on the next batch.
+# A card not listed here can ask for itself with a body line, `**Model:** fable`, and this file
+# wins when both exist. A card with neither runs on [models] default.
+#
+# A working test for the stronger model: does the card need design judgment before any code?
+# A new seam, the first caller of an engine nobody has driven, a path that writes, deletes or
+# restores, or a decision still buried in the brief. Wiring and wording stay on the default.
+12 fable  # a config shape change, and a wrong migration loses data

@@ -61,6 +61,9 @@ keeping, take the next one. Relay is that outer loop and nothing more.
 - **Closeout process:** a second short invocation after each task. Duty one writes the outcome
   to the tracker. Duty two judges whether the task produced a learning and, if so, writes one
   markdown file under the manifest's docs root and commits it inside the allowed paths.
+- **Feeder:** optional, for a queue too long or too dependent to list up front. `relay feed`
+  is a loop around the runner that appends a few ready cards to the manifest, runs it, reads the
+  summary, and repeats, so one manifest can run for a day. See Continuous runs below.
 - **Skill:** `/relay`, for Claude Code hosts. Writes the manifest from a conversation, checks the
   properties above, launches the runner. Every step it takes is a runner subcommand an operator
   can run by hand from a shell, which is how a Codex or Grok Build host uses Relay.
@@ -119,6 +122,60 @@ and name `tracker.in_review_transition`; Relay selects that workflow label and v
 target status exactly equals `tracker.in_review_status`. Its `tracker.transition_labels` map must
 also name exact labels for the expected in-review, terminal, and possible return statuses. The credential must have Jira
 transition/comment permissions. Serial Codex stays refused.
+
+## Continuous runs: the feeder
+
+A run's task list is fixed when the run starts, and a resumed run skips what landed. `relay feed`
+turns that into a continuous run by growing the manifest between runs:
+
+```text
+   stop file? -> checkout clean and on its default branch? -> pre cycle command
+        -> read the READY cards -> take a small batch -> pick a model per card
+        -> append [[tasks]] to the manifest -> relay run -> read the summary
+        -> exclude what halted twice -> repeat
+```
+
+```bash
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run   # what would it append? writes nothing
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --once      # one cycle, never waits
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
+```
+
+Three rules carry it. **Only ready cards are appended.** Ready is the tracker's own account that
+a card can start now: open issues carrying every configured label on GitHub, the cards a
+configured JQL query returns on Jira, every unchecked box in a markdown tracker, or whatever a
+project's own ready command prints as JSON. The batch is small, three by default, so a dependency
+that lands in one cycle releases its dependants in the next. This is what lets a feeder run a
+queue whose cards depend on each other, which a plain manifest must not list. **A task that halts
+twice is excluded**, with the reason written into the manifest, because the runner relaunches a
+halted task on every run. **A cycle whose launched tasks all died within ten minutes, with
+nothing landed, is read as a usage limit** and waited out for thirty minutes without counting
+those halts. That last one is a heuristic, not a detection: Relay has no usage limit handling.
+
+Every project fact is data in a sidecar file beside the manifest and named from its stem. For
+`queue.toml` the feeder reads `queue.feeder.toml` (settings, all optional), `queue.order`
+(priority, one id per line), and `queue.models` (model routing, one `id model` per line, read
+fresh each cycle), and writes `queue.feeder.state.json` and `queue.feeder.log`.
+`docs/examples/feeder/` has one of each. A card's model is the routing file's line, else a
+`**Model:** name` line in the card's body, else the sidecar's default, and a name outside the
+sidecar's allowed set is ignored and logged.
+
+The feeder never merges, pushes, moves a card, or edits the target repository, and it holds no
+way to write to a tracker. It does write the manifest, which no other runner code does: every
+edit is parsed back, validated by the same rules `validate` applies, and renamed into place in
+one step, so a bad edit never reaches the file. It appends nothing while a runner holds the
+lease, stops with exit 1 when the checkout is dirty or off its default branch, or when a run
+halts for a cause outside the task such as the remote moving, and reports every task the runner
+skipped, with the reason. One manifest has one feeder: a second `feed` exits 3.
+
+It launches the runner from the same tree it was started from. Start it from a pinned extract of
+a commit and it drives that extract, whatever happens in your checkout meanwhile. For the same
+reason, editing the sidecar's settings or cutting a new runner does nothing to a feeder already
+running; `--restart` asks the old one to leave, waits for it, and takes its place, and nothing is
+killed, so the task in flight finishes and merges normally. The order and routing files are the
+exception, since they are read at every cycle.
 
 ## Platform
 
@@ -242,13 +299,17 @@ needs `--retry-blocked` before a reassignment reaches it.
 ## Where things are
 
 - `CONCEPTS.md`: the vocabulary. Runner, Manifest, Lease, Task process, Closeout process,
-  Backend, Review step, Halt class, Cause line, Verify-landed. Read this first.
+  Backend, Review step, Halt class, Cause line, Verify-landed, and for continuous runs Feeder,
+  Cycle, Batch, Ready source, Model routing. Read this first.
 - `docs/manifest-authoring.md`: how to write a manifest by hand, field by field.
 - `docs/plans/2026-09-07-native-mode-plan.md`: the native mode plan and its decisions.
   `docs/plans/2026-08-25-1346-feat-relay-outer-loop-plan.md` is the original outer loop plan,
   including the requirements, the key technical decisions, and the halt class table, as amended
   by the native plan.
-- `docs/examples/`: one manifest per adapter.
+- `docs/plans/2026-09-19-feat-generic-feeder-plan.md`: the feeder, its decisions, and the
+  live proof it still owes.
+- `docs/examples/`: one manifest per adapter, and `docs/examples/feeder/` for a feeder's sidecar,
+  order file, and routing file.
 - `docs/solutions/`: the learnings store. Problems already solved here, filed by category with
   frontmatter so they can be searched rather than read.
 - `skills/relay/scripts/relay/`: the runner package.

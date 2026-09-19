@@ -39,6 +39,35 @@ hour long unattended run you sit and watch is strictly worse than doing the task
 
 The attended lane is whatever the day actually requires, plus the cards that failed the pre-flight.
 
+## When the queue is long or its cards depend on each other
+
+**Feed it instead of listing it.** The three questions above are about a list you write once.
+A queue of fifty cards where unit B waits on unit A fails the first question, and listing it
+anyway launches B before A has landed. `relay feed <manifest>` is the answer: it appends only the
+cards the tracker reports as ready, three at a time, runs, and asks again, so B is offered in the
+cycle after A lands. The proof behind it is the Cratekit run of 2026-09-18 and 2026-09-19, a one
+project script that landed 30 cards over 11 cycles with no halt and no exclusion, and which the
+verb generalises (`docs/plans/2026-09-19-feat-generic-feeder-plan.md`).
+
+What stays manual under a feeder:
+
+1. **The independence sentence changes meaning.** `qualifying.independence` can no longer say no
+   task depends on another. Say what makes the run safe instead: tasks are listed only once the
+   tracker derives them ready, and the runner merges one at a time.
+2. **Deciding what ready means.** Labels, a JQL query, or a ready command. If the board derives
+   its ready labels, name the command that recomputes them as the sidecar's `pre_cycle` hook.
+3. **The deny list.** Cards that are never a session's to take go in `[deny]`, whatever the
+   board says about them.
+4. **Routing.** Decide which cards deserve the stronger model before the run, in the routing
+   file. The test that has held up: the card needs design judgment before any code.
+5. **Start with `--dry-run`, then `--once`,** and read the manifest after each. Then `--detach`.
+6. **Do not launch that manifest by hand while its feeder is alive.** The lease will refuse you,
+   and the order file is where order lives, not the manifest.
+
+Start a feeder from a pinned extract of a commit, never from a checkout you are editing: it
+launches the runner from its own tree at every cycle, so a file you change there becomes the code
+driving the run ninety minutes later.
+
 ## After the run
 
 **Verify from git and the tracker, never from the run's report.** A headless run has every

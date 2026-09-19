@@ -6,7 +6,8 @@ recorded; direct edits are fine. Glossary only, not a spec or catch-all.
 
 ## Relationships
 
-A Runner reads one Manifest and drives a series of Tasks. Each Task gets its own Task process and,
+A Feeder, when there is one, grows a Manifest between runs and launches a Runner for each Cycle;
+a Manifest with a fixed Task list needs none. A Runner reads one Manifest and drives a series of Tasks. Each Task gets its own Task process and,
 once it exits, its own Closeout process. The Runner decides a Task's outcome by Verify-landed,
 which consults git and the Tracker through a Tracker adapter, never the Task process itself. The
 Shipping mode named in the Manifest decides what landing means for that project.
@@ -104,6 +105,10 @@ while still reaching an operator whose Follower ended at its own bound hours bef
 The single file, one per project, carrying every project-specific fact a Runner needs: the Task
 list, the Tracker adapter to use, the Shipping mode, the permission allowlist and disallow list,
 per-Task timeouts, and how each of the project's qualifying properties is satisfied.
+
+A person or the `/relay` skill writes it, and the Runner only reads it. The one exception is a
+Feeder, which appends Tasks and marks a Task excluded between runs, through a write path that
+validates before it replaces the file.
 
 ### Run policy
 The operator's per-launch choice for a normal Manifest dispatch: `serial` or `parallel`. An attached dispatch
@@ -374,6 +379,66 @@ it: the words the code that stopped the run actually wrote. The summary prints t
 the Cause line whenever the two differ, so a template that fits the class loosely, such as a
 refused retry reported under the class for a dirty tree, cannot be the only account of the stop.
 
+## The continuous run
+
+### Feeder
+The process that keeps one Manifest running by growing it between runs. A Runner reads its
+Manifest once and the Task list is fixed for that run, while a resumed run skips what landed, so
+appending Tasks between runs is how one Manifest runs for a day. The Feeder sits outside the
+Runner and above it: it launches a fresh Runner each Cycle, from the same tree it was itself
+started from, and reads that run's summary afterwards. It never merges, pushes, moves a card, or
+edits the target repository. It writes the Manifest, its own state file, and its log, all beside
+the Manifest, and it holds no way to write to a Tracker.
+
+Three rules carry it. Only cards the Ready source returns are appended, so a unit never launches
+before its foundation lands. A Task that halts twice is written into the Manifest as excluded
+with its reason, because a Runner relaunches a halted Task on every run for ever. And a Cycle
+whose launched Tasks all died quickly, with nothing landed, is read as a usage limit and waited
+out without counting those halts. A halt whose class is run scoped is never counted either:
+its cause lies outside the Task, so the Feeder stops for a person rather than exclude a card for
+it. The usage limit rule is a heuristic, a rule of thumb that is usually
+right, and not a detection: the Runner has no usage limit handling for it to lean on.
+
+The Feeder is the one piece of runner code that writes a Manifest. Every write is a text edit
+that is parsed back and compared with the change intended, validated by the manifest module from
+a temporary file, and only then renamed over the Manifest, so no reader ever sees a half written
+or an invalid one. It appends nothing while a Lease is held, and one Manifest has one Feeder,
+held by a file lock the operating system releases when the process exits. Everything project
+specific reaches it as data in a sidecar file named from the Manifest's stem, never as a Manifest
+table, because a pinned older Runner must still load whatever the Feeder writes.
+
+### Cycle
+One pass of the Feeder: check the stop file and the checkout, read the Ready source, append a
+Batch, launch one run, read its summary, and apply the halt rules. The stop file is checked only
+between Cycles, so asking a Feeder to stop never interrupts a Task, and restarting one means
+asking, waiting for it to leave, and starting the next. Nothing is killed.
+
+### Batch
+The cards one Cycle appends: the head of the ready list, as long as the room left, which is the
+configured batch size minus the Tasks already listed that the next run will still launch. It is
+small on purpose. A dependency that lands in one Cycle releases its dependants in the next, where
+a fifty Task pass would hold them back for a day. A skipped Task holds no room, since a skip
+costs no session, and is reported instead.
+
+### Ready source
+Where the Feeder learns which cards can start now, by the Tracker's own account, and the only
+thing that may put a card into a Batch. It is the Tracker adapter's `ready` read: open issues
+carrying every configured label on GitHub, the cards a configured JQL query returns on Jira, and
+every unchecked box in a markdown tracker. A ready command that prints cards as JSON replaces
+that read for a project whose rule labels cannot say. What ready means is the project's policy
+and lives in the sidecar, never in an adapter. An unreadable source and an empty one are
+different answers: the first is logged and offers nothing new that Cycle, the second counts
+toward the idle wait.
+
+### Model routing
+How the Feeder chooses a Task's model when it appends one. A routing file beside the Manifest
+wins, one line per card, read fresh at every append so it can be edited mid run. Then a body line
+on the card of the form `**Model:** name`. Then the sidecar's default. A name outside the
+sidecar's allowed set is ignored and logged, because a typo would halt the card twice and get it
+excluded, and the append still passes the Manifest's own validation, which refuses a model that
+belongs to another Backend. The Closeout process stays on the Manifest's closeout model. The
+Review step runs inside the Task process, so it runs on whatever model the Task was routed to.
+
 ## Outcomes
 
 ### Verify-landed
@@ -465,7 +530,8 @@ the one command that would ship it, because a run that pushed nothing has to say
 ### Tracker adapter
 The read-side interface between a Runner and whatever holds the Task list and their statuses. Each
 adapter exposes the same operations regardless of what sits behind it, and not one of them writes:
-listing candidate Tasks, reading one Task's status and its recent comments, confirming that a
+listing candidate Tasks, listing the cards that are ready to start for a Feeder, reading one
+Task's status and its recent comments, confirming that a
 closing reference is present, and supplying what the Task process and the Closeout process need in
 order to write to that Tracker themselves. The absence of a write operation is the whole guarantee.
 A Runner cannot move a card by mistake because it holds no way to move one at all.
