@@ -16,8 +16,8 @@ import subprocess
 import sys
 
 from . import (adapters, audit as audit_module, brief as brief_module, contracts,
-               manifest as manifest_module, notify, pair as pair_module, progress, run as run_module,
-               state, summary, tail as tail_module, verify)
+               feeder as feeder_module, manifest as manifest_module, notify, pair as pair_module,
+               progress, run as run_module, state, summary, tail as tail_module, verify)
 
 EXIT_OK = run_module.EXIT_OK
 EXIT_CONFIG = run_module.EXIT_CONFIG
@@ -131,6 +131,27 @@ def build_parser():
     dispatch_verb.add_argument("--follow", action="store_true",
                                help="detach, then follow this dispatch in the foreground")
     _add_follow_options(dispatch_verb)
+
+    feed_verb = verbs.add_parser("feed", help="keep a manifest running: append ready cards a "
+                                              "few at a time, run, read the summary, repeat")
+    feed_verb.add_argument("manifest")
+    feed_verb.add_argument("--dry-run", action="store_true", dest="dry_run",
+                           help="print what the next cycle would append and leave; writes "
+                                "nothing and runs nothing")
+    feed_verb.add_argument("--once", action="store_true",
+                           help="run a single cycle and leave, without waiting")
+    feed_verb.add_argument("--stop", action="store_true",
+                           help="ask the running feeder to leave after its current cycle; "
+                                "nothing is killed")
+    feed_verb.add_argument("--restart", action="store_true",
+                           help="ask the running feeder to leave, wait for it, then take its "
+                                "place; nothing is killed")
+    feed_verb.add_argument("--detach", action="store_true",
+                           help="start the feeder in its own session, logging beside the "
+                                "manifest, and return at once")
+    feed_verb.add_argument("--notify", action="store_true",
+                           help="fire a macOS notification when the feeder stops, excludes a "
+                                "task, or meets a skipped card, and pass --notify to each run")
     return parser
 
 
@@ -628,6 +649,70 @@ def cmd_dispatch(args, env, out):
     return outcome.exit_code
 
 
+def cmd_feed(args, env, out, deps=None):
+    """The feeder (feeder plan). Exit codes keep the contract every verb has: 0 the feeder left
+    on its own terms (the stop file, a day with nothing ready, `--once`, `--dry-run`), 1 the
+    manifest, the sidecar, or the checkout needs a person, 2 every task died quickly for the
+    whole usage limit allowance, 3 another feeder holds this manifest.
+
+    `deps` is the suite's way in; an operator never passes it.
+    """
+    paths = feeder_module.paths_for(args.manifest)
+    if args.stop:
+        feeder_module.request_stop(paths)
+        out.write("stop requested: %s\nthe feeder leaves after its current cycle\n" % paths.stop)
+        return EXIT_OK
+    if not os.path.isfile(paths.manifest):
+        out.write("manifest not found: %s\n" % paths.manifest)
+        return EXIT_CONFIG
+    try:
+        config = feeder_module.load_config(paths.config)
+        if args.detach:
+            return _detach_feeder(args, paths, config, env, out)
+        if deps is None:
+            deps = feeder_module.build_deps(config, env, notifier=notify.build(args.notify),
+                                            notify_on=args.notify)
+        loop = feeder_module.Feeder(paths, config, deps, env, out, dry_run=args.dry_run,
+                                    once=args.once)
+    except feeder_module.ConfigError as exc:
+        out.write("%s\n" % exc)
+        return EXIT_CONFIG
+    if args.dry_run:
+        # Reads only, so it takes no lock and is safe beside a live feeder.
+        return loop.run()
+    if args.restart:
+        lock = feeder_module.wait_for_lock(paths, deps.sleep, loop.log)
+    else:
+        lock = feeder_module.acquire_lock(paths)
+    if lock is None:
+        out.write("another feeder holds %s; use --restart to take its place or --stop to end "
+                  "it\n" % paths.lock)
+        return EXIT_LEASE
+    try:
+        return loop.run()
+    finally:
+        lock.close()
+
+
+def _detach_feeder(args, paths, config, env, out):
+    """The same `feed` in its own session, its output appended beside the manifest. `-u` for
+    the reason `detach_command` gives: a block buffered child writes nothing until it exits."""
+    entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_cli.py")
+    command = [sys.executable, "-u", entry, "feed", paths.manifest]
+    command += [flag for flag, on in (("--once", args.once), ("--restart", args.restart),
+                                      ("--notify", args.notify)) if on]
+    if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
+        command = ["caffeinate", "-i"] + command
+    with open(paths.out, "ab") as log:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True, env=env)
+    out.write("feeder detached: pid %d\n" % proc.pid)
+    out.write("feeder log: %s\n" % paths.log)
+    out.write("feeder output: %s\n" % paths.out)
+    out.write("stop it with: relay feed %s --stop\n" % paths.manifest)
+    return EXIT_OK
+
+
 def _choose_dispatch_policy(out, input_fn=input, stdin=None):
     """Ask only a real terminal operator.  EOF and every noninteractive path are serial."""
     source = sys.stdin if stdin is None else stdin
@@ -656,6 +741,7 @@ VERBS = {
     "lease": cmd_lease,
     "pair": cmd_pair,
     "dispatch": cmd_dispatch,
+    "feed": cmd_feed,
 }
 
 
