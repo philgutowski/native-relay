@@ -66,6 +66,10 @@ class Evidence:
     # whichever read `normalize_transcript` already performs, so `readable()` never re-touches
     # the filesystem to ask a question the parse already answered.
     opened: bool = True
+    # The file these lines actually came from, when a normalizer fell back past the path it was
+    # handed. None means the handed path. The classifier copies it into the digest, so a reader
+    # is never told a file is present under a name nothing was read from.
+    source: str | None = None
 
 
 def _read_jsonl(path):

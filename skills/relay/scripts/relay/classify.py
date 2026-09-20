@@ -362,6 +362,11 @@ def classify(transcript_path, launch_result, write_tool_patterns=None, backend="
     module = backends.build(backend)
     log_path = getattr(launch_result, "log_path", None)
     evidence = module.normalize_transcript(transcript_path, log_path=log_path)
+    if evidence.source:
+        # A normalizer that fell back read a different file, and the digest is what the halt
+        # record and the summary quote. Naming the predicted path here would report a file that
+        # was never opened.
+        result["transcript_path"] = evidence.source
     result["line_count"] = len(evidence.lines)
     result["malformed_lines"] = evidence.malformed_lines
     result["undetectable"] = sorted(evidence.undetectable)
