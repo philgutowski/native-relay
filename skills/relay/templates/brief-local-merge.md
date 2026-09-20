@@ -38,6 +38,21 @@ the helper, does the work, and stops it in a `finally` block. If you bind a port
 port and any temporary directory in your final report, because nothing else in this run can see
 them.
 
+Get a second copy of the repository with a worktree, never by clearing a directory first.
+Comparing this branch against the commit it started from, or running a driver over two trees, is
+ordinary work, and the shape it invites is a `rm -rf` on a scratch path followed by an extract.
+That command is refused here, the refusal lands on the whole call, and every step you chained
+after the delete never runs, so the comparison silently does not happen and the only trace is one
+truncated finding the operator reads as noise. Use `git worktree add --detach <path> <commit>`
+instead, with a path outside the repository so the extra tree never shows up as untracked work
+at merge time, then `git worktree remove <path>` when you are done. The `--detach` is load
+bearing: without it the worktree claims the branch you named, and git then refuses to check that
+branch out anywhere else, so the runner cannot reach the default branch to merge your work once
+you exit. A worktree you leave behind outlives this session exactly the way a process does, so
+remove it before you finish and name its path in your final report if you could not. When you
+only need the old text of a few files, `git show <commit>:<path>` prints them and leaves nothing
+to clean up.
+
 $review_rule
 
 Work on the branch `$branch` and nothing else. Do not merge, do not push, and do not switch

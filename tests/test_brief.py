@@ -129,6 +129,64 @@ class ReviewStep(BriefCase):
             for tool in ("`kill`", "`pkill`", "`killall`"):
                 self.assertIn(tool, text, "%s does not name %s as refused" % (mode, tool))
 
+    def test_the_brief_names_a_worktree_as_the_way_to_get_a_second_tree(self):
+        """The Cratekit run of 2026-09-20. Two tasks, #171 on opus and #137 on fable, each wanted
+        the repository at `main` to diff their branch's behaviour against, and each spelled it
+        `rm -rf <scratch> && mkdir -p <scratch> && git archive main | tar -x`. Both were refused
+        by `Bash(rm -rf*)`, the refusal took the whole call including everything chained after the
+        delete, and the differential check never ran. The rule above tells a task the deletes are
+        refused; without a sanctioned shape beside it the task invents that one again."""
+        for mode, text in self.each_template():
+            self.assertIn("git worktree add --detach <path> <commit>", text, mode)
+            self.assertIn("git worktree remove <path>", text, mode)
+            self.assertIn("outside the repository", text, mode)
+
+    def test_the_brief_says_why_the_detach_is_required_rather_than_only_spelling_it(self):
+        """`worktree.py` and `gitwrite.tail` depend on this: the merge checks the default branch
+        out in the primary, and git refuses a branch another worktree holds. A task that drops
+        `--detach` because it read the flag as decoration halts the run at its own merge."""
+        for mode, text in self.each_template():
+            self.assertIn("`--detach` is load", text, mode)
+            self.assertIn("claims the branch you named", text, mode)
+
+    def test_a_detached_worktree_leaves_the_default_branch_checkoutable(self):
+        """The reason the brief gives, proved against real git rather than asserted in prose,
+        in the shape a task is actually in: on its own branch, wanting the default branch's tree
+        beside it. With `--detach` the default branch stays free and the merge's checkout runs.
+
+        The ref passed here is the branch name rather than a sha, and that is the point: a sha
+        detaches on its own, so a test that passed one would hold whether `worktree.add` kept
+        `--detach` or dropped it."""
+        from relay import gitread, worktree
+
+        default = gitread.run(self.repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        _repo.git(self.repo, "checkout", "-q", "-b", "relay/T-1")
+        dest = os.path.join(self.tmp.name, "second-tree")
+        worktree.add(self.repo, dest, default)
+        try:
+            self.assertEqual(
+                "HEAD", gitread.run(dest, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip())
+            gitread.run(self.repo, ["checkout", "--quiet", default])
+        finally:
+            worktree.remove(self.repo, dest)
+
+    def test_a_worktree_added_without_detach_is_what_blocks_that_checkout(self):
+        """The other half, and the halt the brief is written to prevent. Without `--detach` the
+        worktree claims the default branch, and the merge tail's `checkout(repo, default_branch)`
+        in `gitwrite` cannot reach it. Without this case the one above would pass for any value
+        of the flag."""
+        from relay import gitread
+
+        default = gitread.run(self.repo, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        _repo.git(self.repo, "checkout", "-q", "-b", "relay/T-2")
+        dest = os.path.join(self.tmp.name, "claiming-tree")
+        _repo.git(self.repo, "worktree", "add", dest, default)
+        try:
+            with self.assertRaises(gitread.GitError):
+                gitread.run(self.repo, ["checkout", "--quiet", default])
+        finally:
+            _repo.git(self.repo, "worktree", "remove", "--force", dest)
+
     def test_the_contract_strings_come_from_contracts_rather_than_the_template(self):
         local = self.render()
         self.assertIn("```" + contracts.ENVELOPE_FENCE_TAG, local)
