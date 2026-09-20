@@ -72,6 +72,26 @@ without the operator asking. Default on, with a way to decline. This half is Cla
 specific and belongs in the skill, not in the runner, which keeps the split the repo already
 has.
 
+## Resuming is the normal case, and the obvious way to do it is wrong
+
+Settled the same day, by hand, over the same run. A Claude Code monitor is capped at thirty
+minutes. A task timeout is measured in hours, and this run's was set to three hundred minutes.
+So a watch that outlives its arming is not an edge case, it is what always happens, and it
+happened three times in one afternoon. A watcher that starts blank re-reports every settled card
+as though it had just landed, which is noise that grows with the queue.
+
+The fix is a small memory file beside the manifest, holding the status each card was last
+reported at, written whole through a temporary file so a watcher killed mid write leaves the
+previous memory intact. `--replay` forces a full report anyway.
+
+The trap is what to suppress on the first poll after a resume. Suppressing every event looks
+right and is wrong: it swallows exactly the changes that happened while nothing was watching,
+which is the only reason to persist anything. The status diff already drops every card the last
+watcher reported, so what survives it after a resume is precisely the news. Only a cold start
+suppresses, and only for waiting cards, whose count the header already carries. This was caught
+by doctoring the memory file to claim a running card was still waiting and checking that the
+resume reported it. A build of this needs that test.
+
 ## Open questions
 
 - Does `watch` poll the record, or does the runner write an append only event log that `watch`
@@ -80,8 +100,8 @@ has.
 - Should the feeder's own log fold into the same stream, or stay a second source the watcher
   reads? The prototype reads both and the seam is visible in its output.
 - One monitor per manifest, or one per run? A feeder outlives the runs inside it.
-- What does the skill do when a run is already alive at launch time, and when the monitor
-  expires before the run ends?
+- What does the skill do when a run is already alive at launch time? Monitor expiry is answered
+  above: the watcher resumes, and the skill re-arms.
 
 ## Not in scope
 
