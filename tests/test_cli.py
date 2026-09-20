@@ -228,8 +228,15 @@ class Validate(CliCase):
             self.assertIn("candidate: %s" % task_id, out)
 
     def test_an_unknown_verb_exits_config_not_halted(self):
-        code, _ = self.call("diagnose", self.manifest_path)
+        # argparse writes its refusal to stderr, not to `out`. Held here so it is asserted on
+        # instead of being printed into the middle of the suite's output.
+        import contextlib
+
+        refusal = io.StringIO()
+        with contextlib.redirect_stderr(refusal):
+            code, _ = self.call("diagnose", self.manifest_path)
         self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("invalid choice: 'diagnose'", refusal.getvalue())
 
     def test_a_missing_backend_binary_exits_config_and_names_the_backend(self):
         with mock.patch.object(manifest_module.shutil, "which", return_value=None):
