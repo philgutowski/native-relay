@@ -128,6 +128,9 @@ class JiraAdapter:
                 # false collision merely because it is not JSON.
                 return (json.loads(raw) if raw.strip() else {}), None
         except urllib.error.HTTPError as exc:
+            # An HTTPError is also an open response holding the error body.  Close it, or the
+            # interpreter warns when it has to clean the handle up itself.
+            exc.close()
             return None, "jira returned %s for %s" % (exc.code, path)
         except (OSError, ValueError) as exc:
             return None, "jira read failed: %s" % exc

@@ -383,6 +383,22 @@ class Jira(AdapterCase):
         self.assertEqual(adapter.comments_since("ABC-83", None), [])
         self.assertIsNone(adapter.closing_reference("ABC-83", "abc1234"))
 
+    def test_an_http_error_status_becomes_a_skipped_result_and_its_response_is_closed(self):
+        # urllib's HTTPError is the open response as well as the exception: it holds the error
+        # body in a file. Dropped unclosed, the interpreter cleans it up later and says so with a
+        # ResourceWarning, which is how a live 404 once showed up in this suite's output.
+        import io
+        import urllib.error
+
+        body = io.BytesIO(b'{"errorMessages": ["Issue does not exist"]}')
+        error = urllib.error.HTTPError("https://example.atlassian.net/rest/api/3/issue/ABC-83",
+                                       404, "Not Found", {}, body)
+        adapter = self.jira(FakeOpener({}, error=error))
+        result = adapter.status("ABC-83")
+        self.assertIn("jira returned 404", result["skipped"])
+        self.assertFalse(result["terminal"])
+        self.assertTrue(body.closed)
+
     def test_candidates_lists_the_project_issues_that_are_not_done(self):
         """Issue #24: done cards filled the first page of 50 on a real board."""
         opener = self.opener()

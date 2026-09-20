@@ -11,7 +11,8 @@ import unittest
 
 import _paths
 import _repo
-from relay import cli, feeder, manifest as mf
+from relay import adapters, cli, feeder, manifest as mf
+from test_adapters import DispatchRun, FakeOpener
 
 REPO_ROOT = _paths.REPO_ROOT
 EXAMPLES = os.path.join(REPO_ROOT, "docs", "examples")
@@ -40,12 +41,27 @@ def example_paths():
     return sorted(glob.glob(os.path.join(EXAMPLES, "*.toml")))
 
 
+REAL_BUILD = adapters.build  # held before the test patches the name it lives under
+
+
+def offline_build(manifest, env=None):
+    """The real adapter factory over fixture transports. `relay validate` reads every card, and
+    the factory's defaults are the real `urllib` opener and the real `gh`, so a test that drives
+    the verb without this reaches `example.atlassian.net` and GitHub on every run."""
+    issues = {task.id: "github_issue_open.json" for task in manifest.tasks}
+    return REAL_BUILD(manifest, env=env,
+                      opener=FakeOpener({"/issue/": "jira_issue_open.json"}),
+                      run=DispatchRun(issues=issues, items="github_project_items.json"))
+
+
 class Examples(unittest.TestCase):
     def setUp(self):
         import tempfile
 
         self.tmp = tempfile.TemporaryDirectory()
-        self.repo = _repo.make_repo(self.tmp.name, files={"tracker.md": "- [ ] T-1 A task\n"})
+        # The markdown example names `tasks.md` and lists T-1 and T-2, so the repo carries both.
+        self.repo = _repo.make_repo(self.tmp.name, files={
+            "tasks.md": "- [ ] T-1 A task\n- [ ] T-2 Another task\n"})
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -96,13 +112,18 @@ class Examples(unittest.TestCase):
 
     def test_the_validate_verb_accepts_every_example_through_the_cli(self):
         import io
+        from unittest import mock
 
         env = dict(os.environ, JIRA_API_TOKEN="placeholder", JIRA_EMAIL="p@example.invalid")
         for path in example_paths():
             with self.subTest(example=os.path.basename(path)):
                 out = io.StringIO()
-                code = cli.main(["validate", self.localised(path)], env=env, out=out)
+                with mock.patch.object(cli.adapters, "build", offline_build):
+                    code = cli.main(["validate", self.localised(path)], env=env, out=out)
                 self.assertEqual(code, cli.EXIT_OK, out.getvalue())
+                # An unreadable card is only a warning, which is how this test once passed while
+                # every tracker read in it was failing against a live site.
+                self.assertNotIn("could not be read", out.getvalue())
 
 
 class FeederExamples(unittest.TestCase):
