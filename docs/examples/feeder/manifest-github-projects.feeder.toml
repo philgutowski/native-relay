@@ -1,0 +1,53 @@
+# Feeder sidecar for `relay feed manifest-github-projects.toml`.
+#
+# These three example files live in their own folder only so the manifest examples stay one
+# per adapter. To use them, copy all three beside your manifest and rename them to its stem.
+#
+# A sidecar sits beside its manifest and takes its name from the manifest's stem: for
+# `queue.toml` the feeder reads `queue.feeder.toml`, `queue.order`, and `queue.models`, and
+# writes `queue.feeder.state.json` and `queue.feeder.log`. Create `queue.feeder.stop`, or run
+# `relay feed queue.toml --stop`, to make the feeder leave after its current cycle.
+#
+# Every key is optional and every value below is the default, except [ready], [deny], and
+# [hooks], which are examples. A key the feeder does not know is an error, not ignored.
+
+[feeder]
+batch = 3               # tasks a cycle may have in flight: new cards plus unsettled ones
+max_halts = 2           # a task on this many halts is written into the manifest as excluded
+caffeinate = true       # keep a Mac awake for each run; skipped where caffeinate is absent
+
+[waits]
+quick_death_seconds = 600    # a launched task that halts sooner than this died quickly
+limit_wait_seconds = 1800    # the wait when a whole cycle died quickly (a usage limit, probably)
+limit_waits_max = 16         # that many waits in a row, then leave with exit 2
+idle_wait_seconds = 1800     # the wait when nothing is ready and nothing is unsettled
+idle_waits_max = 48          # that many in a row, a day, then leave with exit 0
+lease_wait_seconds = 600     # the wait when another runner holds the lease
+
+[models]
+default = "opus"
+effort = "high"
+# What a routing file line or a card's `**Model:** name` body line may ask for. Anything else
+# is ignored and logged, because a typo would halt the card twice and get it excluded.
+allowed = ["fable", "opus", "sonnet"]
+
+[ready]
+# GitHub: open issues carrying every one of these labels. With none configured the feeder
+# offers nothing, rather than reading the whole backlog as ready.
+labels = ["ready"]
+# Jira instead takes a query in its own search language:
+#   jql = "project = EX AND status = \"Ready\" ORDER BY rank"
+# Markdown needs nothing: every unchecked box is ready.
+# The escape hatch, for a rule labels cannot say. An argument list, never a shell string, run
+# in the target repo. It prints a JSON array of cards, each with `id` or `number`, `title`,
+# `body` or `description`, and `labels`. When set, it replaces the adapter's read.
+#   command = ["python3", "scripts/ready_cards.py"]
+
+[deny]
+ids = []                # never appended, whatever the tracker says
+labels = ["attended"]   # a card carrying any of these is never appended
+
+[hooks]
+# Run in the target repo before each cycle's read, for a board whose ready labels are
+# derived. An argument list. A failure is logged and the cycle continues.
+#   pre_cycle = ["python3", "scripts/board.py", "sync"]

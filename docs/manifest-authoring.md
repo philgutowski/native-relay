@@ -289,6 +289,7 @@ python3 <runner> pair validate <pair>
 python3 <runner> dispatch <pair>              # both backends at once, merges in the listed order
 python3 <runner> status <manifest>
 python3 <runner> summary <manifest>
+python3 <runner> feed <manifest> --dry-run    # a manifest that grows, section 11
 ```
 
 An attached `dispatch` with no policy presents the two choices, `serial` and `parallel`, with serial
@@ -303,6 +304,95 @@ the order you already chose as the merge order. Prefer claude for high judgment 
 mechanical, bounded work, using the rubric. `run` on the mixed file still goes one task at a time.
 Dispatch overlaps one claude build with one grok build, each in a worktree of the target repo, and
 merges strictly in that order so a grok task that finishes first still waits its turn.
+
+## 11. A manifest that grows: the feeder sidecar
+
+Skip this unless the queue is too long to list or its cards depend on each other. A manifest
+meant for `relay feed` is written exactly as above with two differences.
+
+**The task list may start empty.** Leave out `[[tasks]]` entirely and the feeder appends the
+first ones. `validate` and `run` still refuse an empty list, so check such a manifest with
+`feed <manifest> --dry-run`, which loads it, reads the tracker, and prints what it would append.
+Each block the feeder appends carries a comment line with the time and the card's title, and a
+task it excludes gains `excluded = true` and a `reason` naming the halt class and cause line.
+Do not reorder or renumber what it wrote; order lives in the order file.
+
+**`qualifying.independence` says something different.** It cannot claim no task depends on
+another. Write what is true, in your own words: a task is listed only once the tracker derives
+it ready, so everything it depends on has landed, and the runner merges one at a time.
+
+The feeder's settings are not a manifest table, because the feeder rewrites the manifest and an
+older pinned runner must still load it. They live in files beside the manifest, named from its
+stem. For `queue.toml`:
+
+| File | Who writes it | What it is |
+|---|---|---|
+| `queue.feeder.toml` | you | the sidecar: settings, all optional |
+| `queue.order` | you | priority, one card id per line, highest first, `#` comments |
+| `queue.models` | you | model routing, `id model  # why` per line, read fresh each cycle |
+| `queue.feeder.stop` | you, or `feed --stop` | its presence makes the feeder leave after the cycle |
+| `queue.feeder.state.json` | the feeder | halt counts and wait counts |
+| `queue.feeder.log` | the feeder | one line per decision |
+| `queue.feeder.lock` | the feeder | held while it runs; one feeder per manifest |
+| `queue.feeder.out` | `feed --detach` | the detached feeder's output and every run's |
+
+The sidecar, with its defaults:
+
+```toml
+[feeder]
+batch = 3
+max_halts = 2
+caffeinate = true
+
+[waits]
+quick_death_seconds = 600
+limit_wait_seconds = 1800
+limit_waits_max = 16
+idle_wait_seconds = 1800
+idle_waits_max = 48
+lease_wait_seconds = 600
+
+[models]
+default = "opus"
+effort = "high"
+allowed = ["fable", "opus", "sonnet"]
+
+[ready]
+labels = ["ready"]            # github: open issues carrying every label
+# jql = "project = EX AND status = \"Ready\""     # jira
+# command = ["python3", "scripts/ready_cards.py"]   # the escape hatch
+
+[deny]
+ids = []
+labels = []
+
+[hooks]
+# pre_cycle = ["python3", "scripts/board.py", "sync"]
+```
+
+- A key the feeder does not know is an error. A typo that was ignored would run a default for a
+  day.
+- `ready.command` and `hooks.pre_cycle` are argument lists, never shell strings, the same rule as
+  `gate.command`. Both run in the target repository. The ready command prints a JSON array of
+  cards, each with `id` or `number`, `title`, `body` or `description`, and `labels`, which is the
+  shape `gh issue list --json number,title,body,labels` already prints. Use it when ready is a
+  rule labels cannot say, such as a card that waits for other cards to close.
+- With GitHub and no `ready.labels`, or Jira and no `ready.jql`, the feeder offers nothing. It
+  never reads a whole backlog as ready.
+- Markdown needs no `[ready]` at all: every unchecked box is ready, since the file has no way to
+  say one task waits on another.
+- `models.default` must be in `models.allowed`. A routing line or a card's `**Model:** name`
+  body line outside the allowed set is ignored and logged. Whatever is chosen still passes
+  `validate` before it reaches the manifest, so a model that belongs to another backend is
+  refused there and that one card is left out. The closeout keeps `[closeout] model`.
+- Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
+  --restart`. The order and routing files are read at every cycle and need no restart.
+
+Exit codes of `feed`: 0 it left on its own terms (the stop file, a day with nothing ready,
+`--once`, `--dry-run`), 1 the manifest, the sidecar, or the checkout needs a person, 2 every
+task died quickly for the whole usage limit allowance, 3 another feeder holds this manifest.
+
+## 12. Exit codes of a run
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease.

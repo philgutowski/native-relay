@@ -145,7 +145,7 @@ class AdapterCase(unittest.TestCase):
 
 
 class SharedContract(AdapterCase):
-    """Every adapter answers the same eight methods and exposes nothing that writes."""
+    """Every adapter answers the same nine methods and exposes nothing that writes."""
 
     def each(self):
         yield "jira", self.jira(FakeOpener({"/issue/": "jira_issue_done.json", "search": "jira_search.json"}))
@@ -229,8 +229,87 @@ class ReturnTo(SharedContract):
             self.assertEqual(adapter.closeout_instructions(outcome),
                              adapter.closeout_instructions(outcome, return_to="Todo"))
 
-    def test_the_interface_is_still_eight_methods(self):
-        self.assertEqual(len(adapters.INTERFACE), 8)
+    def test_the_interface_is_nine_methods_and_the_ninth_is_a_read(self):
+        # Eight until the feeder plan of 2026-09-19 added `ready`, which reads and never writes.
+        self.assertEqual(len(adapters.INTERFACE), 9)
+        self.assertIn("ready", adapters.INTERFACE)
+
+
+class _JsonOpener:
+    """One canned JSON answer for every request, with the URLs kept for the assertions."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.urls = []
+
+    def open(self, request, timeout=None):
+        self.urls.append(request.get_full_url())
+        return _Body(json.dumps(self.payload))
+
+
+class ReadySource(AdapterCase):
+    """Feeder plan, KTD3. What ready means is the sidecar's data; the adapter only reads it."""
+
+    ISSUES = [
+        {"number": 7, "title": "a unit", "body": "**Model:** fable",
+         "labels": [{"name": "unit"}, {"name": "ready"}]},
+        {"number": 8, "title": "not ready yet", "body": "", "labels": [{"name": "unit"}]},
+        {"number": 9, "title": "ready and attended", "body": "",
+         "labels": [{"name": "unit"}, {"name": "ready"}, {"name": "attended"}]},
+    ]
+
+    def gh(self, code=0, payload=None, err=""):
+        calls = []
+
+        def run(args, timeout=None):
+            calls.append(list(args))
+            return _Proc(code, json.dumps(self.ISSUES if payload is None else payload), err)
+        return run, calls
+
+    def test_github_returns_open_issues_carrying_every_configured_label(self):
+        run, calls = self.gh()
+        cards, reason = self.github(run).ready({"labels": ["unit", "ready"]})
+        self.assertIsNone(reason)
+        self.assertEqual([card["id"] for card in cards], ["7", "9"])
+        self.assertEqual(cards[0]["description"], "**Model:** fable")
+        self.assertEqual(cards[1]["labels"], ("unit", "ready", "attended"))
+        self.assertEqual(calls[0][:5], ["gh", "issue", "list", "--state", "open"])
+
+    def test_github_with_no_labels_configured_is_a_reason_and_never_the_whole_backlog(self):
+        run, calls = self.gh()
+        cards, reason = self.github(run).ready({})
+        self.assertEqual(cards, [])
+        self.assertIn("no ready labels", reason)
+        self.assertEqual(calls, [])
+
+    def test_a_github_read_failure_is_a_reason_not_an_empty_board(self):
+        run, _ = self.gh(code=1, err="HTTP 502")
+        cards, reason = self.github(run).ready({"labels": ["ready"]})
+        self.assertEqual(cards, [])
+        self.assertIn("502", reason)
+
+    def test_jira_runs_the_configured_query_and_drops_a_done_card(self):
+        opener = _JsonOpener({"issues": [
+            {"key": "EX-1", "fields": {"summary": "one", "status": {"name": "Ready"},
+                                       "labels": ["unit"], "description": None}},
+            {"key": "EX-2", "fields": {"summary": "two", "status": {"name": "Done"}}},
+        ]})
+        cards, reason = self.jira(opener).ready({"jql": "project = EX AND status = Ready"})
+        self.assertIsNone(reason)
+        self.assertEqual([(card["id"], card["labels"]) for card in cards], [("EX-1", ("unit",))])
+        self.assertIn("status+%3D+Ready", opener.urls[0])
+
+    def test_jira_with_no_query_configured_is_a_reason(self):
+        opener = _JsonOpener({"issues": []})
+        cards, reason = self.jira(opener).ready({})
+        self.assertEqual(cards, [])
+        self.assertIn("no ready query", reason)
+        self.assertEqual(opener.urls, [])
+
+    def test_markdown_ready_is_every_unchecked_box(self):
+        cards, reason = self.markdown().ready({})
+        self.assertIsNone(reason)
+        self.assertEqual([card["id"] for card in cards], ["T-1", "T-3"])
 
 
 class Jira(AdapterCase):

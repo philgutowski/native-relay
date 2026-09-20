@@ -252,6 +252,35 @@ class JiraAdapter:
             params = dict(params, nextPageToken=token)
         return found
 
+    def ready(self, source):
+        """The cards a configured JQL query returns, in the query's own order. JQL is Jira's
+        search language, and what ready means on a Jira board (a status, a label, no open
+        blocker link) differs per project, so the query is the project's and none is assumed.
+        A done status is filtered again on what comes back, the same belt `candidates` wears."""
+        jql = str((source or {}).get("jql") or "").strip()
+        if not jql:
+            return [], "no ready query is configured; set [ready] jql in the feeder sidecar"
+        params = {"jql": jql, "fields": "summary,status,labels,description",
+                  "maxResults": SEARCH_PAGE_SIZE}
+        found = []
+        for _ in range(SEARCH_PAGE_LIMIT):
+            payload, reason = self._get(SEARCH_PATH, params)
+            if payload is None:
+                return [], reason
+            for issue in payload.get("issues") or []:
+                fields = issue.get("fields") or {}
+                status = (fields.get("status") or {}).get("name")
+                if status and status.lower() in self._done:
+                    continue
+                found.append({"id": issue.get("key"), "title": fields.get("summary") or "",
+                              "description": _adf_text(fields.get("description")).strip(),
+                              "labels": tuple(str(name) for name in fields.get("labels") or [])})
+            token = payload.get("nextPageToken")
+            if payload.get("isLast", True) or not token:
+                break
+            params = dict(params, nextPageToken=token)
+        return found, None
+
     def read(self, task_id):
         payload, reason = self._issue(task_id)
         if payload is None:

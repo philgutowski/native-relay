@@ -246,9 +246,13 @@ def _declared_paths(value):
     return tuple(normalized)
 
 
-def load(path):
+def load(path, allow_no_tasks=False):
     """Parse a manifest file into a Manifest. Defaults are applied here and named in
-    `defaults_applied`, so validate can report them; missing optional tables become empty."""
+    `defaults_applied`, so validate can report them; missing optional tables become empty.
+
+    `allow_no_tasks` is the feeder's: a manifest the feeder grows may start with no `[[tasks]]`
+    at all, and the feeder has to read its project and tracker before it can append the first
+    one. `validate` still refuses an empty task list, so nothing can run such a manifest."""
     path = os.path.abspath(path)
     try:
         with open(path, "rb") as handle:
@@ -257,7 +261,8 @@ def load(path):
         raise ManifestError("manifest not found: %s" % path)
     except tomllib.TOMLDecodeError as exc:
         raise ManifestError("manifest is not valid TOML: %s" % exc)
-    missing = [name for name in REQUIRED_TABLES if name not in raw]
+    missing = [name for name in REQUIRED_TABLES if name not in raw
+               and not (allow_no_tasks and name == "tasks")]
     if missing:
         raise ManifestError("manifest is missing required tables: %s" % ", ".join(missing))
 

@@ -29,6 +29,10 @@ COMMENT_PAGE_SIZE = 100
 COMMENT_DIGEST_LIMIT = 200
 
 ISSUE_FIELDS = "id,title,body,state,comments"
+# The ready read lists issues rather than board items: labels live on the issue, and `gh issue
+# list` has no 500 item ceiling to fall off the end of.
+READY_FIELDS = "number,title,labels,body"
+READY_ISSUE_LIMIT = 1000
 CLOSED_STATE = "CLOSED"
 
 WRITE_BASH_PREFIXES = ("gh issue", "gh project item-edit")
@@ -124,7 +128,7 @@ class GitHubAdapter:
         return [{"id": str(entry.get("id")), "body": entry.get("body") or "",
                  "created": entry.get("createdAt")} for entry in payload.get("comments") or []], None
 
-    # Triple snapshot transport.  These remain private methods so the eight-method generic
+    # Triple snapshot transport.  These remain private methods so the nine-method generic
     # adapter interface stays usable by Jira and markdown.  The module functions after this
     # class are the opt-in GitHub-only coordinator seam.
     def _graphql(self, query, variables):
@@ -319,6 +323,26 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             })
         return found
 
+    def ready(self, source):
+        """Open issues carrying every label in `source["labels"]`. With no labels configured the
+        answer is a reason, never every open issue: a feeder with nothing to go on must not
+        read the whole backlog as ready. Anything subtler than labels, such as a card that waits
+        on another card, is project policy and belongs in the sidecar's ready command."""
+        wanted = [str(name) for name in (source or {}).get("labels") or []]
+        if not wanted:
+            return [], "no ready labels are configured; set [ready] labels in the feeder sidecar"
+        payload, reason = self._gh(["gh", "issue", "list", "--state", "open",
+                                    "--limit", str(READY_ISSUE_LIMIT), "--json", READY_FIELDS])
+        if payload is None:
+            return [], reason
+        found = []
+        for issue in payload or []:
+            labels = tuple(str((label or {}).get("name")) for label in issue.get("labels") or [])
+            if all(name in labels for name in wanted):
+                found.append({"id": str(issue.get("number")), "title": issue.get("title") or "",
+                              "description": issue.get("body") or "", "labels": labels})
+        return found, None
+
     def read(self, task_id):
         payload, reason = self._issue(task_id)
         if payload is None:
@@ -392,7 +416,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
 # Triple coordinator read and comparison primitives ------------------------------------------
 #
 # These are module functions, intentionally not methods on the generic adapter interface.  A
-# triple batch is GitHub Projects specific; adding a ninth required method would make an
+# triple batch is GitHub Projects specific; adding another required method would make an
 # otherwise compatible Jira or markdown adapter pretend it can offer board identity fencing.
 
 

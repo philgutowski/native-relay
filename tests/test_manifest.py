@@ -666,6 +666,21 @@ class BackendModelCoherence(ManifestCase):
         self.assertTrue(offending, result.errors)
         self.assertTrue(any("grok" in error and "sonnet" in error for error in offending), offending)
 
+    def test_fable_sent_to_grok_or_codex_is_refused_and_is_valid_on_claude(self):
+        # 2026-09-19. While `fable` was missing from claude's known models it fell under KTD11's
+        # "no backend claims it" rule, so a [defaults] edit to grok or codex passed validate and
+        # would have handed the alias to a CLI that does not take it.
+        for backend in ("grok", "codex"):
+            with self.subTest(backend=backend):
+                permissions = self.CODEX_PERMISSIONS if backend == "codex" else ""
+                result = mf.validate(self.load(self._all_on(backend, "fable", permissions)))
+                mismatches = [error for error in result.errors if "belongs to backend" in error]
+                self.assertEqual(len(mismatches), 2, result.errors)
+                self.assertTrue(all("'fable'" in error and "claude" in error
+                                    for error in mismatches), mismatches)
+        result = mf.validate(self.load(self._all_on("claude", "fable")))
+        self.assertEqual(other_errors(result), [])
+
     def test_a_model_no_backend_claims_is_allowed_through(self):
         # KTD11: the check is negative, so a model name Relay has never heard of is not refused.
         # A positive allowlist would refuse this the day a provider ships a new model.

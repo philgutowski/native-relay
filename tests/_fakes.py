@@ -21,11 +21,16 @@ class FakeAdapter:
     """
 
     def __init__(self, statuses=None, comments=None, references=None, candidates=None,
-                 write_patterns=None, closeout_tools=("Bash",), instructions=None):
+                 write_patterns=None, closeout_tools=("Bash",), instructions=None, ready=None,
+                 ready_reason=None):
         self.statuses = dict(statuses or {})
         self.comments = dict(comments or {})
         self.references = dict(references or {})
         self._candidates = list(candidates or [])
+        # The feeder's read: cards shaped {"id", "title", "description", "labels"}. A test may
+        # reassign `ready_cards` between cycles to model a board that moves.
+        self.ready_cards = list(ready or [])
+        self.ready_reason = ready_reason
         self._write_patterns = write_patterns or {"tools": ("fake_tracker__",), "bash": (), "paths": ()}
         self._closeout_tools = tuple(closeout_tools)
         self._instructions = dict(instructions or {})
@@ -34,6 +39,12 @@ class FakeAdapter:
     def candidates(self):
         self.calls.append(("candidates",))
         return list(self._candidates)
+
+    def ready(self, source):
+        self.calls.append(("ready", source))
+        if self.ready_reason:
+            return [], self.ready_reason
+        return [dict(card) for card in self.ready_cards], None
 
     def read(self, task_id):
         self.calls.append(("read", task_id))

@@ -11,7 +11,7 @@ import unittest
 
 import _paths
 import _repo
-from relay import cli, manifest as mf
+from relay import cli, feeder, manifest as mf
 
 REPO_ROOT = _paths.REPO_ROOT
 EXAMPLES = os.path.join(REPO_ROOT, "docs", "examples")
@@ -19,7 +19,7 @@ SKILL = os.path.join(REPO_ROOT, "skills", "relay", "SKILL.md")
 
 # Every verb the plan's runner subcommand table names.
 VERBS = ("validate", "run", "status", "tail", "summary", "audit", "verify", "lease",
-         "pair", "dispatch")
+         "pair", "dispatch", "feed")
 
 # What must never appear in anything Relay ships (R40). These are the shapes a real project
 # leaks in: a Jira key, the operator's own repo, a live Atlassian site, and the operator's own
@@ -103,6 +103,36 @@ class Examples(unittest.TestCase):
                 out = io.StringIO()
                 code = cli.main(["validate", self.localised(path)], env=env, out=out)
                 self.assertEqual(code, cli.EXIT_OK, out.getvalue())
+
+
+class FeederExamples(unittest.TestCase):
+    """The example sidecar says every value in it is the default unless it is marked as an
+    example, so a default that moves in code has to move in the file a new operator copies."""
+
+    STEM = os.path.join(EXAMPLES, "feeder", "manifest-github-projects")
+
+    def test_the_example_sidecar_loads_and_its_settings_are_the_defaults(self):
+        config = feeder.load_config(self.STEM + ".feeder.toml")
+        defaults = feeder.Config()
+        for name in ("batch", "max_halts", "caffeinate", "quick_death_seconds",
+                     "limit_wait_seconds", "limit_waits_max", "idle_wait_seconds",
+                     "idle_waits_max", "lease_wait_seconds", "default_model", "default_effort",
+                     "allowed_models"):
+            self.assertEqual(getattr(config, name), getattr(defaults, name), name)
+        self.assertEqual(config.ready_source, {"labels": ["ready"]})
+        self.assertEqual(config.denied_labels, ("attended",))
+
+    def test_the_example_sidecar_is_named_the_way_the_feeder_derives_it(self):
+        paths = feeder.paths_for(self.STEM + ".toml")
+        for path in (paths.config, paths.order, paths.routing):
+            self.assertTrue(os.path.isfile(path), path)
+
+    def test_the_example_order_and_routing_files_parse(self):
+        with open(self.STEM + ".order") as handle:
+            self.assertEqual(feeder.read_order(handle.read()), {"12": 0, "14": 1, "13": 2})
+        with open(self.STEM + ".models") as handle:
+            chosen, notes = feeder.read_routing(handle.read(), feeder.Config().allowed_models)
+        self.assertEqual((chosen, notes), ({"12": "fable"}, []))
 
 
 class Skill(unittest.TestCase):

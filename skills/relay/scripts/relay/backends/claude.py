@@ -5,8 +5,10 @@ from . import (Evidence as _Evidence, TEXT_CHARS as _TEXT_CHARS, _argument_of,
 
 # Issue #58, KTD11. A short, deliberately partial list of the aliases this CLI takes for
 # `--model`, so a manifest that sends a claude model to another backend is refused at validate.
-# An unlisted name is allowed through, so a new alias costs nothing here.
-CAPABILITY = _record("claude", known_models=("opus", "sonnet", "haiku"))
+# An unlisted name is allowed through, so a new alias costs nothing here. `fable` joined
+# 2026-09-19 once the alias was confirmed headless: while it was unlisted it launched fine on
+# claude, and for the same reason a manifest sending it to grok or codex was not refused.
+CAPABILITY = _record("claude", known_models=("fable", "opus", "sonnet", "haiku"))
 
 parse_version = _parse_leading_digit
 

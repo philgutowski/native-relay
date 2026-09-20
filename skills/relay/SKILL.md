@@ -14,7 +14,8 @@ never do the runner's work by hand. `docs/manifest-authoring.md` at the repo roo
 authoring procedure as a plain document, for an operator on any host.
 
 Read `CONCEPTS.md` at the repo root for the vocabulary: Runner, Manifest, Task process, Closeout
-process, Backend, Halt class, Verify-landed. Use those words with the operator.
+process, Backend, Halt class, Verify-landed, and for a continuous run Feeder, Cycle, Batch, Ready
+source, Model routing. Use those words with the operator.
 
 ## The runner
 
@@ -59,6 +60,11 @@ python3 <runner> audit <manifest>               # the cards that disagree with t
 python3 <runner> verify <manifest> <task-id>    # re-run the landing verdict for one task
 python3 <runner> lease <manifest>               # who holds the lease
 python3 <runner> lease <manifest> --break       # clear it; operator's explicit call only
+python3 <runner> feed <manifest> --dry-run      # continuous run: what would the next cycle append; writes nothing
+python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
+python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
+python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
+python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
 ```
 
 `run --follow` and `tail` share four options: `--phases` prints phase events without the decoded
@@ -398,6 +404,64 @@ and on the task's record. Two things bound that: a stranded task branch is refus
 above, judged against the name and baseline the record already carries, so the edit does not get
 the task past it; and a blocked task needs `--retry-blocked` before a reassignment reaches it at
 all. A backend edit to `codex` is refused at validate, since Codex has no verified review step.
+
+## A continuous run: the feeder
+
+Reach for `feed` instead of `run` when the operator's queue is too long to list up front, or when
+its cards depend on each other. A plain manifest must list only independent tasks. A feeder can
+take a dependent queue, because it appends only the cards the tracker reports as ready, three at
+a time by default, runs, reads the summary, and asks again, so a card is offered in the cycle
+after its foundation lands.
+
+Author the manifest as above, with two differences. Its `[[tasks]]` may be left out entirely,
+since the feeder appends the first ones. And `qualifying.independence` cannot claim that no task
+depends on another, so ask the operator for a sentence that says what is true: a task is listed
+only once the tracker derives it ready. Write their words, never yours.
+
+Then write the sidecar beside the manifest, named from its stem, `<stem>.feeder.toml`. Section 11
+of `docs/manifest-authoring.md` has every key and `docs/examples/feeder/` has one to copy. Ask
+the operator, rather than guessing:
+
+- What makes a card ready on their board: labels on GitHub, a JQL query on Jira, nothing for
+  markdown, or a ready command of their own that prints cards as JSON. If the board derives its
+  ready labels, the command that recomputes them is the `pre_cycle` hook.
+- Which cards are never a session's to take. Those go in `[deny]` by id or by label.
+- Which cards deserve the stronger model, one `id model  # why` line each in `<stem>.models`.
+  A working test: the card needs design judgment before any code. It is read fresh every
+  cycle, so the operator can keep editing it while the run is going.
+- The order, highest priority first, in `<stem>.order`.
+
+Launch in three steps and read the manifest after each of the first two:
+
+```bash
+python3 <runner> feed <manifest> --dry-run
+python3 <runner> feed <manifest> --once
+python3 <runner> feed <manifest> --detach --notify
+```
+
+While a feeder is alive, do not `run` or `dispatch` its manifest by hand, and do not reorder the
+tasks it appended. `status`, `tail`, `summary`, and `audit` stay safe, since none takes the
+lease. What it is doing is in `<stem>.feeder.log`, one line per decision. To change its settings,
+edit the sidecar and `feed --restart`: a running feeder holds the settings and the code it
+loaded at its start. Nothing is killed by `--stop` or `--restart`; the task in flight finishes
+and merges first.
+
+How it ends, by exit code: 0 it left on its own terms, the stop file or a day with nothing
+ready. 1 a person is needed: the checkout is dirty or off its default branch, the runner refused
+the manifest, the run halted with a run scoped class (nothing is counted against the task then),
+or a task that halted twice could not be excluded. 2 every task died within
+minutes for eight hours, which is not a usage limit, so read the summary. 3 another feeder
+already holds this manifest.
+
+Three things the feeder tells the operator that a summary alone would not. A task it excluded
+after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest
+itself. A task the runner skipped is logged and notified with its reason, because a skipped card
+is never built until the card is fixed; a card whose text names a `.claude/` path is the usual
+cause. And a card whose routing failed `validate`, a model that belongs to another backend, is
+left out of the manifest and named in the log until its routing changes.
+
+Start a feeder from a pinned extract of a commit when the operator has one, never from a
+checkout somebody is editing. It launches the runner from its own tree at every cycle.
 
 ## What this skill never does
 

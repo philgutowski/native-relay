@@ -1,0 +1,6 @@
+# Priority, one card id per line, highest first. Anything after the id is a comment.
+# The feeder offers ready cards in this order and puts any ready card not listed here after
+# the last line, by id. Edit freely; it is read at every cycle.
+12  # the schema change the two below build on
+14
+13
