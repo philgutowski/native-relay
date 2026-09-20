@@ -19,10 +19,34 @@ _ARGUMENT_KEYS = ("command", "file_path", "pattern", "skill", "description")
 def normalize_transcript(transcript_path, log_path=None):
     """The written line shape (Backends U6, origin KTD2) is Claude's own transcript primitive,
     so this normalizer is the identity wrap the origin plan predicted: `_read_jsonl` already
-    produces lines shaped exactly like a parsed Claude transcript object."""
+    produces lines shaped exactly like a parsed Claude transcript object.
+
+    When the transcript does not open, the run's own stdout log stands in. Under
+    `--output-format stream-json` the CLI prints the same `assistant` and `user` objects it
+    writes to the transcript, so the same reader decodes both, and the log is a file Relay
+    opened, wrote and owns rather than one it has to locate afterwards. The IW run of
+    2026-09-20 is why: three tasks exited 0 with a complete envelope, their transcripts were
+    written under a project slug the prediction and the glob both missed, and each was recorded
+    as `unexpected_error` with its branch stranded while a full stdout log of the same session
+    sat in the run's own log directory."""
     lines, malformed, opened = _read_jsonl(transcript_path)
-    return _Evidence(lines=lines, malformed_lines=malformed, decoded_events=len(lines),
-                      undetectable=frozenset(), opened=opened)
+    if opened or not log_path:
+        return _Evidence(lines=lines, malformed_lines=malformed, decoded_events=len(lines),
+                         undetectable=frozenset(), opened=opened)
+    fallback, fallback_malformed, fallback_opened = _read_jsonl(log_path)
+    if not any(obj.get("type") == contracts.TRANSCRIPT_TYPE_ASSISTANT for _, obj in fallback):
+        # Opening the log is not the test, and neither is decoding it. The envelope lives in
+        # the last assistant text block, so a capture holding no assistant record contains
+        # nothing the process said and cannot answer whether it printed one. Reading it as
+        # evidence anyway would turn a runner fault into `no_envelope`, a claim about the task
+        # that nobody observed (KTD5). A log that is not this CLI's stream, one truncated to
+        # nothing, and one from a process killed before its first turn all land here, and for
+        # all three the absent transcript stays the answer.
+        return _Evidence(lines=lines, malformed_lines=malformed, decoded_events=len(lines),
+                         undetectable=frozenset(), opened=opened)
+    return _Evidence(lines=fallback, malformed_lines=fallback_malformed,
+                     decoded_events=len(fallback), undetectable=frozenset(),
+                     opened=fallback_opened, source=log_path)
 
 
 def readable(transcript_path, evidence):

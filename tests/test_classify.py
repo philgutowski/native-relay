@@ -204,6 +204,93 @@ class Fixtures(unittest.TestCase):
         self.assertTrue(r["findings_unavailable"])
         self.assertIsNone(r["findings"])
 
+    def test_a_missing_transcript_falls_back_to_the_run_s_own_stdout_log(self):
+        """A Jira run of 2026-09-20. Three tasks in one sweep each exited 0 with a complete
+        envelope, and each was recorded as `unexpected_error` with its branch stranded, because
+        the CLI wrote the transcript under a project slug that neither the prediction nor the
+        glob in `launch.find_transcript` matched. Relay had the whole session anyway: under
+        `--output-format stream-json` the CLI prints the same `assistant` and `user` objects to
+        stdout, and Relay captures that to the run's log directory itself. Prefer a file Relay
+        opened and wrote over one it has to go looking for."""
+        launched = SimpleNamespace(timed_out=False, exit_code=0,
+                                   log_path=os.path.join(FIXTURES, "success.jsonl"))
+        r = classify.classify(os.path.join(FIXTURES, "does-not-exist.jsonl"), launched)
+        self.assertTrue(r["transcript_present"])
+        self.assertFalse(r["findings_unavailable"])
+        self.assertIsNone(r["halt_class"])
+        self.assertTrue(r["routable"])
+        self.assertEqual(r["envelope"]["status"], "complete")
+
+    def test_the_digest_names_the_file_the_lines_were_read_from(self):
+        """The halt record and the summary quote `transcript_path`. Leaving the prediction there
+        after falling back would tell the operator a file is present under a name nothing was
+        ever opened at, which is the reading that cost this run three tasks."""
+        log = os.path.join(FIXTURES, "success.jsonl")
+        launched = SimpleNamespace(timed_out=False, exit_code=0, log_path=log)
+        r = classify.classify(os.path.join(FIXTURES, "does-not-exist.jsonl"), launched)
+        self.assertEqual(r["transcript_path"], log)
+
+    def test_a_transcript_that_opens_is_never_second_guessed_by_the_log(self):
+        """The log stands in, it does not merge or override. A readable transcript is the
+        evidence, and the digest keeps naming it."""
+        transcript = os.path.join(FIXTURES, "success.jsonl")
+        launched = SimpleNamespace(timed_out=False, exit_code=0,
+                                   log_path=os.path.join(FIXTURES, "blocked.jsonl"))
+        r = classify.classify(transcript, launched)
+        self.assertEqual(r["envelope"]["status"], "complete")
+        self.assertEqual(r["transcript_path"], transcript)
+
+    def test_a_log_that_opens_but_decodes_nothing_is_not_evidence(self):
+        """Opening the log is not the test, decoding it is. A backend whose stdout is not
+        stream-json, a log truncated to nothing, or a process killed before its first line all
+        leave a file that opens and yields no record. Treating that as evidence would turn a
+        runner fault into `no_envelope`, which is a claim that the process ran and printed no
+        envelope, and nobody observed that (KTD5)."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "task.stdout.log")
+            with open(log, "w") as handle:
+                handle.write("+ git checkout -b relay/T-1\nSwitched to a new branch\n")
+            launched = SimpleNamespace(timed_out=False, exit_code=0, log_path=log)
+            r = classify.classify(os.path.join(FIXTURES, "does-not-exist.jsonl"), launched)
+        self.assertFalse(r["transcript_present"])
+        self.assertTrue(r["findings_unavailable"])
+        self.assertEqual(r["halt_class"], contracts.HALT_UNEXPECTED_ERROR)
+        self.assertEqual(r["transcript_path"], os.path.join(FIXTURES, "does-not-exist.jsonl"))
+
+    def test_a_log_of_only_system_and_result_lines_is_not_evidence_either(self):
+        """The sharper half, and the one an end to end run found. A capture can decode
+        perfectly and still hold nothing the process said: the CLI's own `system` preamble and
+        its terminal `result` record are about the session, not about the task's turns. The
+        envelope lives in the last assistant text block, so without one there is no question
+        this log can answer."""
+        import json as _json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "task.stdout.log")
+            with open(log, "w") as handle:
+                for obj in ({"type": "system", "subtype": "init"},
+                            {"type": "result", "subtype": "success", "is_error": False}):
+                    handle.write(_json.dumps(obj) + "\n")
+            launched = SimpleNamespace(timed_out=False, exit_code=0, log_path=log)
+            r = classify.classify(os.path.join(FIXTURES, "does-not-exist.jsonl"), launched)
+        self.assertFalse(r["transcript_present"])
+        self.assertTrue(r["findings_unavailable"])
+        self.assertEqual(r["halt_class"], contracts.HALT_UNEXPECTED_ERROR)
+
+    def test_neither_file_opening_is_still_the_runner_fault_class(self):
+        """The narrowing above must not swallow the case it was written for. With no evidence
+        at all the class stays `unexpected_error` and findings stay unavailable."""
+        launched = SimpleNamespace(timed_out=False, exit_code=0,
+                                   log_path=os.path.join(FIXTURES, "also-does-not-exist.log"))
+        r = classify.classify(os.path.join(FIXTURES, "does-not-exist.jsonl"), launched)
+        self.assertFalse(r["transcript_present"])
+        self.assertTrue(r["findings_unavailable"])
+        self.assertEqual(r["halt_class"], contracts.HALT_UNEXPECTED_ERROR)
+        self.assertEqual(r["transcript_path"], os.path.join(FIXTURES, "does-not-exist.jsonl"))
+
     def test_a_readable_run_with_no_envelope_still_reports_its_findings_as_available(self):
         """The narrowing must not swallow the ordinary silent task: the evidence opened, the
         envelope was genuinely absent, and both the class and the finding stand."""
