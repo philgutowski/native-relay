@@ -240,7 +240,8 @@ def cmd_run(args, env, out):
     manifest, failure = _load(args.manifest, out)
     if failure:
         return failure
-    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      check_branches=False)
     if not result.ok:
         for error in result.errors:
             out.write("error: %s\n" % error)
@@ -584,7 +585,8 @@ def _load_dispatch_target(path, env, out):
     manifest, failure = _load(path, out)
     if failure:
         return None, failure
-    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      check_branches=False)
     if not result.ok:
         for error in result.errors:
             out.write("error: %s\n" % error)
@@ -602,7 +604,8 @@ def cmd_pair(args, env, out):
     manifest, failure = _load(args.manifest, out)
     if failure:
         return failure
-    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      check_branches=False)
     if not result.ok:
         for error in result.errors:
             out.write("error: %s\n" % error)

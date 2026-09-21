@@ -15,6 +15,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import tomllib
@@ -553,8 +554,11 @@ def _in_flight_branch_warnings(manifest, remotes, env=None):
                       "%s branch -m %s <new name>`, leave any remote copy in place as a backup, "
                       "and put the instruction to merge %s first in the issue body, since nothing "
                       "else reaches a fresh headless process. If the earlier work is not worth "
-                      "keeping, the rename still applies and the issue edit does not"
-                      % (repo, branch, "origin/" + branch if remote else "the renamed branch"))
+                      "keeping, the rename still applies and the issue edit does not. If a run "
+                      "on this manifest started or halted this Task, the branch is that run's "
+                      "own: leave it and read status and the Resume section instead"
+                      % (shlex.quote(repo), branch,
+                         "origin/" + branch if remote else "the renamed branch"))
         else:
             consequence = ("preflight reads only the local branch list, so it will not refuse "
                            "Task %s, but the fresh Task process starts from the default branch "
@@ -568,9 +572,13 @@ def _in_flight_branch_warnings(manifest, remotes, env=None):
     return warnings
 
 
-def validate(manifest, check_repo=True, check_environment=False, env=None):
+def validate(manifest, check_repo=True, check_environment=False, env=None, check_branches=True):
     """Apply every rule from plan U2 step 2. Returns a ValidationResult; never raises for a
-    rule failure, so the CLI can print every problem at once."""
+    rule failure, so the CLI can print every problem at once.
+
+    `check_branches` false skips the Task branch read under the repository checks, which costs a
+    network call to origin. Only `validate` prints warnings, so every caller that discards them
+    passes false rather than pay for a diagnostic nobody reads."""
     result = ValidationResult(defaults_applied=list(manifest.defaults_applied))
     err = result.errors.append
     warn = result.warnings.append
@@ -832,7 +840,8 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
                 err("git config %s does not resolve in %s; the runner's merge authors a commit" % (key, repo))
         if manifest.project.default_branch is None and gitread.default_branch(repo) is None:
             err("project.default_branch is unset and refs/remotes/origin/HEAD is not set in the repo")
-        result.warnings.extend(_in_flight_branch_warnings(manifest, remotes, env))
+        if check_branches:
+            result.warnings.extend(_in_flight_branch_warnings(manifest, remotes, env))
     if check_environment:
         ready_env = os.environ if env is None else env
         err_list = _backend_readiness_errors(manifest, ready_env)

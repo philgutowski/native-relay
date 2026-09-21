@@ -409,8 +409,10 @@ delete, which keeps every commit and frees the card (see the `unclean_exit` row 
 ### A Task branch left by an earlier run
 
 A Task on a new manifest can already have a branch from an earlier run that halted, timed out, or
-was killed, under any prefix and whichever Relay ran it. `validate` warns for each such Task,
-locally and on origin. It is a warning and not an error, because a hit is not always wrong, but a
+was killed, under the prefix this manifest resolves to. `validate` warns for each such Task,
+locally and on origin. A branch under some other prefix is not read and is not a launch problem.
+The branch may also be the current run's own, when a run on this manifest started or halted that
+Task; in that case leave it alone and use `status` and the rest of this section instead. It is a warning and not an error, because a hit is not always wrong, but a
 local hit is refused at launch: preflight's `no_task_branch` check reads the local branch list, no
 process starts, and `continue_past_task_halt` will not step over it, so the halt repeats on every
 later run until the operator moves the branch.

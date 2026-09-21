@@ -103,6 +103,7 @@ class GitRead(unittest.TestCase):
         found, reason = gitread.remote_heads(self.repo, ["relay/T-1"])
         self.assertIsNone(found)
         self.assertTrue(reason)
+        self.assertNotIn("\n", reason)
 
     def test_merge_head_exists(self):
         self.assertFalse(gitread.merge_head_exists(self.repo))

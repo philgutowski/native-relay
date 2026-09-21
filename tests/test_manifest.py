@@ -1127,6 +1127,24 @@ class InFlightTaskBranch(ManifestCase):
         self.assertTrue(any("could not read the branches on origin" in w for w in result.warnings),
                         result.warnings)
 
+    def test_check_branches_false_skips_the_read_for_callers_that_discard_warnings(self):
+        _repo.git(self.repo, "branch", "relay/T-1")
+        with mock.patch.object(mf.gitread, "remote_heads") as remote:
+            result = mf.validate(self.load(), check_branches=False)
+        remote.assert_not_called()
+        self.assertEqual(self.in_flight(result), [])
+
+    def test_the_repair_command_quotes_a_repo_path_with_a_space(self):
+        repo = _repo.make_repo(self.tmp.name, name="my repo")
+        _repo.git(repo, "branch", "relay/T-1")
+        (warning,) = self.in_flight(self.validate(self.base.replace(self.repo, repo)))
+        self.assertIn("git -C '%s' branch -m relay/T-1" % repo, warning)
+
+    def test_an_unreadable_origin_warning_stays_on_one_line(self):
+        _repo.git(self.repo, "remote", "set-url", "origin", os.path.join(self.tmp.name, "gone.git"))
+        (unreadable,) = [w for w in self.validate().warnings if "could not read" in w]
+        self.assertNotIn("\n", unreadable)
+
     def test_schema_only_validation_reads_no_branch_list(self):
         _repo.git(self.repo, "branch", "relay/T-1")
         result = mf.validate(self.load(), check_repo=False)

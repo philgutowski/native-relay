@@ -105,30 +105,42 @@ def branch_exists(repo, name):
     return proc.returncode == 0
 
 
-def remote_heads(repo, names, remote="origin", env=None, timeout=REMOTE_READ_TIMEOUT_SECONDS):
-    """Which of the branch names `names` exist on `remote`, read from the remote itself rather
-    than from a possibly stale tracking ref. Returns (found, None), or (None, reason) when the
-    remote could not be read.
+def remote_refs(repo, refs, remote="origin", env=None, timeout=GIT_TIMEOUT_SECONDS):
+    """Read only the exact requested refs from `remote`, as (found, returncode, output) where
+    found is {ref: object-id}, or None when the read failed.
 
-    `ls-remote` matches a pattern against the tail of a ref, so `relay/10` also matches
-    `refs/heads/old/relay/10`; the answer is filtered back to exact names."""
+    `ls-remote --refs` asks the remote itself rather than a possibly stale tracking ref. It
+    matches a pattern against the tail of a ref, so `refs/heads/relay/10` also matches
+    `refs/heads/old/relay/10`; the answer is filtered back to exact names. A timeout raises."""
+    refs = tuple(refs)
+    proc = run(repo, ["ls-remote", "--refs", remote] + list(refs), check=False, env=env,
+               timeout=timeout)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return None, proc.returncode, output
+    found = {}
+    wanted = set(refs)
+    for line in (proc.stdout or "").splitlines():
+        oid, separator, ref = line.partition("\t")
+        if separator and ref in wanted and oid:
+            found[ref] = oid
+    return found, 0, output
+
+
+def remote_heads(repo, names, remote="origin", env=None, timeout=REMOTE_READ_TIMEOUT_SECONDS):
+    """Which of the branch names `names` exist on `remote`. Returns (found, None), or
+    (None, reason) when the remote could not be read, with the reason on one line."""
     names = list(names)
     if not names:
         return set(), None
-    wanted = {"refs/heads/" + name: name for name in names}
     try:
-        proc = run(repo, ["ls-remote", "--heads", remote] + list(wanted), check=False, env=env,
-                   timeout=timeout)
+        found, returncode, output = remote_refs(
+            repo, ["refs/heads/" + name for name in names], remote, env, timeout)
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, str(exc)
-    if proc.returncode != 0:
-        return None, (proc.stderr or "").strip() or "git exited %d" % proc.returncode
-    found = set()
-    for line in proc.stdout.splitlines():
-        ref = line.partition("\t")[2]
-        if ref in wanted:
-            found.add(wanted[ref])
-    return found, None
+        return None, " ".join(str(exc).split())
+    if found is None:
+        return None, " ".join(output.split()) or "git exited %d" % returncode
+    return {ref[len("refs/heads/"):] for ref in found}, None
 
 
 def show(repo, ref, path):
