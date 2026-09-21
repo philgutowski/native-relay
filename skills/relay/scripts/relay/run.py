@@ -635,7 +635,8 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                          baseline_tracker_status=card.get("status"),
                          baseline_comment_id=item.baseline_comment_id, branch=branch,
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
-                         model=task.model, halt_class=None,
+                         model=task.model, halt_class=None, halt_stage=None,
+                         halt_message=None, halt_evidence=None,
                          unenforced_restrictions=(_unenforced_scalar(manifest, capability)
                                                   if not capability.enforces_at_launch else None))
             workers.append(item)
@@ -1355,11 +1356,14 @@ def _begin_task(cfg, task):
         with open(log_path, "w", encoding="utf-8"):
             pass
 
+    # Every halt field clears here, not just the class. `halt_evidence` feeds the Cause line last
+    # and wins over the fresh record, so a leftover key would name a previous attempt's sha or
+    # branch inside a well formed sentence.
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
-                 halt_message=None,
+                 halt_message=None, halt_evidence=None,
                  excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
@@ -1530,7 +1534,7 @@ def _abandon_build(cfg, task_id, branch, dest=None):
             pass
     cfg.store.upsert(task_id, status=contracts.STATUS_PENDING, session_id=None,
                      transcript_path=None, halt_class=None, halt_stage=None,
-                     halt_message=None, skip_reason=None)
+                     halt_message=None, halt_evidence=None, skip_reason=None)
 
 
 def _abort_siblings(cfg, slots, waiting, keep_id):
