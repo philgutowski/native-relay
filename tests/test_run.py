@@ -889,6 +889,68 @@ class ResumeAfterHalt(RunCase):
         self.assertNotIn(first.message,
                          summary_module.render(summary_module.build(self.manifest, self.store())))
 
+    def test_a_relaunched_landing_carries_no_halt_evidence(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.queue_entry("success.jsonl", DIRTY_AND_HANG_SH)
+        first = self.go(timeout_overrides={"task_seconds": 2})
+        self.assertEqual(first.exit_code, runner.EXIT_HALTED)
+        self.assertTrue(self.store().get("T-2")["halt_evidence"])
+
+        os.remove(os.path.join(self.repo, "src_half.py"))
+        if gitread.branch_exists(self.repo, "relay/T-2"):
+            _repo.git(self.repo, "branch", "-D", "relay/T-2")
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        second = self.go()
+
+        self.assertEqual(second.exit_code, runner.EXIT_OK, second.message)
+        record = self.store().get("T-2")
+        self.assertEqual(record["status"], contracts.STATUS_LANDED)
+        self.assertFalse(record["halt_evidence"])
+
+    def test_a_second_halt_after_a_relaunch_names_none_of_the_first_attempts_evidence(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.queue_entry("success.jsonl", DIRTY_AND_HANG_SH)
+        first = self.go(timeout_overrides={"task_seconds": 2})
+        self.assertEqual(first.exit_code, runner.EXIT_HALTED)
+        before = self.store().get("T-2")
+        self.assertEqual(before["halt_class"], contracts.HALT_TIMEOUT)
+        stale = dict(before["halt_evidence"])
+        self.assertTrue(stale)
+
+        os.remove(os.path.join(self.repo, "src_half.py"))
+        if gitread.branch_exists(self.repo, "relay/T-2"):
+            _repo.git(self.repo, "branch", "-D", "relay/T-2")
+        self.queue_entry("success.jsonl", """set -e
+git checkout -q -b relay/T-2 main
+mkdir -p src .claude/skills/x
+echo "value = 2" > src/t_2.py
+echo "# skill" > .claude/skills/x/SKILL.md
+git add -A
+git commit -q -m "T-2 work"
+""")
+        self.closeout_halted("T-2")
+        second = self.go()
+
+        self.assertEqual(second.exit_code, runner.EXIT_HALTED, second.message)
+        record = self.store().get("T-2")
+        self.assertEqual(record["halt_class"], contracts.HALT_PATH_GATE)
+        # Keys only the first attempt's timeout raiser wrote must not survive into this record.
+        # This half holds even without the launch time reset, because a raiser writes its
+        # evidence wholesale; the landing test above is the one that bites on the reset.
+        own = set(record["halt_evidence"])
+        self.assertEqual(own & (set(stale) - {"branch"}), set(), record["halt_evidence"])
+        self.assertNotEqual(record["halt_message"], before["halt_message"])
+        entry = [t for t in summary_module.build(self.manifest, self.store())["tasks"]
+                 if t["id"] == "T-2"][0]
+        for key, value in stale.items():
+            if key not in own and isinstance(value, (str, int)):
+                self.assertNotIn(str(value), entry["cause"])
+
     def test_a_landed_task_is_never_run_again(self):
         self.task_success("T-1")
         self.closeout_landed("T-1")
