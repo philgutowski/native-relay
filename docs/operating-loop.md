@@ -45,10 +45,11 @@ card for ever or discarding finished work. There is a third. Pre flight asks whe
 `refs/heads/<branch>` exists and nothing else, so moving the ref into the tag namespace keeps every
 commit and frees the card:
 
-    git tag -a stranded/<branch> <branch> -m stranded
-    git branch -D <branch>
+    git tag -a stranded/<branch> <branch> -m stranded && git branch -D <branch>
 
-Then run again. The work stays retrievable from the tag, and the runner rebuilds the card from its
+Keep the `&&`. If the tag name is already taken, the tag fails and the delete must not run, because
+the branch is then the only ref to its commits. Pick a different tag name and try again. Then run
+again. The work stays retrievable from the tag, and the runner rebuilds the card from its
 own brief, which is often cheaper than resuming a branch whose recorded findings have gone stale.
 On 2026-09-20 a card with six sound commits stranded this way, scheduled as an attended sitting
 under the keep or discard reading, landed unattended in 39 minutes once tagged.
