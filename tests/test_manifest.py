@@ -1000,5 +1000,142 @@ class ShippingPush(ManifestCase):
                             local.warnings)
 
 
+class InFlightTaskBranch(ManifestCase):
+    """Issue #10. validate exited 0 on a manifest naming a Task whose branch an earlier run left
+    behind, and preflight then refused that Task at launch on no_task_branch."""
+
+    def in_flight(self, result):
+        return [w for w in result.warnings if "already has a branch" in w]
+
+    def validate(self, text=None):
+        result = mf.validate(self.load(text))
+        self.assertTrue(result.ok, result.errors)
+        return result
+
+    def bare(self):
+        return self.repo + ".git"
+
+    def test_a_clean_repo_carries_no_branch_warning(self):
+        self.assertEqual(self.in_flight(self.validate()), [])
+
+    def test_a_local_branch_warns_naming_the_branch_the_refusal_and_the_repair(self):
+        _repo.git(self.repo, "branch", "relay/T-1")
+        result = self.validate()
+        (warning,) = self.in_flight(result)
+        self.assertIn("Task T-1", warning)
+        self.assertIn("relay/T-1, locally:", warning)
+        self.assertIn("no_task_branch", warning)
+        self.assertIn("branch -m relay/T-1 <new name>", warning)
+        self.assertIn("issue body", warning)
+        self.assertIn("the renamed branch", warning)
+        self.assertIn(mf.IN_FLIGHT_BRANCH_DOC, warning)
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(_paths.__file__), "..",
+                                                    mf.IN_FLIGHT_BRANCH_DOC)))
+
+    def test_a_remote_only_branch_warns_without_claiming_preflight_refuses(self):
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-1")
+        self.assertFalse(_repo.git(self.repo, "branch", "--list", "relay/T-1").stdout.strip())
+        (warning,) = self.in_flight(self.validate())
+        self.assertIn("relay/T-1, on origin:", warning)
+        self.assertIn("will not refuse Task T-1", warning)
+        self.assertIn("merge origin/relay/T-1 first", warning)
+        self.assertNotIn("branch -m", warning)
+
+    def test_a_branch_both_local_and_remote_is_one_warning_pointing_at_the_remote_copy(self):
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-1")
+        _repo.git(self.repo, "branch", "relay/T-1")
+        (warning,) = self.in_flight(self.validate())
+        self.assertIn("relay/T-1, locally and on origin:", warning)
+        self.assertIn("merge origin/relay/T-1 first", warning)
+        self.assertIn("branch -m relay/T-1 <new name>", warning)
+
+    def test_a_hit_warns_and_never_fails_validation(self):
+        _repo.git(self.repo, "branch", "relay/T-1")
+        result = mf.validate(self.load())
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.errors, [])
+
+    def test_the_remote_is_read_from_the_remote_not_from_a_stale_tracking_ref(self):
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-1")
+        _repo.git(self.repo, "fetch", "-q", "origin")
+        _repo.git(self.bare(), "branch", "-D", "relay/T-1")
+        self.assertTrue(gitread_has_ref(self.repo, "refs/remotes/origin/relay/T-1"))
+        self.assertEqual(self.in_flight(self.validate()), [])
+
+    def test_a_branch_that_only_ends_in_the_task_branch_name_is_not_a_hit(self):
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/old/relay/T-1")
+        self.assertEqual(self.in_flight(self.validate()), [])
+
+    def test_the_manifests_own_prefix_names_the_branch_checked(self):
+        text = self.edit(r"^mirror = \[\]", 'mirror = []\nbranch_prefix = "feat/"')
+        _repo.git(self.repo, "branch", "relay/T-1")
+        self.assertEqual(self.in_flight(self.validate(text)), [])
+        _repo.git(self.repo, "branch", "feat/T-1")
+        (warning,) = self.in_flight(self.validate(text))
+        self.assertIn("feat/T-1, locally:", warning)
+
+    def test_an_empty_prefix_checks_the_bare_task_id(self):
+        text = self.edit(r"^mirror = \[\]", 'mirror = []\nbranch_prefix = ""')
+        _repo.git(self.repo, "branch", "T-1")
+        (warning,) = self.in_flight(self.validate(text))
+        self.assertIn("Task T-1 already has a branch, T-1, locally:", warning)
+
+    def test_an_excluded_task_is_not_checked(self):
+        _repo.git(self.repo, "branch", "relay/T-2")
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-2")
+        self.assertEqual(self.in_flight(self.validate()), [])
+
+    def test_each_task_with_a_branch_gets_its_own_warning(self):
+        text = self.edit(r'^excluded = true\n', "")
+        text = re.sub(r'^reason = .*\n', "", text, flags=re.M)
+        _repo.git(self.repo, "branch", "relay/T-1")
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-2")
+        warnings = self.in_flight(self.validate(text))
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertIn("Task T-1", warnings[0])
+        self.assertIn("Task T-2", warnings[1])
+
+    def test_a_repo_with_no_origin_still_checks_the_local_list(self):
+        repo = _repo.make_repo(self.tmp.name, name="solo", origin=False)
+        _repo.git(repo, "branch", "relay/T-1")
+        text = re.sub(r'^mode = "local_merge"$', 'mode = "local_merge"\npush = false',
+                      self.base.replace(self.repo, repo), count=1, flags=re.M)
+        result = self.validate(text)
+        (warning,) = self.in_flight(result)
+        self.assertIn("relay/T-1, locally:", warning)
+        self.assertFalse(any("could not read" in w for w in result.warnings), result.warnings)
+
+    def test_an_unreadable_origin_says_the_remote_was_not_checked_and_still_checks_local(self):
+        _repo.git(self.repo, "remote", "set-url", "origin", os.path.join(self.tmp.name, "gone.git"))
+        _repo.git(self.repo, "branch", "relay/T-1")
+        result = self.validate()
+        (unreadable,) = [w for w in result.warnings if "could not read the branches on origin" in w]
+        self.assertIn("was not checked", unreadable)
+        self.assertEqual(len(self.in_flight(result)), 1)
+
+    def test_a_remote_read_that_times_out_is_a_warning_not_a_crash(self):
+        import subprocess
+        real = mf.gitread.run
+
+        def run(repo, args, *rest, **kwargs):
+            if "ls-remote" in args:
+                raise subprocess.TimeoutExpired(["git"] + list(args), 30)
+            return real(repo, args, *rest, **kwargs)
+
+        with mock.patch.object(mf.gitread, "run", run):
+            result = self.validate()
+        self.assertTrue(any("could not read the branches on origin" in w for w in result.warnings),
+                        result.warnings)
+
+    def test_schema_only_validation_reads_no_branch_list(self):
+        _repo.git(self.repo, "branch", "relay/T-1")
+        result = mf.validate(self.load(), check_repo=False)
+        self.assertEqual(self.in_flight(result), [])
+
+
+def gitread_has_ref(repo, ref):
+    return _repo.git(repo, "show-ref", "--verify", "--quiet", ref, check=False).returncode == 0
+
+
 if __name__ == "__main__":
     unittest.main()

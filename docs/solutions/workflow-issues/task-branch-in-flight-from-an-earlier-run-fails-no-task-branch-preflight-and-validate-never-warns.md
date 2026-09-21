@@ -39,6 +39,8 @@ On 2026-09-07 the Cratekit finishing Manifest, `~/.relay/manifests/cratekit-fini
 
 **Why validate says nothing.** `manifest.validate` checks the Manifest and, with `check_repo`, the repository's shape. It has no reference to `branch_exists`, `task_branch_for`, or `preflight`. Preflight is a per Task, launch time check, and validate never composes a Task branch name. So a Manifest naming a Task whose branch is already in flight is valid by every rule validate applies. Do not read exit 0 as "no Task will be refused at launch".
 
+**Update, issue 10.** `validate` now warns for this case. Under the repository checks it composes each listed, non excluded Task's branch from the Manifest's resolved prefix, reads the local branch list with the same `branch_exists` preflight uses, and reads origin with `gitread.remote_heads`, and it warns once per Task with a hit, naming the branch, where it was found, and the repair below. It is a warning and not an error, and the exit code stays 0, so exit 0 still does not mean ready to launch while a warning stands. A branch found only on origin is warned about too, although preflight would not refuse it, because the fresh Task process would not know the earlier work is there. The by hand check below remains the way to see the same thing without running validate.
+
 **Check by hand before launch.** For every Task id on the Manifest, with the prefix the Manifest resolves to, which is the default relay prefix followed by a slash when `project.branch_prefix` is absent:
 
 ```bash
@@ -109,4 +111,4 @@ Preflight passed and the Task process was launched. Its log showed steady tool a
 - `docs/solutions/workflow-issues/task-branch-namer-empty-is-not-omit-retry-reads-the-stored-name.md`, the retry blocked side of the same branch name: the runner refuses against the stored name, and this doc is the case where no stored name exists.
 - `docs/solutions/workflow-issues/foreign-untracked-file-from-another-session-fails-tree-clean-preflight-and-unclean-exit-blames-the-task.md`, the sibling preflight check, `tree_clean`, refusing on something the Task did not do.
 - `CONCEPTS.md`, Task process and Backend, which carry the stranded branch rule for a blocked Task.
-- `skills/relay/SKILL.md`, "Author a manifest" and "Resume", neither of which names a Task whose branch is already in flight from a previous run. That gap is why this doc exists.
+- `skills/relay/SKILL.md`, "Author a manifest", "Validate before anything else", and "Resume", which named no Task whose branch was already in flight from a previous run when this doc was written. That gap was why this doc existed, and issue 10 closed it with the subsection "A Task branch left by an earlier run".

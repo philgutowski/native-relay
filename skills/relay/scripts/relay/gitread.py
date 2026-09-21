@@ -9,6 +9,9 @@ import os
 import subprocess
 
 GIT_TIMEOUT_SECONDS = 120
+# A remote read is a network call. The general bound above is sized for local git and would let
+# an unreachable origin hold a `validate` for two minutes.
+REMOTE_READ_TIMEOUT_SECONDS = 30
 
 
 class GitError(RuntimeError):
@@ -100,6 +103,32 @@ def is_ancestor(repo, ancestor, descendant):
 def branch_exists(repo, name):
     proc = run(repo, ["show-ref", "--verify", "--quiet", "refs/heads/" + name], check=False)
     return proc.returncode == 0
+
+
+def remote_heads(repo, names, remote="origin", env=None, timeout=REMOTE_READ_TIMEOUT_SECONDS):
+    """Which of the branch names `names` exist on `remote`, read from the remote itself rather
+    than from a possibly stale tracking ref. Returns (found, None), or (None, reason) when the
+    remote could not be read.
+
+    `ls-remote` matches a pattern against the tail of a ref, so `relay/10` also matches
+    `refs/heads/old/relay/10`; the answer is filtered back to exact names."""
+    names = list(names)
+    if not names:
+        return set(), None
+    wanted = {"refs/heads/" + name: name for name in names}
+    try:
+        proc = run(repo, ["ls-remote", "--heads", remote] + list(wanted), check=False, env=env,
+                   timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if proc.returncode != 0:
+        return None, (proc.stderr or "").strip() or "git exited %d" % proc.returncode
+    found = set()
+    for line in proc.stdout.splitlines():
+        ref = line.partition("\t")[2]
+        if ref in wanted:
+            found.add(wanted[ref])
+    return found, None
 
 
 def show(repo, ref, path):

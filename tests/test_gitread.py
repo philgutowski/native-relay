@@ -84,6 +84,26 @@ class GitRead(unittest.TestCase):
         self.assertEqual(gitread.remotes(bare), [])
         self.assertIsNone(gitread.default_branch(bare))
 
+    def test_remote_heads_answers_from_the_remote_and_matches_exact_names_only(self):
+        bare = os.path.join(self.tmp.name, "repo.git")
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-1")
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/old/relay/T-2")
+        found, reason = gitread.remote_heads(self.repo, ["relay/T-1", "relay/T-2", "relay/T-3"])
+        self.assertIsNone(reason)
+        self.assertEqual(found, {"relay/T-1"})
+        _repo.git(bare, "branch", "-D", "relay/T-1")
+        found, _ = gitread.remote_heads(self.repo, ["relay/T-1"])
+        self.assertEqual(found, set())
+
+    def test_remote_heads_with_no_names_asks_nothing(self):
+        self.assertEqual(gitread.remote_heads(self.repo, [], remote="unreachable"), (set(), None))
+
+    def test_remote_heads_names_a_remote_it_could_not_read(self):
+        _repo.git(self.repo, "remote", "set-url", "origin", os.path.join(self.tmp.name, "gone.git"))
+        found, reason = gitread.remote_heads(self.repo, ["relay/T-1"])
+        self.assertIsNone(found)
+        self.assertTrue(reason)
+
     def test_merge_head_exists(self):
         self.assertFalse(gitread.merge_head_exists(self.repo))
         _repo.git(self.repo, "checkout", "-q", "-b", "side")

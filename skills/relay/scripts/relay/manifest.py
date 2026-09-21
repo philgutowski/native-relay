@@ -20,7 +20,7 @@ import subprocess
 import tomllib
 from dataclasses import dataclass, field
 
-from . import backends, contracts, gitread
+from . import backends, contracts, gitread, gitwrite
 
 ADAPTERS = ("jira", "github", "markdown")
 # The CLI a Task process runs on (R1). The closed set stays three wide so a manifest written for
@@ -504,6 +504,70 @@ def _model_owners(model):
                  if model in backends.build(name).CAPABILITY.known_models)
 
 
+IN_FLIGHT_BRANCH_DOC = ("docs/solutions/workflow-issues/task-branch-in-flight-from-an-earlier-run-"
+                        "fails-no-task-branch-preflight-and-validate-never-warns.md")
+
+
+def _in_flight_branch_warnings(manifest, remotes, env=None):
+    """One warning per listed Task whose branch already exists, locally or on origin.
+
+    Preflight refuses a Task at launch on `no_task_branch` when its branch is in the local list,
+    and `run._continue_past_task_halt` will not step over that refusal, so the halt repeats on
+    every later run. Nothing above this reads the branch list, so a manifest naming such a Task
+    validated clean and the operator learned of it at launch. A hit is not always wrong, so
+    these are warnings, never errors.
+
+    A branch only on origin does not trip preflight, which reads the local list alone, but it
+    still means an earlier run left work there that the fresh Task process will not know about.
+    Excluded Tasks never launch and are not checked.
+    """
+    if not isinstance(manifest.project.branch_prefix, str):
+        return []
+    repo = manifest.project.repo
+    branches = {}
+    for task in manifest.tasks:
+        if task.excluded or not task.id:
+            continue
+        branches[task.id] = gitwrite.task_branch_for(str(task.id), manifest.project.branch_prefix)
+    warnings = []
+    remote_found = set()
+    if "origin" in remotes and branches:
+        found, reason = gitread.remote_heads(repo, branches.values(), "origin", env)
+        if found is None:
+            warnings.append("could not read the branches on origin (%s), so a Task branch already "
+                            "there was not checked" % reason)
+        else:
+            remote_found = found
+    for task_id, branch in branches.items():
+        local = gitread.branch_exists(repo, branch)
+        remote = branch in remote_found
+        if not (local or remote):
+            continue
+        where = "locally and on origin" if local and remote else ("locally" if local else "on origin")
+        if local:
+            consequence = ("preflight will refuse Task %s at launch on no_task_branch, before any "
+                           "process starts, and the halt repeats on every later run" % task_id)
+            # The rename frees the name and keeps every commit. When the branch is also on origin
+            # the remote copy is the name the Task process can always reach.
+            repair = ("To keep its commits, rename the local branch out of the prefix with `git -C "
+                      "%s branch -m %s <new name>`, leave any remote copy in place as a backup, "
+                      "and put the instruction to merge %s first in the issue body, since nothing "
+                      "else reaches a fresh headless process. If the earlier work is not worth "
+                      "keeping, the rename still applies and the issue edit does not"
+                      % (repo, branch, "origin/" + branch if remote else "the renamed branch"))
+        else:
+            consequence = ("preflight reads only the local branch list, so it will not refuse "
+                           "Task %s, but the fresh Task process starts from the default branch "
+                           "and will not know the earlier work is there" % task_id)
+            repair = ("If that work should continue, put the instruction to merge origin/%s "
+                      "first in the issue body, since nothing else reaches a fresh headless "
+                      "process, and leave the remote copy in place, since the runner never "
+                      "pushes or deletes a Task branch" % branch)
+        warnings.append("Task %s already has a branch, %s, %s: %s. %s. See %s"
+                        % (task_id, branch, where, consequence, repair, IN_FLIGHT_BRANCH_DOC))
+    return warnings
+
+
 def validate(manifest, check_repo=True, check_environment=False, env=None):
     """Apply every rule from plan U2 step 2. Returns a ValidationResult; never raises for a
     rule failure, so the CLI can print every problem at once."""
@@ -768,6 +832,7 @@ def validate(manifest, check_repo=True, check_environment=False, env=None):
                 err("git config %s does not resolve in %s; the runner's merge authors a commit" % (key, repo))
         if manifest.project.default_branch is None and gitread.default_branch(repo) is None:
             err("project.default_branch is unset and refs/remotes/origin/HEAD is not set in the repo")
+        result.warnings.extend(_in_flight_branch_warnings(manifest, remotes, env))
     if check_environment:
         ready_env = os.environ if env is None else env
         err_list = _backend_readiness_errors(manifest, ready_env)
