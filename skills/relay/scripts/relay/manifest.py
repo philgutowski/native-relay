@@ -572,13 +572,18 @@ def _in_flight_branch_warnings(manifest, remotes, env=None):
     return warnings
 
 
-def validate(manifest, check_repo=True, check_environment=False, env=None, check_branches=True):
+def validate(manifest, check_repo=True, check_environment=False, env=None, check_branches=True,
+             feeder_supplies_tasks=False):
     """Apply every rule from plan U2 step 2. Returns a ValidationResult; never raises for a
     rule failure, so the CLI can print every problem at once.
 
     `check_branches` false skips the Task branch read under the repository checks, which costs a
     network call to origin. Only `validate` prints warnings, so every caller that discards them
-    passes false rather than pay for a diagnostic nobody reads."""
+    passes false rather than pay for a diagnostic nobody reads.
+
+    `feeder_supplies_tasks` is true when a sidecar sits beside the manifest. An empty task list is
+    then the state a feeder manifest is in before its first cycle, so it is a warning rather than
+    a refusal; every other rule still applies. `run` never passes it, so nothing can run one."""
     result = ValidationResult(defaults_applied=list(manifest.defaults_applied))
     err = result.errors.append
     warn = result.warnings.append
@@ -758,7 +763,11 @@ def validate(manifest, check_repo=True, check_environment=False, env=None, check
                 err("%s (%s) names backend %s with model %r, which belongs to backend %s"
                     % (label, task.id or "?", task.backend, task.model, ", ".join(owners)))
     if not manifest.tasks:
-        err("tasks is empty")
+        if feeder_supplies_tasks:
+            warn("the task list is absent and a feeder supplies it; the file cannot run until "
+                 "its first cycle appends tasks, so check it with `relay feed <manifest> --dry-run`")
+        else:
+            err("tasks is empty")
 
     # KTD1: triple is not a generic concurrency knob.  It is one exact, collision-safe batch
     # shape.  Keep these checks profile-specific so serial manifests continue to use their

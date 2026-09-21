@@ -1071,6 +1071,87 @@ class LeaseVerb(CliCase):
         self.assertIsNone(self.store().lease())
 
 
+class FeederManifestBeforeItsFirstCycle(CliCase):
+    """A manifest written for `feed` may carry no `[[tasks]]`. The three read only verbs used to
+    refuse it with a sentence about a missing table, which read as a malformed file."""
+
+    def setUp(self):
+        super().setUp()
+        from test_run import MANIFEST
+        text = MANIFEST.replace("__REPO__", self.repo)
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text[:text.index("[[tasks]]")])
+        self.sidecar = os.path.splitext(self.manifest_path)[0] + ".feeder.toml"
+
+    def write_sidecar(self):
+        with open(self.sidecar, "w") as handle:
+            handle.write("")
+
+    def test_validate_warns_and_points_at_the_dry_run_when_the_sidecar_is_present(self):
+        self.write_sidecar()
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("warning: the task list is absent and a feeder supplies it", out)
+        self.assertIn("feed <manifest> --dry-run", out)
+        self.assertNotIn("error:", out)
+        self.assertNotIn("missing required tables", out)
+
+    def test_validate_still_runs_every_other_check(self):
+        self.write_sidecar()
+        with open(self.manifest_path) as handle:
+            text = handle.read()
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text.replace("[permissions]", "[permissions]\npermission_mode = \"x\"", 1))
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("permission_mode", out)
+        self.assertIn("warning: the task list is absent", out)
+
+    def test_validate_without_the_sidecar_keeps_the_refusal(self):
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("manifest is missing required tables: tasks", out)
+
+    def test_run_still_refuses_it_even_with_the_sidecar(self):
+        self.write_sidecar()
+        code, out = self.call("run", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("missing required tables: tasks", out)
+
+    def test_lease_reports_free_and_held_without_a_task_list(self):
+        self.write_sidecar()
+        code, out = self.call("lease", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("lease: free", out)
+        holder = self.store()
+        holder.acquire()
+        code, out = self.call("lease", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_LEASE)
+        self.assertIn("pid %s" % holder.pid, out)
+        holder.release()
+
+    def test_lease_without_the_sidecar_keeps_the_refusal(self):
+        code, out = self.call("lease", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("missing required tables: tasks", out)
+
+    def test_status_answers_before_the_first_cycle(self):
+        self.write_sidecar()
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("no state", out)
+
+    def test_status_reports_a_live_lease_on_an_empty_task_list(self):
+        self.write_sidecar()
+        holder = self.store()
+        self.assertTrue(holder.acquire().ok)
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("cursor: 0 of 0", out)
+        self.assertIn("lease: pid", out)
+        holder.release()
+
+
 class EntryPoint(unittest.TestCase):
     def test_the_plugin_entry_point_delegates_to_the_cli(self):
         import importlib.util

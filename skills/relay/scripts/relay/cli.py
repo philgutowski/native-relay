@@ -155,9 +155,16 @@ def build_parser():
     return parser
 
 
-def _load(path, out):
+def _has_feeder_sidecar(path):
+    return os.path.isfile(feeder_module.paths_for(path).config)
+
+
+def _load(path, out, feeder_ok=False):
+    """`feeder_ok` is for the read only verbs: a manifest with no `[[tasks]]` and a feeder
+    sidecar beside it is a feeder manifest before its first cycle, not a malformed file, so it
+    loads with an empty task list. Without the sidecar the refusal stands."""
     try:
-        return manifest_module.load(path), None
+        return manifest_module.load(path, allow_no_tasks=feeder_ok and _has_feeder_sidecar(path)), None
     except manifest_module.ManifestError as exc:
         out.write("%s\n" % exc)
         return None, EXIT_CONFIG
@@ -178,10 +185,11 @@ def _adapter_for(manifest, env, out):
 def cmd_validate(args, env, out):
     if pair_module.is_pair_file(args.manifest):
         return _validate_pair_path(args.manifest, env, out)
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
-    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      feeder_supplies_tasks=_has_feeder_sidecar(args.manifest))
     errors, warnings = list(result.errors), list(result.warnings)
     adapter = None
     if result.ok:
@@ -348,7 +356,7 @@ def cmd_status(args, env, out):
     and the terminal record it always printed. And how far along it is, which is the counts, the
     elapsed, and the rough remaining estimate `progress` derives from the record stamps.
     """
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
     store = _store_for(manifest, env)
@@ -526,7 +534,7 @@ def cmd_verify(args, env, out):
 
 
 def cmd_lease(args, env, out):
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
     store = _store_for(manifest, env)
