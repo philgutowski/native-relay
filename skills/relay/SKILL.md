@@ -124,7 +124,10 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    `branch_prefix` lines under `[project]` in `docs/examples/` rather than inventing a new table.
    Then write a draft manifest and run `validate <manifest> --list` to read the candidate tasks
    back. The list leaves out cards in a done status, and it prints even when the draft is refused
-   for a missing sentence, so write the draft before the qualifying sentences exist.
+   for a missing sentence, so write the draft before the qualifying sentences exist. Read the
+   draft's validate output for a warning that a listed Task already has a branch, from an earlier
+   run in this repository: preflight will refuse that Task at launch, and validate still exits 0.
+   Handle it now rather than at launch. See "A Task branch left by an earlier run" under Resume.
 2. Confirm with the operator, one question at a time: which tasks to include and in what order;
    the model and effort for each; any task to exclude and why; and the three degraded path
    answers, `on_blocked.merge_partial`, `on_blocked.open_followup`, and
@@ -217,6 +220,10 @@ the operator's words, never invent them. If validate names a missing credential 
 variable, ask them to set it and run validate again. A backend readiness failure (the backend's
 binary missing from PATH) is also a validate refusal, before any Task launches, and so is a Task
 naming a backend with no verified native review step. See Backend readiness below.
+
+A warning that a Task "already has a branch" is not an error and does not change the exit code,
+but do not read exit 0 as ready to launch while one stands. Take it to the operator before launch.
+See "A Task branch left by an earlier run" under Resume.
 
 Once the manifest itself is valid, validate reads every listed task's card, renders its brief, and
 makes the checks the runner makes at launch. A card whose text names a `.claude/` path is an error
@@ -398,6 +405,28 @@ Blocked tasks are skipped by default, because blocked is a deliberate outcome ra
 failure. Pass `--retry-blocked` only when the operator asks for it, and expect it to refuse when a
 stranded Task branch still carries commits; that work is theirs to keep, discard, or tag and
 delete, which keeps every commit and frees the card (see the `unclean_exit` row above).
+
+### A Task branch left by an earlier run
+
+A Task on a new manifest can already have a branch from an earlier run that halted, timed out, or
+was killed, under the prefix this manifest resolves to. `validate` warns for each such Task,
+locally and on origin. A branch under some other prefix is not read and is not a launch problem.
+The branch may also be the current run's own, when a run on this manifest started or halted that
+Task; in that case leave it alone and use `status` and the rest of this section instead. It is a warning and not an error, because a hit is not always wrong, but a
+local hit is refused at launch: preflight's `no_task_branch` check reads the local branch list, no
+process starts, and `continue_past_task_halt` will not step over it, so the halt repeats on every
+later run until the operator moves the branch.
+
+Never delete or rename it unasked. Show the operator the warning and the choice. To
+keep the commits, rename the local branch out of the prefix with `git branch -m`, leave any remote
+copy where it is as a backup, and put the resume instruction in the card's body, because a fresh
+headless Task process reads nothing else: name the branch to merge first (the `origin/` name when
+there is one), the conflicts to expect, and how the project's own rules say to resolve them.
+Renaming alone lets the Task launch and throws the earlier work away in effect. To start over,
+the rename still applies and the card edit does not. A branch only on origin does not trip
+preflight, but the fresh process will not know it is there, so the same card edit applies when
+that work should continue. The full case is
+`docs/solutions/workflow-issues/task-branch-in-flight-from-an-earlier-run-fails-no-task-branch-preflight-and-validate-never-warns.md`.
 
 Editing a task's `model` between runs moves it. The manifest's resolution decides a relaunch,
 so the next run launches that task where the operator sent it and names the move on its output

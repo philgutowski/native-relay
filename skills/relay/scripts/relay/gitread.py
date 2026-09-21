@@ -9,6 +9,9 @@ import os
 import subprocess
 
 GIT_TIMEOUT_SECONDS = 120
+# A remote read is a network call. The general bound above is sized for local git and would let
+# an unreachable origin hold a `validate` for two minutes.
+REMOTE_READ_TIMEOUT_SECONDS = 30
 
 
 class GitError(RuntimeError):
@@ -100,6 +103,44 @@ def is_ancestor(repo, ancestor, descendant):
 def branch_exists(repo, name):
     proc = run(repo, ["show-ref", "--verify", "--quiet", "refs/heads/" + name], check=False)
     return proc.returncode == 0
+
+
+def remote_refs(repo, refs, remote="origin", env=None, timeout=GIT_TIMEOUT_SECONDS):
+    """Read only the exact requested refs from `remote`, as (found, returncode, output) where
+    found is {ref: object-id}, or None when the read failed.
+
+    `ls-remote --refs` asks the remote itself rather than a possibly stale tracking ref. It
+    matches a pattern against the tail of a ref, so `refs/heads/relay/10` also matches
+    `refs/heads/old/relay/10`; the answer is filtered back to exact names. A timeout raises."""
+    refs = tuple(refs)
+    proc = run(repo, ["ls-remote", "--refs", remote] + list(refs), check=False, env=env,
+               timeout=timeout)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return None, proc.returncode, output
+    found = {}
+    wanted = set(refs)
+    for line in (proc.stdout or "").splitlines():
+        oid, separator, ref = line.partition("\t")
+        if separator and ref in wanted and oid:
+            found[ref] = oid
+    return found, 0, output
+
+
+def remote_heads(repo, names, remote="origin", env=None, timeout=REMOTE_READ_TIMEOUT_SECONDS):
+    """Which of the branch names `names` exist on `remote`. Returns (found, None), or
+    (None, reason) when the remote could not be read, with the reason on one line."""
+    names = list(names)
+    if not names:
+        return set(), None
+    try:
+        found, returncode, output = remote_refs(
+            repo, ["refs/heads/" + name for name in names], remote, env, timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, " ".join(str(exc).split())
+    if found is None:
+        return None, " ".join(output.split()) or "git exited %d" % returncode
+    return {ref[len("refs/heads/"):] for ref in found}, None
 
 
 def show(repo, ref, path):

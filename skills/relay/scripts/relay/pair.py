@@ -181,7 +181,8 @@ def validate(pair, env=None):
     """Validate both members as Manifests, then the pair shape. Returns a list of errors."""
     errors = []
     for label, member in (("claude", pair.claude), ("grok", pair.grok)):
-        result = manifest_module.validate(member, check_environment=True, env=env)
+        result = manifest_module.validate(member, check_environment=True, env=env,
+                                          check_branches=False)
         for item in result.errors:
             errors.append("%s member: %s" % (label, item))
     errors.extend(member_errors(pair))

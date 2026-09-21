@@ -243,7 +243,8 @@ def commit(path, before, after, env=None, validate=None):
     """
     if validate is None:
         def validate(candidate):
-            return manifest_module.validate(candidate, check_repo=True, env=env).errors
+            return manifest_module.validate(candidate, check_repo=True, env=env,
+                                            check_branches=False).errors
     tmp = _write_candidate(path, after)
     try:
         try:

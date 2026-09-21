@@ -561,22 +561,11 @@ def integration_lease_ref(claim_key):
 def _remote_refs(repo, refs, remote="origin", env=None):
     """Read only the exact requested remote refs, returning {ref: object-id}.
 
-    `ls-remote --refs` does not consult a stale local tracking ref.  The caller still attaches
-    force-with-lease expectations to the subsequent push because another coordinator can race
-    this read; this read makes the normal collision explanation precise.
+    The caller still attaches force-with-lease expectations to the subsequent push because
+    another coordinator can race this read; this read makes the normal collision explanation
+    precise. The read itself is `gitread.remote_refs`, shared with the Task branch check.
     """
-    refs = tuple(refs)
-    proc = gitread.run(repo, ["ls-remote", "--refs", remote] + list(refs), check=False, env=env)
-    output = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        return None, proc.returncode, output
-    found = {}
-    wanted = set(refs)
-    for line in (proc.stdout or "").splitlines():
-        oid, separator, ref = line.partition("\t")
-        if separator and ref in wanted and oid:
-            found[ref] = oid
-    return found, 0, output
+    return gitread.remote_refs(repo, refs, remote=remote, env=env)
 
 
 def _token_commit(repo, purpose, env=None, nonce=None):

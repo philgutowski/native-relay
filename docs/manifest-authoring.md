@@ -292,6 +292,16 @@ python3 <runner> summary <manifest>
 python3 <runner> feed <manifest> --dry-run    # a manifest that grows, section 11
 ```
 
+`validate` exits 0 with a warning when a listed task's branch already exists, locally or on
+origin, left by an earlier run. Exit 0 does not mean ready to launch while that warning stands. A
+local hit is refused at launch, before any process starts, on the `no_task_branch` preflight check,
+and the refusal repeats on every later run. To keep the earlier commits, rename the local branch
+out of the prefix with `git branch -m`, leave any remote copy as a backup, and put the instruction
+to merge the old branch first in the card's body, since a fresh headless process reads nothing
+else. A branch only on origin is not refused, but the fresh process will not know the work is
+there, so the same card edit applies when it should continue. See
+`docs/solutions/workflow-issues/task-branch-in-flight-from-an-earlier-run-fails-no-task-branch-preflight-and-validate-never-warns.md`.
+
 An attached `dispatch` with no policy presents the two choices, `serial` and `parallel`, with serial
 selected by default. A noninteractive or detached run with no explicit policy remains serial.
 When parallel is selected, inspect Relay's pre-launch schedule; it is informational, not a second

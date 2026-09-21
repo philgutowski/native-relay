@@ -195,6 +195,21 @@ class Validate(CliCase):
         self.assertIn("warning: tasks[0] (T-1) card already reads closed", out)
         self.assertIn("warning: tasks[2] (T-3) card could not be read", out)
 
+    def test_a_task_branch_already_in_flight_is_a_warning_and_the_exit_stays_zero(self):
+        """Issue #10. Preflight refuses this Task at launch, and validate said nothing."""
+        import _repo
+        _repo.git(self.repo, "branch", "relay/T-2")
+        _repo.git(self.repo, "push", "-q", "origin", "main:refs/heads/relay/T-3")
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        warnings = [line for line in out.splitlines() if "already has a branch" in line]
+        self.assertEqual(len(warnings), 2, out)
+        self.assertTrue(all(line.startswith("warning: ") for line in warnings), warnings)
+        self.assertIn("Task T-2 already has a branch, relay/T-2, locally:", warnings[0])
+        self.assertIn("branch -m relay/T-2 <new name>", warnings[0])
+        self.assertIn("Task T-3 already has a branch, relay/T-3, on origin:", warnings[1])
+        self.assertIn("is valid", out)
+
     def test_a_task_the_manifest_excludes_is_not_scanned(self):
         from test_run import TRACKER_MD, MANIFEST
         self.write_tracker(TRACKER_MD.replace("- [ ] T-2 Wire the run loop",
