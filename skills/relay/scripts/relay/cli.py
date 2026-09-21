@@ -155,9 +155,16 @@ def build_parser():
     return parser
 
 
-def _load(path, out):
+def _has_feeder_sidecar(path):
+    return os.path.isfile(feeder_module.paths_for(path).config)
+
+
+def _load(path, out, feeder_ok=False):
+    """`feeder_ok` is for the read only verbs: a manifest with no `[[tasks]]` and a feeder
+    sidecar beside it is a feeder manifest before its first cycle, not a malformed file, so it
+    loads with an empty task list. Without the sidecar the refusal stands."""
     try:
-        return manifest_module.load(path), None
+        return manifest_module.load(path, allow_no_tasks=feeder_ok and _has_feeder_sidecar(path)), None
     except manifest_module.ManifestError as exc:
         out.write("%s\n" % exc)
         return None, EXIT_CONFIG
@@ -178,11 +185,20 @@ def _adapter_for(manifest, env, out):
 def cmd_validate(args, env, out):
     if pair_module.is_pair_file(args.manifest):
         return _validate_pair_path(args.manifest, env, out)
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
-    result = manifest_module.validate(manifest, check_environment=True, env=env)
+    feeder_sidecar = _has_feeder_sidecar(args.manifest)
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      feeder_supplies_tasks=feeder_sidecar)
     errors, warnings = list(result.errors), list(result.warnings)
+    if feeder_sidecar:
+        # The downgrade above trusts the sidecar, so a sidecar the feeder would refuse is an
+        # error here rather than a manifest that validates for a feeder that cannot start.
+        try:
+            feeder_module.load_config(feeder_module.paths_for(args.manifest).config)
+        except feeder_module.ConfigError as exc:
+            errors.append(str(exc))
     adapter = None
     if result.ok:
         # Issue #20. The runner reads every card at launch and skips a task whose text trips the
@@ -206,8 +222,10 @@ def cmd_validate(args, env, out):
             _list_candidates(manifest, adapter, env, out)
         out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(errors)))
         return EXIT_CONFIG
-    out.write("%s is valid: %d task(s), %s adapter, %s mode%s\n"
-              % (args.manifest, len(manifest.tasks), manifest.tracker.adapter, manifest.shipping_mode,
+    out.write("%s is valid: %d task(s)%s, %s adapter, %s mode%s\n"
+              % (args.manifest, len(manifest.tasks),
+                 "" if manifest.tasks else ", a feeder supplies them and run refuses until then",
+                 manifest.tracker.adapter, manifest.shipping_mode,
                  "" if manifest_module.pushes(manifest) else ", push off: nothing will be pushed"))
     out.write("closeout may touch: %s\n" % ", ".join(result.allowed_paths))
     if args.list_candidates:
@@ -348,7 +366,7 @@ def cmd_status(args, env, out):
     and the terminal record it always printed. And how far along it is, which is the counts, the
     elapsed, and the rough remaining estimate `progress` derives from the record stamps.
     """
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
     store = _store_for(manifest, env)
@@ -526,7 +544,7 @@ def cmd_verify(args, env, out):
 
 
 def cmd_lease(args, env, out):
-    manifest, failure = _load(args.manifest, out)
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
     store = _store_for(manifest, env)

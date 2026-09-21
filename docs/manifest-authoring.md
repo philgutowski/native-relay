@@ -321,8 +321,12 @@ Skip this unless the queue is too long to list or its cards depend on each other
 meant for `relay feed` is written exactly as above with two differences.
 
 **The task list may start empty.** Leave out `[[tasks]]` entirely and the feeder appends the
-first ones. `validate` and `run` still refuse an empty list, so check such a manifest with
-`feed <manifest> --dry-run`, which loads it, reads the tracker, and prints what it would append.
+first ones. With `queue.feeder.toml` beside it, `validate` runs every other check and warns
+that the list is absent rather than refusing, and `status` and `lease` load it and answer as they
+would for any manifest, so you can ask whether anything holds the lease before the first cycle.
+`run` still refuses an empty list, and without the sidecar so do the other three. Check the
+manifest with `feed <manifest> --dry-run`, which loads it, reads the tracker, and prints what it
+would append.
 Each block the feeder appends carries a comment line with the time and the card's title, and a
 task it excludes gains `excluded = true` and a `reason` naming the halt class and cause line.
 Do not reorder or renumber what it wrote; order lives in the order file.
