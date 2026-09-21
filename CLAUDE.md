@@ -31,16 +31,17 @@ use those words.
 
 ## Project tracking
 
-Native Relay has no GitHub Project board yet. Project 4 (**Compound Relay**) belongs to
-`compound-relay` and must not receive this repo's issues. Until a board exists, the issue list on
-`philgutowski/native-relay` is the canonical source of truth for what is open, in progress, and
-done. It supersedes `docs/backlog.md` as the working list; that file overrides Phillip's global
-backlog convention for this repo. Concretely:
+Native Relay's canonical PM tracker is the GitHub Project **Native Relay** (project 6 on
+`philgutowski`), created 2026-09-21 and linked to `philgutowski/native-relay`. Its Status field
+reads Todo, In Progress, In review, and Done; In review is the status a Relay run's
+`in_review_status` names. Project 4 (**Compound Relay**) belongs to `compound-relay` and must not
+receive this repo's issues. The board supersedes `docs/backlog.md` as the working list; that file
+overrides Phillip's global backlog convention for this repo. Concretely:
 
-- Every open work item is a GitHub issue on `philgutowski/native-relay`, labeled or titled so its
-  Status (Todo, In Progress, Done) is clear. `gh issue list --repo philgutowski/native-relay
-  --state open` is the way to check current PM state, not a doc in this repo. When a board is
-  created for this repo, update this section to name it.
+- Every open work item is a GitHub issue on `philgutowski/native-relay`, added to project 6 with
+  its Status set. `gh project item-list 6 --owner philgutowski` is the way to check current PM
+  state, not a doc in this repo. Issues opened before 2026-09-21 are not all on the board yet;
+  add one when it is next picked up.
 - `docs/backlog.md` stays for fast raw capture mid-session only, one line per idea per the
   global convention. It is a holding pen, not a list: promote each line to a GitHub issue (`gh
   issue create --repo philgutowski/native-relay`) as soon as it is triaged, quote
