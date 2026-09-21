@@ -188,9 +188,17 @@ def cmd_validate(args, env, out):
     manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
+    feeder_sidecar = _has_feeder_sidecar(args.manifest)
     result = manifest_module.validate(manifest, check_environment=True, env=env,
-                                      feeder_supplies_tasks=_has_feeder_sidecar(args.manifest))
+                                      feeder_supplies_tasks=feeder_sidecar)
     errors, warnings = list(result.errors), list(result.warnings)
+    if feeder_sidecar:
+        # The downgrade above trusts the sidecar, so a sidecar the feeder would refuse is an
+        # error here rather than a manifest that validates for a feeder that cannot start.
+        try:
+            feeder_module.load_config(feeder_module.paths_for(args.manifest).config)
+        except feeder_module.ConfigError as exc:
+            errors.append(str(exc))
     adapter = None
     if result.ok:
         # Issue #20. The runner reads every card at launch and skips a task whose text trips the
@@ -214,8 +222,10 @@ def cmd_validate(args, env, out):
             _list_candidates(manifest, adapter, env, out)
         out.write("%s is not valid: %d error(s)\n" % (args.manifest, len(errors)))
         return EXIT_CONFIG
-    out.write("%s is valid: %d task(s), %s adapter, %s mode%s\n"
-              % (args.manifest, len(manifest.tasks), manifest.tracker.adapter, manifest.shipping_mode,
+    out.write("%s is valid: %d task(s)%s, %s adapter, %s mode%s\n"
+              % (args.manifest, len(manifest.tasks),
+                 "" if manifest.tasks else ", a feeder supplies them and run refuses until then",
+                 manifest.tracker.adapter, manifest.shipping_mode,
                  "" if manifest_module.pushes(manifest) else ", push off: nothing will be pushed"))
     out.write("closeout may touch: %s\n" % ", ".join(result.allowed_paths))
     if args.list_candidates:

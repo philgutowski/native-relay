@@ -1096,6 +1096,18 @@ class FeederManifestBeforeItsFirstCycle(CliCase):
         self.assertNotIn("error:", out)
         self.assertNotIn("missing required tables", out)
 
+    def test_validate_says_a_feeder_supplies_the_tasks_on_its_valid_line(self):
+        self.write_sidecar()
+        _, out = self.call("validate", self.manifest_path)
+        self.assertIn("is valid: 0 task(s), a feeder supplies them and run refuses until then", out)
+
+    def test_validate_refuses_a_sidecar_the_feeder_could_not_load(self):
+        with open(self.sidecar, "w") as handle:
+            handle.write("this is = not [valid toml")
+        code, out = self.call("validate", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("not valid TOML", out)
+
     def test_validate_still_runs_every_other_check(self):
         self.write_sidecar()
         with open(self.manifest_path) as handle:
