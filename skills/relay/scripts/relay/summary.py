@@ -73,6 +73,9 @@ def _task_entry(store, record):
     verify_result = record.get("verify") or {}
     failed = [name for name, check in (verify_result.get("checks") or {}).items()
               if check.get("result") == "fail"]
+    # Issue #9. Only on a task that did not land: a landing already says the claim held.
+    verdict = (record.get("envelope_verdict")
+               if record.get("status") != contracts.STATUS_LANDED else None)
     return {
         "id": task_id,
         "status": record.get("status"),
@@ -103,6 +106,16 @@ def _task_entry(store, record):
         # records. None on a backend that refuses a denied call itself.
         "unenforced_restrictions": record.get("unenforced_restrictions"),
         "findings": findings,
+        # What the Task process claimed on the way out, as the runner stamped it into the digest
+        # (issue #9). None on a landed task and on one that never reached classify.
+        "envelope_verdict": verdict,
+        # The complete claim on a halted task: the work says it is done and the runner would not
+        # land it, so the repair is the merge, the opposite of what a findings list suggests.
+        # Commits required: a complete claim over an empty branch has nothing to merge.
+        "finished_unmerged": bool(
+            verdict and record.get("status") == contracts.STATUS_HALTED
+            and verdict.get("status") == contracts.ENVELOPE_STATUS_COMPLETE
+            and verdict.get("commits")),
         "log_path": store.path("logs", "%s.stdout.log" % task_id) if task_id else None,
     }
 
@@ -287,6 +300,25 @@ def _seconds(entry):
     return "%.0fs active, %.0fs wall" % (active or 0, wall or 0)
 
 
+def _verdict_line(entry):
+    verdict = entry["envelope_verdict"]
+    status = verdict.get("status")
+    if status is None:
+        return ("envelope: none printed" if verdict.get("evidence_read")
+                else "envelope: unknown, the evidence could not be read")
+    text = "envelope: %s" % status
+    if status == contracts.ENVELOPE_STATUS_COMPLETE:
+        commits = verdict.get("commits")
+        tree = verdict.get("tree")
+        text += ", %s, %s" % (
+            "commits unknown" if commits is None
+            else "%d commit%s" % (commits, "" if commits == 1 else "s"),
+            "tree unknown" if tree is None else "tree %s" % tree)
+    if entry["finished_unmerged"]:
+        text += ". The task reports it finished; the repair is the merge, not the work"
+    return text
+
+
 def lines(data):
     """The text form as (line, source) pairs. `source` names the JSON field the line came from,
     which is how R46's one direction is kept honest."""
@@ -333,6 +365,11 @@ def lines(data):
             out.append(("    branch left in place: %s" % entry["branch"], source + ".branch"))
         if entry["closeout"]:
             out.append(("    closeout: %s" % entry["closeout"], source + ".closeout"))
+        # Above the findings on purpose (issue #9): the process's own last word is what tells a
+        # finished task from an unfinished one, and findings from an earlier phase read as the
+        # second when this line is not there first.
+        if entry["envelope_verdict"]:
+            out.append(("    %s" % _verdict_line(entry), source + ".envelope_verdict"))
         if entry["verify_failed"]:
             out.append(("    verify failed: %s" % ", ".join(entry["verify_failed"]),
                         source + ".verify_failed"))
