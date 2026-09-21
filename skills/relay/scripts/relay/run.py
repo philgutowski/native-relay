@@ -1303,9 +1303,11 @@ def _begin_task(cfg, task):
     preflight = gitwrite.preflight(repo, default, branch, env=env,
                                    pushes=manifest_module.pushes(manifest))
     if not preflight.ok:
-        raise _Halt(task.id, contracts.HALT_UNCLEAN_EXIT,
-                    "pre flight refused before launching %s on check %s"
-                    % (task.id, preflight.failed),
+        message = ("pre flight refused before launching %s on check %s"
+                   % (task.id, preflight.failed))
+        if preflight.failed == "no_task_branch":
+            message += ". %s already exists. %s" % (branch, gitwrite.keep_and_free_hint(branch))
+        raise _Halt(task.id, contracts.HALT_UNCLEAN_EXIT, message,
                     {"branch": branch, "check": preflight.failed,
                      "evidence": preflight.evidence})
 
@@ -1724,7 +1726,7 @@ def _clear_blocked_branch(store, task, repo, record, env, branch):
     if baseline and gitread.log_oneline(repo, baseline, branch):
         raise _Halt(task.id, contracts.HALT_UNCLEAN_EXIT,
                     "retry refused: %s carries commits past the baseline; keep or discard them "
-                    "by hand first" % branch,
+                    "by hand first. %s" % (branch, gitwrite.keep_and_free_hint(branch)),
                     {"branch": branch, "baseline_sha": baseline})
     gitwrite.delete_branch(repo, branch, ops=store, task_id=task.id, env=env)
 

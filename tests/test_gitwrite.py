@@ -355,6 +355,21 @@ class PreFlight(TailBase):
         self.assertFalse(result.ok)
         self.assertEqual(result.failed, "no_task_branch")
 
+    def test_tagging_the_stranded_branch_and_deleting_it_frees_the_card_and_keeps_the_commits(self):
+        """The mechanism keep_and_free_hint names. Pre flight reads refs/heads only, so the same
+        two commands the hint prints must turn a refusal into a pass without losing a commit."""
+        head = self.make_task_commit()
+        _repo.git(self.repo, "checkout", "-q", "main")
+        self.assertEqual(gitwrite.preflight(self.repo, "main", self.branch).failed, "no_task_branch")
+        hint = gitwrite.keep_and_free_hint(self.branch)
+        self.assertIn("git tag -a stranded/%s %s -m stranded" % (self.branch, self.branch), hint)
+        self.assertIn("git branch -D %s" % self.branch, hint)
+        _repo.git(self.repo, "tag", "-a", "stranded/" + self.branch, self.branch, "-m", "stranded")
+        _repo.git(self.repo, "branch", "-D", self.branch)
+        result = gitwrite.preflight(self.repo, "main", self.branch)
+        self.assertTrue(result.ok, result.evidence)
+        self.assertEqual(gitread.rev_parse(self.repo, "stranded/%s^{commit}" % self.branch), head)
+
     def test_a_clean_repo_on_the_default_in_sync_passes_every_check(self):
         result = gitwrite.preflight(self.repo, "main", self.branch)
         self.assertTrue(result.ok, result.evidence)

@@ -802,6 +802,20 @@ def reset_hard(repo, ref, ops=None, task_id=None, env=None):
     return _mutate(repo, "reset_hard", ["reset", "--hard", ref], ops, task_id, env, check=True)
 
 
+def keep_and_free_hint(branch):
+    """The third way out of a stranded Task branch, for every message that refuses on one.
+    Pre-flight's `no_task_branch` check asks `gitread.branch_exists`, which reads `refs/heads`
+    only, so a branch moved to a tag stops blocking its card while every commit stays reachable.
+    The message carries that mechanism and not only the command, because the mechanism is what an
+    operator cannot see from the refusal. The tag is annotated, and `-m` is given, so the command
+    never opens an editor."""
+    return ("There is a third way. Pre flight reads refs/heads only, so tagging the branch and "
+            "then deleting it keeps every commit and frees the card: "
+            "git tag -a stranded/%s %s -m stranded && git branch -D %s. Rebuilding from the "
+            "card's brief is often cheaper than resuming a branch whose recorded findings have "
+            "gone stale." % (branch, branch, branch))
+
+
 # Pre-flight (R16).
 
 PREFLIGHT_CHECKS = ("tree_clean", "on_default", "head_equals_remote", "remote_is_ancestor",
