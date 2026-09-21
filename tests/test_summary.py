@@ -532,6 +532,23 @@ class EnvelopeVerdictLines(CauseLineTable):
                          "    envelope: complete, 3 commits, tree clean. The task reports it "
                          "finished; the repair is the merge, not the work")
 
+    def test_a_claim_the_merge_does_not_repair_is_not_flagged(self):
+        """Review of issue #9: a landing ref means the merge already happened, a refused gate
+        means the work fails the bar, and a dirty tree left work outside the commits."""
+        complete = {"status": "complete", "commits": 3, "tree": "clean", "evidence_read": True}
+        cases = {
+            "landed then refused": ({"landing_ref": "b" * 40}, complete),
+            "gate refused": ({"halt_class": contracts.HALT_GATE_REFUSED}, complete),
+            "dirty tree": ({}, dict(complete, tree="dirty")),
+        }
+        for name, (fields, verdict) in sorted(cases.items()):
+            with self.subTest(name):
+                self.halted(verdict)
+                self.store.upsert("T-1", **fields)
+                data = self.summarise(["T-1"])
+                self.assertFalse(data["tasks"][0]["finished_unmerged"])
+                self.assertNotIn("the repair is the merge", summary.render(data))
+
     def test_a_blocked_claim_prints_its_status_alone(self):
         data = self.halted({"status": "blocked", "commits": 0, "tree": "clean",
                             "evidence_read": True}, status=contracts.STATUS_BLOCKED)

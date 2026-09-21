@@ -60,6 +60,21 @@ def cause_line(halt_class, *evidence):
         return template
 
 
+def _finished_unmerged(record, verdict):
+    """The complete claim on a halted task: the work says it is done and the runner would not
+    land it, so the repair is the merge, the opposite of what a findings list suggests.
+
+    Each exclusion is a halt that claim does not repair. An empty branch has nothing to merge, a
+    dirty tree left work outside the commits, a landing ref means the merge already happened and
+    a later step refused, and a refused gate means the work fails the project's own bar."""
+    return bool(
+        verdict and record.get("status") == contracts.STATUS_HALTED
+        and verdict.get("status") == contracts.ENVELOPE_STATUS_COMPLETE
+        and verdict.get("commits") and verdict.get("tree") == "clean"
+        and not record.get("landing_ref")
+        and record.get("halt_class") != contracts.HALT_GATE_REFUSED)
+
+
 def _task_entry(store, record):
     task_id = record.get("id")
     evidence = record.get("halt_evidence") or {}
@@ -109,13 +124,7 @@ def _task_entry(store, record):
         # What the Task process claimed on the way out, as the runner stamped it into the digest
         # (issue #9). None on a landed task and on one that never reached classify.
         "envelope_verdict": verdict,
-        # The complete claim on a halted task: the work says it is done and the runner would not
-        # land it, so the repair is the merge, the opposite of what a findings list suggests.
-        # Commits required: a complete claim over an empty branch has nothing to merge.
-        "finished_unmerged": bool(
-            verdict and record.get("status") == contracts.STATUS_HALTED
-            and verdict.get("status") == contracts.ENVELOPE_STATUS_COMPLETE
-            and verdict.get("commits")),
+        "finished_unmerged": _finished_unmerged(record, verdict),
         "log_path": store.path("logs", "%s.stdout.log" % task_id) if task_id else None,
     }
 
