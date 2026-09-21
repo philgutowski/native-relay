@@ -141,11 +141,17 @@ path outside the target repo, since Relay adds nothing to a project it runs agai
    mixed manifest: keep the operator's task order as the merge order, assign each task from the
    rubric (high judgment on claude, mechanical bounded work on grok), then `pair split` the
    mixed draft, or write the two members and the pair file by hand. `dispatch` is what runs
-   both at once. `run` on a mixed manifest stays one task at a time. The third degraded-path
-   answer trades a mid run stop for throughput: on, a
-   halt contained to one task pauses that task and the later independent tasks keep running,
-   so several halts in a row surface only in the summary; off, the first halt stops the run.
-   A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
+   both at once. `run` on a mixed manifest stays one task at a time. Ask the third degraded-path
+   answer, `on_halt.continue_past_task_halt`, on task independence alone: are the tasks
+   independent enough that a halt in one says nothing about the rest. It is halt routing and
+   nothing else. It decides only whether a halt raised out of one task stops the run. A task
+   that ends blocked never reaches it, so it is not a quota, cascade, or blast radius control,
+   and it does not limit how far a dead account spreads. Point an operator worried about that
+   at sizing the run before launch and staging a long list into shorter manifests, launched
+   one after another. The default is `false`, and the field changes what exit 0 means, so write
+   it explicitly rather than omit it. Say what `true` costs: every stepped over halt strands
+   its own task branch, the runner never deletes it, and the next run refuses that task on
+   `no_task_branch` until the operator deletes the branch by hand. A value the operator gives goes into the manifest verbatim. Recommend when asked; never substitute your
    recommendation for an answer they already gave, including timeouts and status names. The shipping mode is
    `local_merge`, where the runner merges each task to the default branch. Then ask whether the
    runner pushes. `shipping.push` true, the default, pushes the merge, the closeout's commit,

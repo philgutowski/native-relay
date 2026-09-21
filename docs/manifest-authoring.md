@@ -227,9 +227,18 @@ continue_past_task_halt = false
 - `merge_partial`: may a task commit the part it finished when one piece is blocked, provided the
   gate passes on what it commits.
 - `open_followup`: may a task open one follow up card for a piece it could not finish.
-- `continue_past_task_halt`: off, the first halt of any class stops the run; on, a halt contained
-  to one task pauses that task and the later independent tasks keep running, so several halts in
-  a row surface only in the summary.
+- `continue_past_task_halt`: decide it on task independence alone. Off, the first halt of any
+  class stops the run. On, a halt contained to one task pauses that task and the later tasks keep
+  running, which is safe only when a halt in one task says nothing about the rest. The default is
+  `false`. Write it explicitly rather than omit it, because an omitted key reaches you only as one
+  line in `validate`'s applied defaults list while the field changes what exit 0 means: under
+  `true`, exit 0 means the run reached the end of the manifest, not that every task landed.
+  The cost of `true` is that every stepped over halt strands its own task branch. The runner never
+  deletes it, and the next run refuses that task on `no_task_branch` until you delete the branch
+  by hand. This field is halt routing only. It is not a quota, cascade, or blast radius control:
+  a task that ends blocked never reaches it, and it does not limit how far a dead account
+  spreads. For that, size the run before launching and stage a long task list into shorter
+  manifests launched one after another, so a decision of yours sits between them.
 
 ## 9. The tasks
 
