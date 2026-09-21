@@ -508,8 +508,8 @@ class EnvelopeVerdictFromARealRun(RunCase):
 
 
 class EnvelopeVerdictLines(CauseLineTable):
-    """Issue #9, the rendering. The IW-179 shape: halted, findings from an earlier phase, and an
-    envelope that said complete with three commits and a clean tree."""
+    """Issue #9, the rendering. The live run's shape: halted, findings from an earlier phase,
+    and an envelope that said complete with three commits and a clean tree."""
 
     def halted(self, verdict, status=contracts.STATUS_HALTED):
         self.store.upsert("T-1", status=status, halt_class=contracts.HALT_PATH_GATE,

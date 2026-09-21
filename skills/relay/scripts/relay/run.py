@@ -127,8 +127,9 @@ def _envelope_verdict(digest, repo, branch, baseline_sha, tree=None, tree_repo=N
 
     Stamped into the digest and copied onto the record, so the summary reads it from there and
     never re-parses a log. The claim is the fastest way to tell an unfinished task from a
-    finished one the runner declined to merge: on IW-179 the findings read as a task that died
-    mid work while the envelope said complete with three commits and a clean tree.
+    finished one the runner declined to merge: on the live run behind this, the findings read as
+    a task that died mid work while the envelope said complete with three commits and a clean
+    tree.
 
     `tree` is the dispatch path's snapshot, taken before its worktree was removed; without one
     the tree is read from `tree_repo`, the checkout the process ran in. A git failure costs the
