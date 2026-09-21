@@ -1087,6 +1087,9 @@ class RetryBlocked(RunCase):
         outcome = self.go(retry_blocked=True)
         self.assertEqual(outcome.exit_code, runner.EXIT_HALTED)
         self.assertIn("relay/T-2", outcome.message)
+        # The refusal names the third way out, with its mechanism and not only a command.
+        self.assertIn("git tag -a stranded/relay/T-2 relay/T-2", outcome.message)
+        self.assertIn("refs/heads", outcome.message)
 
 
 class Reassignment(RunCase):
@@ -1990,6 +1993,10 @@ class ContinuePastWithoutRepair(RunCase):
         self.assertEqual(second.halt_task, "T-2")
         record = self.store().get("T-2")
         self.assertEqual(record["halt_evidence"]["resume"], {"check": "no_task_branch"})
+        # The pre flight refusal names the third way out where the operator meets the wall, and
+        # only for this check, so a dirty tree or a moved remote keeps its plain message.
+        self.assertIn("git tag -a stranded/relay/T-2 relay/T-2", record["halt_message"])
+        self.assertIn("refs/heads", record["halt_message"])
         # Unchanged from before this feature existed: the operator's repair is to delete the
         # stranded branch and fix what refused the gate, exactly as ResumeAfterHalt already
         # proves for a full-stop halt.

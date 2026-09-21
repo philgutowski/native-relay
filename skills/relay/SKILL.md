@@ -348,7 +348,7 @@ The classes and what they mean for the operator:
 | `path_gate` | one of two walls around `.claude/`, and the record's `halt_stage` says which. The class is not the only outcome of a refusal: where the Task's Envelope reads complete, the same refused edit stays a finding, the Task lands, and only the summary's check by hand list reports it. No stage: the Task asked for an edit there, its Envelope was blocked or absent, and its permission posture refused the edit whatever the allowlist says, so the work is unfinished. Stage `backstop`: the Task finished and the merge tail refused a branch whose diff touches `.claude/` | read the cause line, which names the repair its own raiser implies. Unfinished work needs an attended session to do it, then a resume. A refused branch needs an attended gate and merge, then `verify` for that Task, never a rerun. A landed Task carrying a `path_gate` finding needs neither: the edit that never landed is a follow up on a merged commit |
 | `closeout_out_of_scope` | the closeout committed outside its allowed paths; the runner reset it | look at what it tried to write, then resume |
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
-| `unclean_exit` | the process left a dirty tree, or claimed to finish and left nothing to merge | inspect the tree, clean it, resume |
+| `unclean_exit` | the process left a dirty tree, claimed to finish and left nothing to merge, or a Task branch from an earlier attempt is still in place (evidence check `no_task_branch`) | inspect the tree, clean it, resume. For a stranded branch that carries finished commits there are three moves, not two. Keep it and the card stays blocked, discard it and the work is gone, or tag it and delete it: pre flight reads `refs/heads` only, so `git tag -a stranded/<branch> <branch> -m stranded` then `git branch -D <branch>` keeps every commit and frees the card. Rebuilding from the card's brief is often cheaper than resuming a branch whose recorded findings have gone stale |
 | `review_skipped` (a finding, never a halt) | on Claude, the task claimed complete without a `/code-review` Skill call in its transcript; it landed if the gate passed. On grok the skip is undetectable, so this finding is not attached and the digest lists `review_skipped` as not checked | review the diff of the landing commit by hand |
 | `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review | move the card back by hand to the status the line names |
 | `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
@@ -396,7 +396,8 @@ run the same command, and the task launches.
 
 Blocked tasks are skipped by default, because blocked is a deliberate outcome rather than a
 failure. Pass `--retry-blocked` only when the operator asks for it, and expect it to refuse when a
-stranded Task branch still carries commits; that work is theirs to keep or discard.
+stranded Task branch still carries commits; that work is theirs to keep, discard, or tag and
+delete, which keeps every commit and frees the card (see the `unclean_exit` row below).
 
 Editing a task's `model` between runs moves it. The manifest's resolution decides a relaunch,
 so the next run launches that task where the operator sent it and names the move on its output

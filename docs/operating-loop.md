@@ -39,6 +39,20 @@ hour long unattended run you sit and watch is strictly worse than doing the task
 
 The attended lane is whatever the day actually requires, plus the cards that failed the pre-flight.
 
+**A stranded Task branch is not a keep or discard choice.** A branch that already carries commits
+blocks its card, and the refusal reads as if the only moves were keeping a branch that blocks the
+card for ever or discarding finished work. There is a third. Pre flight asks whether
+`refs/heads/<branch>` exists and nothing else, so moving the ref into the tag namespace keeps every
+commit and frees the card:
+
+    git tag -a stranded/<branch> <branch> -m stranded
+    git branch -D <branch>
+
+Then run again. The work stays retrievable from the tag, and the runner rebuilds the card from its
+own brief, which is often cheaper than resuming a branch whose recorded findings have gone stale.
+On 2026-09-20 a card with six sound commits stranded this way, scheduled as an attended sitting
+under the keep or discard reading, landed unattended in 39 minutes once tagged.
+
 ## When the queue is long or its cards depend on each other
 
 **Feed it instead of listing it.** The three questions above are about a list you write once.
