@@ -122,6 +122,38 @@ def _routable(manifest, adapter, digest, repo, branch, baseline_sha):
     return False, "no envelope and the card did not move"
 
 
+def _envelope_verdict(digest, repo, branch, baseline_sha, tree=None, tree_repo=None):
+    """Issue #9: what the Task process claimed on the way out, beside what git shows it left.
+
+    Stamped into the digest and copied onto the record, so the summary reads it from there and
+    never re-parses a log. The claim is the fastest way to tell an unfinished task from a
+    finished one the runner declined to merge: on the live run behind this, the findings read as
+    a task that died mid work while the envelope said complete with three commits and a clean
+    tree.
+
+    `tree` is the dispatch path's snapshot, taken before its worktree was removed; without one
+    the tree is read from `tree_repo`, the checkout the process ran in. A git failure costs the
+    count or the tree, never the digest."""
+    envelope = digest.get("envelope") or {}
+    commits = current_tree = None
+    try:
+        if repo and branch and baseline_sha:
+            # A branch the process never created carries nothing past the baseline.
+            commits = (len(gitread.log_oneline(repo, baseline_sha, branch))
+                       if gitread.branch_exists(repo, branch) else 0)
+    except gitread.GitError:
+        pass
+    if tree is not None:
+        current_tree = tree
+    elif tree_repo:
+        try:
+            current_tree = "clean" if gitread.is_clean(tree_repo) else "dirty"
+        except gitread.GitError:
+            pass
+    return {"status": envelope.get("status"), "commits": commits, "tree": current_tree,
+            "evidence_read": bool(digest.get("transcript_present"))}
+
+
 def _announcer(stream, notifier):
     """One phase event: a line, and a notification when the operator asked for them (R2).
 
@@ -359,13 +391,18 @@ def _triple_classify(cfg, item):
                                disallow_patterns=disallow,
                                review_base=cfg.manifest.project.default_branch)
     digest["task_id"] = item.task.id
+    # The worker's own checkout: the canonical repo has not imported its branch yet.
+    worker_path = getattr(item.worker, "path", None)
+    digest["envelope_verdict"] = _envelope_verdict(
+        digest, worker_path, item.branch, item.baseline_sha, tree_repo=worker_path)
     item.digest = digest
     item.findings = list(digest.get("findings") or [])
     classify.write_digest(digest, cfg.store.path("digests", item.task.id + ".json"))
     cfg.store.upsert(item.task.id, session_id=launched.session_id,
                      transcript_path=launched.transcript_path,
                      wall_seconds=launched.wall_seconds, active_seconds=launched.active_seconds,
-                     findings=item.findings, binary_path=launched.binary_path, args=launched.args)
+                     findings=item.findings, binary_path=launched.binary_path, args=launched.args,
+                     envelope_verdict=digest["envelope_verdict"])
     if launched.launch_error:
         item.collision = {"kind": "worker", "reason": "launch_error",
                           "detail": launched.launch_error}
@@ -636,7 +673,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                          baseline_comment_id=item.baseline_comment_id, branch=branch,
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
                          model=task.model, halt_class=None, halt_stage=None,
-                         halt_message=None, halt_evidence=None,
+                         halt_message=None, halt_evidence=None, envelope_verdict=None,
                          unenforced_restrictions=(_unenforced_scalar(manifest, capability)
                                                   if not capability.enforces_at_launch else None))
             workers.append(item)
@@ -1255,7 +1292,7 @@ def _one_task(cfg, task):
     if begun is None:
         return
     launched = _launch_begun(cfg, begun, cwd=cfg.repo)
-    return _complete_task(cfg, begun, launched)
+    return _complete_task(cfg, begun, launched, tree_repo=cfg.repo)
 
 
 def _begin_task(cfg, task):
@@ -1365,7 +1402,7 @@ def _begin_task(cfg, task):
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
-                 halt_message=None, halt_evidence=None,
+                 halt_message=None, halt_evidence=None, envelope_verdict=None,
                  excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
@@ -1389,8 +1426,12 @@ def _launch_begun(cfg, begun, cwd, on_started=None):
     return launched
 
 
-def _complete_task(cfg, begun, launched):
-    """Classify and take the merge, blocked, or halt route. Always on the main thread."""
+def _complete_task(cfg, begun, launched, tree_repo=None):
+    """Classify and take the merge, blocked, or halt route. Always on the main thread.
+
+    `tree_repo` is the checkout the process ran in when the runner can still read it, which is
+    the repo itself on a serial run. Dispatch passes none: its worktree is already gone, and
+    `begun.tree_at_exit` carries the tree it read before removing it."""
     manifest, adapter, store = cfg.manifest, cfg.adapter, cfg.store
     task, capability = begun.task, begun.capability
     reassignment = begun.reassignment
@@ -1412,13 +1453,16 @@ def _complete_task(cfg, begun, launched):
     # bullets in the Closeout brief, so sharing the list would have the Closeout process comment
     # a tracker card about a routing change (issue #58).
     findings = ([reassignment] if reassignment else []) + list(raw_findings or [])
+    digest["envelope_verdict"] = _envelope_verdict(
+        digest, cfg.repo, branch, baseline_sha, tree=begun.tree_at_exit, tree_repo=tree_repo)
     classify.write_digest(digest, store.path("digests", task.id + ".json"))
     # `unenforced_restrictions` is not rewritten here: the running upsert above already supplied
     # it from this attempt's own capability, before the launch rather than after it.
     store.upsert(task.id, session_id=launched.session_id,
                  transcript_path=launched.transcript_path, wall_seconds=launched.wall_seconds,
                  active_seconds=launched.active_seconds, findings=findings,
-                 binary_path=launched.binary_path, args=launched.args)
+                 binary_path=launched.binary_path, args=launched.args,
+                 envelope_verdict=digest["envelope_verdict"])
 
     context = _Context(task=task, card=begun.card, branch=branch, baseline_sha=baseline_sha,
                        baseline_comment_id=begun.baseline_comment_id, digest=digest,
@@ -1536,7 +1580,8 @@ def _abandon_build(cfg, task_id, branch, dest=None):
             pass
     cfg.store.upsert(task_id, status=contracts.STATUS_PENDING, session_id=None,
                      transcript_path=None, halt_class=None, halt_stage=None,
-                     halt_message=None, halt_evidence=None, skip_reason=None)
+                     halt_message=None, halt_evidence=None, skip_reason=None,
+                     envelope_verdict=None)
 
 
 def _abort_siblings(cfg, slots, waiting, keep_id):

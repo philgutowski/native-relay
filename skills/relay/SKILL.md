@@ -340,7 +340,12 @@ Everything you need is in those two outputs, including the run end card audit, w
 under check by hand every card that disagrees with its record. Do not open a session transcript: the runner already
 classified the exit into a halt class with its evidence, and the summary carries the cause line
 and the checks a human still has to make. Explain the class in plain words, name the evidence,
-and say what the operator has to do. If `status` prints `no state for <manifest> yet` and a python
+and say what the operator has to do. For every task that did not land, the summary also prints
+the Task's own Envelope verdict (`envelope_verdict` in the JSON): its status, and when complete,
+the commits on the branch and the tree at exit. Read it before the findings. A halted Task whose
+verdict is complete with commits on a clean tree, with nothing landed and no gate refusal
+(`finished_unmerged`), finished its work and the runner declined to land it, so the repair is the
+merge, however unfinished its findings look. If `status` prints `no state for <manifest> yet` and a python
 for this job is live with no `runner.log`, that is a Files and Folders or Full Disk Access prompt
 on a launchd or cron parent, not a halt class and not a backend readiness failure.
 

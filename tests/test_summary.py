@@ -461,6 +461,132 @@ class CauseLinesFromARealRun(RunCase):
         self.assertIn("active minutes", entry["cause"])
 
 
+class EnvelopeVerdictFromARealRun(RunCase):
+    """Issue #9, end to end over the stub: the runner stamps the verdict into the digest and onto
+    the record, and the summary prints it for a task that did not land and only for one."""
+
+    def run_and_summarise(self):
+        from relay import run as runner
+        outcome = runner.run(self.manifest, home=self.home, base_env=self.base_env(),
+                             stream=None)
+        data = summary.build(self.manifest, outcome.store)
+        return outcome, {entry["id"]: entry for entry in data["tasks"]}, data
+
+    def test_a_blocked_task_prints_its_claim_and_a_landed_one_prints_none(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        outcome, by_id, data = self.run_and_summarise()
+        self.assertIsNone(by_id["T-1"]["envelope_verdict"])
+        self.assertEqual(by_id["T-2"]["envelope_verdict"]["status"], "blocked")
+        self.assertFalse(by_id["T-2"]["finished_unmerged"])
+        self.assertIn("    envelope: blocked", summary.render(data).splitlines())
+        # Sourced from the digest, the same dict on both.
+        with open(outcome.store.path("digests", "T-2.json"), encoding="utf-8") as handle:
+            digest = json.load(handle)
+        self.assertEqual(digest["envelope_verdict"], outcome.store.get("T-2")["envelope_verdict"])
+        # The landed task's record still carries it; the summary is what leaves it out.
+        landed = outcome.store.get("T-1")["envelope_verdict"]
+        self.assertEqual(landed["status"], contracts.ENVELOPE_STATUS_COMPLETE)
+        self.assertEqual(landed["commits"], 1)
+        self.assertEqual(landed["tree"], "clean")
+
+    def test_a_complete_claim_over_an_empty_branch_is_not_called_a_merge_repair(self):
+        self.queue_entry("success.jsonl", None)
+        self.closeout_halted("T-1")
+        outcome, by_id, data = self.run_and_summarise()
+        self.assertEqual(outcome.halt_class, contracts.HALT_UNCLEAN_EXIT)
+        verdict = by_id["T-1"]["envelope_verdict"]
+        self.assertEqual((verdict["status"], verdict["commits"]),
+                         (contracts.ENVELOPE_STATUS_COMPLETE, 0))
+        self.assertFalse(by_id["T-1"]["finished_unmerged"])
+        self.assertIn("    envelope: complete, 0 commits, tree clean",
+                      summary.render(data).splitlines())
+
+
+class EnvelopeVerdictLines(CauseLineTable):
+    """Issue #9, the rendering. The live run's shape: halted, findings from an earlier phase,
+    and an envelope that said complete with three commits and a clean tree."""
+
+    def halted(self, verdict, status=contracts.STATUS_HALTED):
+        self.store.upsert("T-1", status=status, halt_class=contracts.HALT_PATH_GATE,
+                          halt_stage=contracts.TAIL_STAGE_BACKSTOP,
+                          halt_evidence={"branch": "relay/T-1", "paths": ".claude/x"},
+                          branch="relay/T-1", wall_seconds=1.0, active_seconds=1.0,
+                          findings=[dict(PathGateRaisers.DENIAL_FINDING)],
+                          envelope_verdict=verdict)
+        return self.summarise(["T-1"])
+
+    def test_a_halted_complete_claim_reads_as_the_merge_repair(self):
+        data = self.halted({"status": "complete", "commits": 3, "tree": "clean",
+                            "evidence_read": True})
+        self.assertTrue(data["tasks"][0]["finished_unmerged"])
+        lines = summary.lines(data)
+        sources = [source for _, source in lines]
+        at = sources.index("tasks[0].envelope_verdict")
+        self.assertLess(at, sources.index("tasks[0].findings[0].line"))
+        self.assertEqual(lines[at][0],
+                         "    envelope: complete, 3 commits, tree clean. The task reports it "
+                         "finished; the repair is the merge, not the work")
+
+    def test_a_claim_the_merge_does_not_repair_is_not_flagged(self):
+        """Review of issue #9: a landing ref means the merge already happened, a refused gate
+        means the work fails the bar, and a dirty tree left work outside the commits."""
+        complete = {"status": "complete", "commits": 3, "tree": "clean", "evidence_read": True}
+        cases = {
+            "landed then refused": ({"landing_ref": "b" * 40}, complete),
+            "gate refused": ({"halt_class": contracts.HALT_GATE_REFUSED}, complete),
+            "dirty tree": ({}, dict(complete, tree="dirty")),
+        }
+        for name, (fields, verdict) in sorted(cases.items()):
+            with self.subTest(name):
+                self.halted(verdict)
+                self.store.upsert("T-1", **fields)
+                data = self.summarise(["T-1"])
+                self.assertFalse(data["tasks"][0]["finished_unmerged"])
+                self.assertNotIn("the repair is the merge", summary.render(data))
+
+    def test_a_blocked_claim_prints_its_status_alone(self):
+        data = self.halted({"status": "blocked", "commits": 0, "tree": "clean",
+                            "evidence_read": True}, status=contracts.STATUS_BLOCKED)
+        self.assertFalse(data["tasks"][0]["finished_unmerged"])
+        self.assertIn("    envelope: blocked", summary.render(data).splitlines())
+
+    def test_no_envelope_and_unreadable_evidence_say_which(self):
+        data = self.halted({"status": None, "commits": 2, "tree": "dirty",
+                            "evidence_read": True})
+        self.assertIn("    envelope: none printed", summary.render(data).splitlines())
+        data = self.halted({"status": None, "commits": None, "tree": None,
+                            "evidence_read": False})
+        self.assertIn("    envelope: unknown, the evidence could not be read",
+                      summary.render(data).splitlines())
+
+    def test_unknown_git_facts_say_unknown_rather_than_zero(self):
+        data = self.halted({"status": "complete", "commits": None, "tree": None,
+                            "evidence_read": True})
+        self.assertFalse(data["tasks"][0]["finished_unmerged"])
+        self.assertIn("    envelope: complete, commits unknown, tree unknown",
+                      summary.render(data).splitlines())
+
+    def test_one_commit_is_singular(self):
+        data = self.halted({"status": "complete", "commits": 1, "tree": "dirty",
+                            "evidence_read": True})
+        self.assertIn("envelope: complete, 1 commit, tree dirty", summary.render(data))
+
+    def test_a_record_without_the_field_prints_no_line(self):
+        """A record written before the field existed, or one that never reached classify."""
+        self.store.upsert("T-1", status=contracts.STATUS_HALTED,
+                          halt_class=contracts.HALT_UNEXPECTED_ERROR, halt_evidence={},
+                          findings=[])
+        data = self.summarise(["T-1"])
+        self.assertIsNone(data["tasks"][0]["envelope_verdict"])
+        self.assertNotIn("tasks[0].envelope_verdict",
+                         [source for _, source in summary.lines(data)])
+
+
 class LinesFromTheFirstLiveRun(unittest.TestCase):
     """Two misreports the 2026-08-26 live run's summary printed."""
 
