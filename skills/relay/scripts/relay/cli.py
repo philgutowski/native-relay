@@ -672,9 +672,9 @@ def cmd_dispatch(args, env, out):
 
 def cmd_feed(args, env, out, deps=None):
     """The feeder (feeder plan). Exit codes keep the contract every verb has: 0 the feeder left
-    on its own terms (the stop file, a day with nothing ready, `--once`, `--dry-run`), 1 the
-    manifest, the sidecar, or the checkout needs a person, 2 every task died quickly for the
-    whole usage limit allowance, 3 another feeder holds this manifest.
+    on its own terms (the stop file, an empty queue, `--once`, `--dry-run`), 1 the manifest,
+    the sidecar, the ready source, or the checkout needs a person, 2 every task died quickly
+    for the whole usage limit allowance, 3 another feeder holds this manifest.
 
     `deps` is the suite's way in; an operator never passes it.
     """

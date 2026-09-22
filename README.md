@@ -174,8 +174,10 @@ skipped, with the reason. One manifest has one feeder: a second `feed` exits 3.
 manifest, and no runner holding the lease ends the feeder with exit 0, so no process sits
 polling an empty board. Set `idle_waits_max` in the sidecar to wait that many times first, thirty
 minutes apart, for a board where a person releases cards through the day. A ready source that
-cannot be read is not an empty queue: the feeder waits and asks again, and stops with exit 1
-after three failed reads in a row.
+cannot be read is not an empty queue: with nothing left to run the feeder waits and asks again,
+and stops with exit 1 after three failed reads in a row. Ready cards that validate refused are
+not an empty queue either; the feeder stops with exit 1 and names them, since only a routing
+change releases them.
 
 It launches the runner from the same tree it was started from. Start it from a pinned extract of
 a commit and it drives that extract, whatever happens in your checkout meanwhile. For the same

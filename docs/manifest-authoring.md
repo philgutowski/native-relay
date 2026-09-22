@@ -411,9 +411,11 @@ labels = []
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart`. The order and routing files are read at every cycle and need no restart.
 
-Exit codes of `feed`: 0 it left on its own terms (the stop file, a day with nothing ready,
-`--once`, `--dry-run`), 1 the manifest, the sidecar, or the checkout needs a person, 2 every
-task died quickly for the whole usage limit allowance, 3 another feeder holds this manifest.
+Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, `--once`,
+`--dry-run`), 1 the manifest, the sidecar, the ready source, or the checkout needs a person,
+including a ready source that could not be read three cycles in a row with nothing left to
+run, 2 every task died quickly for the whole usage limit allowance, 3 another feeder holds
+this manifest.
 
 ## 12. Exit codes of a run
 
