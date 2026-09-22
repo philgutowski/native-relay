@@ -426,11 +426,17 @@ thing that may put a card into a Batch. It is the Tracker adapter's `ready` read
 carrying every configured label on GitHub, the cards a configured JQL query returns on Jira, and
 every unchecked box in a markdown tracker. A ready command that prints cards as JSON replaces
 that read for a project whose rule labels cannot say. What ready means is the project's policy
-and lives in the sidecar, never in an adapter. An unreadable source and an empty one are
-different answers: the first is logged and offers nothing new that Cycle, the second is an
-empty queue. A Cycle that finds an empty queue, nothing left to run in the Manifest, and no Lease
-held ends the Feeder, at once by default, so no process is left polling an empty board. Three
-unreadable reads in a row with nothing left to run stop it for a person instead.
+and lives in the sidecar, never in an adapter.
+
+A Cycle that finds nothing new to append reads as one of three different answers, and the Feeder
+tells them apart rather than treating all three as an empty queue. A source with no policy
+configured at all, GitHub or Jira with nothing named for what ready means, is refused before a
+single Cycle runs, since no amount of waiting configures it. A source that answers but fails to,
+a real read error, is logged and offers nothing new that Cycle, waited on and asked again, and
+stops for a person only after enough failures in a row, because this one might resolve on its
+own. Only when the source is readable and genuinely has nothing new is it an empty queue: a Cycle
+with an empty queue, nothing left to run in the Manifest, and no Lease held ends the Feeder, at
+once by default, so no process is left polling an empty board.
 
 ### Model routing
 How the Feeder chooses a Task's model when it appends one. A routing file beside the Manifest
@@ -438,8 +444,12 @@ wins, one line per card, read fresh at every append so it can be edited mid run.
 on the card of the form `**Model:** name`. Then the sidecar's default. A name outside the
 sidecar's allowed set is ignored and logged, because a typo would halt the card twice and get it
 excluded, and the append still passes the Manifest's own validation, which refuses a model that
-belongs to another Backend. The Closeout process stays on the Manifest's closeout model. The
-Review step runs inside the Task process, so it runs on whatever model the Task was routed to.
+belongs to another Backend. A card refused this way is remembered and left out of every Batch
+until its routing changes, since retrying it unchanged would only be refused again. A Cycle whose
+only ready cards were all refused this way is not an empty queue: the Feeder stops for a person
+and names them, since only a routing change, not a wait, releases them. The Closeout process
+stays on the Manifest's closeout model. The Review step runs inside the Task process, so it runs
+on whatever model the Task was routed to.
 
 ## Outcomes
 
