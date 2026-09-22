@@ -69,6 +69,7 @@ STATUS_SKIPPED = "skipped"
 COMMAND_TIMEOUT_SECONDS = 900
 RESTART_POLL_SECONDS = 20
 RESTART_POLLS_MAX = 4320          # a day of polling at twenty seconds
+UNREADABLE_WAITS_MAX = 3          # idle cycles in a row the ready source failed, then stop
 UNRANKED = 10 ** 9
 DRY_RUN_LINES = 12
 MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
@@ -112,7 +113,7 @@ class Config:
     limit_wait_seconds: int = 1800
     limit_waits_max: int = 16         # eight hours of waiting on a suspected usage limit
     idle_wait_seconds: int = 1800
-    idle_waits_max: int = 48          # a day with nothing ready, then leave
+    idle_waits_max: int = 0           # an empty queue with no run to wait on: leave at once
     lease_wait_seconds: int = 600
     default_model: str = "opus"
     default_effort: str = "high"
@@ -138,6 +139,8 @@ _SCHEMA = {
     "hooks": {"pre_cycle": "pre_cycle_command"},
 }
 _READY_KEYS = ("labels", "jql", "command")
+# The integer settings where zero means something: no idle waits, leave on the first empty cycle.
+_ZERO_ALLOWED = ("idle_waits_max",)
 
 
 def _is_strings(value):
@@ -181,8 +184,10 @@ def load_config(path):
             if not isinstance(value, bool):
                 problems.append("%s must be true or false" % spec.name)
         elif isinstance(default, int):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                problems.append("%s must be a positive integer" % spec.name)
+            floor = 0 if spec.name in _ZERO_ALLOWED else 1
+            if not isinstance(value, int) or isinstance(value, bool) or value < floor:
+                problems.append("%s must be a %s integer" % (
+                    spec.name, "non-negative" if floor == 0 else "positive"))
         elif isinstance(default, str):
             if not isinstance(value, str) or not value.strip():
                 problems.append("%s must be a non-empty string" % spec.name)
@@ -391,8 +396,8 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
 
 
 def new_state():
-    return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "cycles": 0, "reported": {},
-            "refused": {}}
+    return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
+            "reported": {}, "refused": {}}
 
 
 class Feeder:
@@ -499,7 +504,7 @@ class Feeder:
         records = self._records(manifest)
         unsettled = [task_id for task_id in listed if task_id not in excluded
                      and records.get(task_id, {}).get("status") not in SETTLED]
-        cards = self.ready_cards(manifest)
+        cards, readable = self.ready_cards(manifest)
         fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
                               len(unsettled))
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
@@ -524,16 +529,9 @@ class Feeder:
 
         appended = self.append(text, entries)
         if appended:
-            self.state["idle_waits"] = 0
+            self.state["idle_waits"] = self.state["unreadable_waits"] = 0
         elif not unsettled:
-            self.state["idle_waits"] += 1
-            self.save_state()
-            if self.state["idle_waits"] > config.idle_waits_max:
-                return self.stop(EXIT_OK, "nothing ready for %d waits, leaving. The queue is "
-                                          "empty or everything left is blocked, denied or "
-                                          "attended." % config.idle_waits_max)
-            self.log("nothing ready and nothing unsettled, waiting")
-            return self.wait(config.idle_wait_seconds)
+            return self.idle(readable)
 
         self.state["cycles"] += 1
         self.save_state()
@@ -547,6 +545,43 @@ class Feeder:
             return self.stop(EXIT_CONFIG, "relay refused the manifest or the environment. Run "
                                           "validate and read its output.")
         return self.settle(manifest, cycle_ids)
+
+    def idle(self, readable):
+        """Nothing was appended and no listed task is left to run, while no runner holds the
+        lease: the queue is empty. By default the feeder leaves at once rather than keep a
+        process alive to poll an empty board. `idle_waits_max` above zero waits that many times
+        first, for a board where a person releases cards through the day.
+
+        A ready source that could not be read is not an empty queue, so it never ends the feeder
+        as one. It waits and asks again, and after `UNREADABLE_WAITS_MAX` failures in a row it
+        stops for a person, because a feeder that retried a broken read for ever is a process
+        doing nothing."""
+        config = self.config
+        if not readable:
+            self.state["unreadable_waits"] += 1
+            self.save_state()
+            if self.state["unreadable_waits"] >= UNREADABLE_WAITS_MAX:
+                self.state["unreadable_waits"] = 0
+                self.save_state()
+                return self.stop(EXIT_CONFIG, "stopping: the ready source could not be read for "
+                                              "%d cycles in a row and nothing is left to run. "
+                                              "Read the log." % UNREADABLE_WAITS_MAX)
+            self.log("the ready source could not be read and nothing is left to run, waiting")
+            return self.wait(config.idle_wait_seconds)
+        self.state["unreadable_waits"] = 0
+        self.state["idle_waits"] += 1
+        if self.state["idle_waits"] > config.idle_waits_max:
+            # Reset before leaving, so the next feeder on this manifest starts its own count.
+            self.state["idle_waits"] = 0
+            self.save_state()
+            return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
+                                      "to run, and no runner holds the lease. Everything left "
+                                      "on the board is blocked, denied or attended, or there "
+                                      "is nothing left.")
+        self.save_state()
+        self.log("nothing ready and nothing unsettled, waiting (%d of %d)"
+                 % (self.state["idle_waits"], config.idle_waits_max))
+        return self.wait(config.idle_wait_seconds)
 
     def settle(self, manifest, cycle_ids):
         """Read what the run did to this cycle's tasks and apply rules 2 and 3."""
@@ -629,8 +664,9 @@ class Feeder:
                 (done.stderr or "").strip()[-200:]))
 
     def ready_cards(self, manifest):
-        """The ready cards, or none with the reason logged. An unreadable tracker is not a
-        crash: the tasks already listed still run, and the next cycle asks again."""
+        """(cards, readable). An unreadable tracker is not a crash: it offers no cards, the
+        reason is logged, the tasks already listed still run, and the next cycle asks again.
+        `readable` keeps that apart from an empty board, which is what ends an idle feeder."""
         try:
             if self.config.ready_command:
                 done = self.deps.run_command(self.config.ready_command, manifest.project.repo,
@@ -638,15 +674,15 @@ class Feeder:
                 if done.returncode != 0:
                     raise ValueError("it exited %d: %s" % (done.returncode,
                                                            (done.stderr or "").strip()[-300:]))
-                return normalize_cards(json.loads(done.stdout or "null"))
+                return normalize_cards(json.loads(done.stdout or "null")), True
             cards, reason = self.deps.build_adapter(manifest).ready(self.config.ready_source)
             if reason:
                 raise ValueError(reason)
-            return cards
+            return cards, True
         except (ValueError, OSError, subprocess.SubprocessError,
                 adapters.ConfigurationError) as exc:
             self.log("the ready source could not be read, offering nothing new: %s" % exc)
-            return []
+            return [], False
 
     def append(self, text, entries):
         """Append the batch, and return the entries that made it in. When the batch as a whole

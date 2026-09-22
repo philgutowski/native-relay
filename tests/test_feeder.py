@@ -150,7 +150,7 @@ class Selection(FeederCase):
 
     def test_an_unreadable_ready_source_offers_nothing_and_does_not_crash(self):
         self.adapter.ready_reason = "gh exited 1: HTTP 502"
-        self.assertEqual(self.feed(feeder.Config(idle_waits_max=1)), 0)
+        self.assertEqual(self.feed(), 1)
         self.assertEqual(self.runs, [])
         self.assertIn("the ready source could not be read", self.log_text())
         self.assertIn("HTTP 502", self.log_text())
@@ -281,11 +281,56 @@ class Exits(FeederCase):
                       self.log_text())
         self.assertEqual(len(self.runs), 1)
 
-    def test_an_idle_day_ends_the_feeder_cleanly(self):
+    def test_an_empty_queue_ends_the_feeder_at_once_by_default(self):
+        self.adapter.ready_cards = []
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.runs, [])
+        self.assertIn("the queue is empty, leaving", self.log_text())
+        self.assertIn("the queue is empty, leaving", self.notes[-1])
+
+    def test_a_feeder_leaves_after_the_run_that_empties_the_queue(self):
+        # Cycle one appends and runs 1 and 2; they land; cycle two finds nothing and leaves
+        # without a sleep. The fake runner's stop file is removed so only the idle rule ends it.
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.before_run = lambda: setattr(self.adapter, "ready_cards", [])
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.runs, [["1", "2"]])
+        self.assertEqual(self.sleeps, [])
+
+    def test_idle_waits_max_keeps_an_idle_feeder_waiting_that_many_times(self):
         self.adapter.ready_cards = []
         self.assertEqual(self.feed(feeder.Config(idle_waits_max=3)), 0)
         self.assertEqual(self.sleeps, [1800, 1800, 1800])
         self.assertEqual(self.runs, [])
+        # The count is reset on the way out, so the next feeder waits its own three.
+        with open(self.paths.state, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["idle_waits"], 0)
+
+    def test_an_unreadable_source_is_not_an_empty_queue(self):
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        self.assertEqual(self.feed(), 1)
+        # Two waits, then the third failure in a row stops it for a person with exit 1.
+        self.assertEqual(self.sleeps, [1800, 1800])
+        self.assertNotIn("the queue is empty", self.log_text())
+        self.assertIn("could not be read for 3 cycles in a row", self.log_text())
+
+    def test_a_read_that_recovers_to_empty_leaves_as_an_empty_queue(self):
+        # The first read fails and the board answers after one wait, empty.
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        original = self.deps
+
+        def deps():
+            built = original()
+            built.sleep = lambda seconds: (self.sleeps.append(seconds),
+                                           setattr(self.adapter, "ready_reason", None))
+            return built
+        self.deps = deps
+        self.adapter.ready_cards = []
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertIn("the queue is empty, leaving", self.log_text())
 
     def test_once_runs_one_cycle_and_never_sleeps(self):
         self.plans = [{"1": halted(20), "2": halted(20), "3": halted(20)}, {}, {}]
@@ -374,6 +419,15 @@ class Sidecar(FeederCase):
                          "pre_cycle_command must be an array of strings (an argument list, never "
                          "a shell string)", "ready.command must be an array of strings"):
             self.assertIn(expected, message)
+
+    def test_idle_waits_max_may_be_zero_and_not_negative(self):
+        self.write(self.paths.config, '[waits]\nidle_waits_max = 0\n')
+        self.assertEqual(feeder.load_config(self.paths.config).idle_waits_max, 0)
+        self.write(self.paths.config, '[waits]\nidle_waits_max = -1\nlimit_waits_max = 0\n')
+        with self.assertRaises(feeder.ConfigError) as caught:
+            feeder.load_config(self.paths.config)
+        self.assertIn("idle_waits_max must be a non-negative integer", str(caught.exception))
+        self.assertIn("limit_waits_max must be a positive integer", str(caught.exception))
 
     def test_a_default_model_outside_the_allowed_set_is_refused(self):
         self.write(self.paths.config, '[models]\ndefault = "haiku"\n')

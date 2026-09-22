@@ -427,8 +427,10 @@ carrying every configured label on GitHub, the cards a configured JQL query retu
 every unchecked box in a markdown tracker. A ready command that prints cards as JSON replaces
 that read for a project whose rule labels cannot say. What ready means is the project's policy
 and lives in the sidecar, never in an adapter. An unreadable source and an empty one are
-different answers: the first is logged and offers nothing new that Cycle, the second counts
-toward the idle wait.
+different answers: the first is logged and offers nothing new that Cycle, the second is an
+empty queue. A Cycle that finds an empty queue, nothing left to run in the Manifest, and no Lease
+held ends the Feeder, at once by default, so no process is left polling an empty board. Three
+unreadable reads in a row with nothing left to run stop it for a person instead.
 
 ### Model routing
 How the Feeder chooses a Task's model when it appends one. A routing file beside the Manifest

@@ -170,6 +170,13 @@ lease, stops with exit 1 when the checkout is dirty or off its default branch, o
 halts for a cause outside the task such as the remote moving, and reports every task the runner
 skipped, with the reason. One manifest has one feeder: a second `feed` exits 3.
 
+**It leaves when the queue is empty.** A cycle with nothing ready, nothing left to run in the
+manifest, and no runner holding the lease ends the feeder with exit 0, so no process sits
+polling an empty board. Set `idle_waits_max` in the sidecar to wait that many times first, thirty
+minutes apart, for a board where a person releases cards through the day. A ready source that
+cannot be read is not an empty queue: the feeder waits and asks again, and stops with exit 1
+after three failed reads in a row.
+
 It launches the runner from the same tree it was started from. Start it from a pinned extract of
 a commit and it drives that extract, whatever happens in your checkout meanwhile. For the same
 reason, editing the sidecar's settings or cutting a new runner does nothing to a feeder already
