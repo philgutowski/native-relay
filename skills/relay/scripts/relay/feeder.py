@@ -56,6 +56,9 @@ EXIT_HALTED = 2
 EXIT_LEASE = 3
 EXIT_INTERRUPTED = 130
 
+# The state counts that mean "this many times in a row", reset when a feeder starts.
+STREAKS = ("limit_waits", "idle_waits", "unreadable_waits")
+
 # A task in one of these statuses is one the next run will not launch, so it holds no room in
 # the batch. `skipped` is here because a skip costs no session: the runner rechecks the card at
 # every launch and steps over it in a moment. It is settled for room and still reported, which
@@ -69,7 +72,7 @@ STATUS_SKIPPED = "skipped"
 COMMAND_TIMEOUT_SECONDS = 900
 RESTART_POLL_SECONDS = 20
 RESTART_POLLS_MAX = 4320          # a day of polling at twenty seconds
-UNREADABLE_WAITS_MAX = 3          # idle cycles in a row the ready source failed, then stop
+UNREADABLE_WAITS_MAX = 2          # waits on a ready source that fails to read, then stop
 UNRANKED = 10 ** 9
 DRY_RUN_LINES = 12
 MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
@@ -186,8 +189,8 @@ def load_config(path):
         elif isinstance(default, int):
             floor = 0 if spec.name in _ZERO_ALLOWED else 1
             if not isinstance(value, int) or isinstance(value, bool) or value < floor:
-                problems.append("%s must be a %s integer" % (
-                    spec.name, "non-negative" if floor == 0 else "positive"))
+                problems.append("%s must be %s integer" % (
+                    spec.name, "zero or a positive" if floor == 0 else "a positive"))
         elif isinstance(default, str):
             if not isinstance(value, str) or not value.strip():
                 problems.append("%s must be a non-empty string" % spec.name)
@@ -452,6 +455,13 @@ class Feeder:
     def run(self):
         self.log("feeder start, dry_run=%s, manifest=%s, runner=%s"
                  % (self.dry_run, self.paths.manifest, runner_entry()))
+        if not self.once:
+            # The "in a row" counts belong to one feeder's life. A stop, a restart, or an
+            # interrupt would otherwise hand a partial count to the next feeder. `--once` keeps
+            # them, since a feeder driven a cycle at a time by cron has no other life.
+            for key in STREAKS:
+                self.state[key] = 0
+            self.save_state()
         try:
             while True:
                 code = self.cycle()
@@ -478,6 +488,14 @@ class Feeder:
         self.notify(message)
         return code
 
+    def strike(self, key, maximum):
+        """Count one more of something that happens in a row, save, and say whether it has now
+        happened more than `maximum` times. The three streaks share this so they share one rule
+        for the threshold; each is reset to zero where its run is broken."""
+        self.state[key] += 1
+        self.save_state()
+        return self.state[key] > maximum
+
     def cycle(self):
         """One pass. Returns an exit code to leave with, or None to go round again."""
         config, deps = self.config, self.deps
@@ -487,7 +505,7 @@ class Feeder:
             manifest = manifest_module.load(self.paths.manifest, allow_no_tasks=True)
         except manifest_module.ManifestError as exc:
             return self.stop(EXIT_CONFIG, "stopping: %s" % exc)
-        problem = checkout_problem(manifest)
+        problem = ready_source_problem(manifest, config) or checkout_problem(manifest)
         if problem:
             return self.stop(EXIT_CONFIG, "stopping: %s. Relay owns the default branch while it "
                                           "runs, so this is a person's to look at." % problem)
@@ -531,7 +549,7 @@ class Feeder:
         if appended:
             self.state["idle_waits"] = self.state["unreadable_waits"] = 0
         elif not unsettled:
-            return self.idle(readable)
+            return self.idle(readable, [card["id"] for card in fresh])
 
         self.state["cycles"] += 1
         self.save_state()
@@ -546,39 +564,38 @@ class Feeder:
                                           "validate and read its output.")
         return self.settle(manifest, cycle_ids)
 
-    def idle(self, readable):
+    def idle(self, readable, fresh_ids):
         """Nothing was appended and no listed task is left to run, while no runner holds the
-        lease: the queue is empty. By default the feeder leaves at once rather than keep a
-        process alive to poll an empty board. `idle_waits_max` above zero waits that many times
-        first, for a board where a person releases cards through the day.
+        lease. Three things look like that and only one is an empty queue.
 
-        A ready source that could not be read is not an empty queue, so it never ends the feeder
-        as one. It waits and asks again, and after `UNREADABLE_WAITS_MAX` failures in a row it
-        stops for a person, because a feeder that retried a broken read for ever is a process
-        doing nothing."""
+        A ready source that could not be read is not an empty queue: the feeder waits and asks
+        again, and after `UNREADABLE_WAITS_MAX` waits in a row it stops for a person, because a
+        feeder that retried a broken read for ever is a process doing nothing. Ready cards that
+        were all refused by validate are not an empty queue either: the board has work, and
+        only a person changing the routing can release it, so the feeder stops and names them.
+
+        What is left is an empty queue. By default the feeder leaves at once rather than keep a
+        process alive to poll an empty board. `idle_waits_max` above zero waits that many times
+        first, for a board where a person releases cards through the day."""
         config = self.config
         if not readable:
-            self.state["unreadable_waits"] += 1
-            self.save_state()
-            if self.state["unreadable_waits"] >= UNREADABLE_WAITS_MAX:
-                self.state["unreadable_waits"] = 0
-                self.save_state()
+            if self.strike("unreadable_waits", UNREADABLE_WAITS_MAX):
                 return self.stop(EXIT_CONFIG, "stopping: the ready source could not be read for "
                                               "%d cycles in a row and nothing is left to run. "
-                                              "Read the log." % UNREADABLE_WAITS_MAX)
+                                              "Read the log." % (UNREADABLE_WAITS_MAX + 1))
             self.log("the ready source could not be read and nothing is left to run, waiting")
             return self.wait(config.idle_wait_seconds)
         self.state["unreadable_waits"] = 0
-        self.state["idle_waits"] += 1
-        if self.state["idle_waits"] > config.idle_waits_max:
-            # Reset before leaving, so the next feeder on this manifest starts its own count.
-            self.state["idle_waits"] = 0
-            self.save_state()
+        if fresh_ids:
+            return self.stop(EXIT_CONFIG, "stopping: every ready card was refused with the model "
+                                          "it is routed to, and nothing is left to run: %s. "
+                                          "Change the routing and start the feeder again."
+                                          % ", ".join(fresh_ids))
+        if self.strike("idle_waits", config.idle_waits_max):
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
                                       "is nothing left.")
-        self.save_state()
         self.log("nothing ready and nothing unsettled, waiting (%d of %d)"
                  % (self.state["idle_waits"], config.idle_waits_max))
         return self.wait(config.idle_wait_seconds)
@@ -615,9 +632,7 @@ class Feeder:
                                           "was counted. Read the summary."
                                           % (data.get("halt_task"), data.get("halt_class")))
         if looks_like_usage_limit(halted, landed, config):
-            self.state["limit_waits"] += 1
-            self.save_state()
-            if self.state["limit_waits"] > config.limit_waits_max:
+            if self.strike("limit_waits", config.limit_waits_max):
                 return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
                                               "usage limit. Read the summary."
                                               % config.limit_waits_max)
@@ -719,6 +734,21 @@ class Feeder:
             return ""
         with open(path, encoding="utf-8") as handle:
             return handle.read()
+
+
+def ready_source_problem(manifest, config):
+    """None when the feeder has a way to learn which cards are ready, else the sentence to stop
+    with. GitHub needs labels and Jira a query; the markdown tracker needs nothing, and a ready
+    command replaces all of that. The adapter answers the same gap with a reason at read time,
+    but a gap is not a failed read, so it is refused here before a cycle rather than retried."""
+    if config.ready_command:
+        return None
+    adapter, source = manifest.tracker.adapter, config.ready_source
+    if adapter == "github" and not source.get("labels"):
+        return "no ready labels are configured; set [ready] labels in the feeder sidecar"
+    if adapter == "jira" and not str(source.get("jql") or "").strip():
+        return "no ready query is configured; set [ready] jql in the feeder sidecar"
+    return None
 
 
 def checkout_problem(manifest):

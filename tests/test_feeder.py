@@ -10,9 +10,11 @@ feeder and the runner agree on exit codes and on the summary's shape.
 import io
 import json
 import os
+import re
 import subprocess
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 
 import _paths
 import _repo
@@ -304,9 +306,66 @@ class Exits(FeederCase):
         self.assertEqual(self.feed(feeder.Config(idle_waits_max=3)), 0)
         self.assertEqual(self.sleeps, [1800, 1800, 1800])
         self.assertEqual(self.runs, [])
-        # The count is reset on the way out, so the next feeder waits its own three.
-        with open(self.paths.state, encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["idle_waits"], 0)
+        # A new feeder starts its own count, whatever the last one left in the state file.
+        self.assertEqual(self.feed(feeder.Config(idle_waits_max=3)), 0)
+        self.assertEqual(self.sleeps, [1800] * 6)
+
+    def test_a_feeder_that_leaves_on_the_stop_file_hands_no_partial_count_to_the_next(self):
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        original = self.deps
+
+        def deps():
+            built = original()
+            built.sleep = lambda seconds: (self.sleeps.append(seconds),
+                                           feeder.request_stop(self.paths))
+            return built
+        self.deps = deps
+        self.assertEqual(self.feed(), 0)                   # one failed read, then the stop file
+        self.assertEqual(self.sleeps, [1800])
+        os.unlink(self.paths.stop)
+        self.deps = original
+        self.assertEqual(self.feed(), 1)                   # three of its own, not two
+        self.assertEqual(self.sleeps, [1800, 1800, 1800])
+
+    def test_once_keeps_the_streak_counts_between_cycles(self):
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        self.assertEqual(self.feed(once=True), 0)
+        self.assertEqual(self.feed(once=True), 0)
+        self.assertEqual(self.feed(once=True), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_ready_cards_that_validate_refused_are_not_an_empty_queue(self):
+        # grok-4.6 is allowed by this sidecar and belongs to grok; the manifest runs on claude.
+        self.write(self.paths.routing, "1 grok-4.6\n")
+        self.adapter.ready_cards = [card(1)]
+        config = feeder.Config(allowed_models=("fable", "opus", "sonnet", "grok-4.6"))
+        self.assertEqual(self.feed(config), 1)
+        self.assertEqual(self.runs, [])
+        self.assertNotIn("the queue is empty", self.log_text())
+        self.assertIn("every ready card was refused with the model it is routed to, and nothing "
+                      "is left to run: 1", self.log_text())
+
+    def test_a_ready_source_that_is_not_configured_is_refused_before_a_cycle(self):
+        github = SimpleNamespace(tracker=SimpleNamespace(adapter="github"))
+        self.assertIsNone(feeder.ready_source_problem(github, feeder.Config(
+            ready_source={"labels": ["ready"]})))
+        self.assertIsNone(feeder.ready_source_problem(github, feeder.Config(
+            ready_command=("true",))))
+        self.assertIn("no ready labels are configured",
+                      feeder.ready_source_problem(github, feeder.Config()))
+        github.tracker.adapter = "jira"     # a plain record, so this is allowed here
+        self.assertIn("no ready query is configured",
+                      feeder.ready_source_problem(github, feeder.Config(ready_source={"jql": " "})))
+        github.tracker.adapter = "markdown"
+        self.assertIsNone(feeder.ready_source_problem(github, feeder.Config()))
+        # And in the loop: a github manifest with no sidecar at all stops before any cycle.
+        self.write(self.manifest_path, re.sub(
+            r"\[tracker\].*?\n\n", '[tracker]\nadapter = "github"\nowner = "x"\n'
+            'project_number = 7\nstatus_field = "Done"\nin_review_status = "In review"\n\n',
+            self.head, flags=re.S))
+        self.assertEqual(self.feed(), 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn("stopping: no ready labels are configured", self.log_text())
 
     def test_an_unreadable_source_is_not_an_empty_queue(self):
         self.adapter.ready_reason = "gh exited 1: HTTP 502"
@@ -426,7 +485,7 @@ class Sidecar(FeederCase):
         self.write(self.paths.config, '[waits]\nidle_waits_max = -1\nlimit_waits_max = 0\n')
         with self.assertRaises(feeder.ConfigError) as caught:
             feeder.load_config(self.paths.config)
-        self.assertIn("idle_waits_max must be a non-negative integer", str(caught.exception))
+        self.assertIn("idle_waits_max must be zero or a positive integer", str(caught.exception))
         self.assertIn("limit_waits_max must be a positive integer", str(caught.exception))
 
     def test_a_default_model_outside_the_allowed_set_is_refused(self):

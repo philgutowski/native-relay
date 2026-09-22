@@ -487,12 +487,15 @@ edit the sidecar and `feed --restart`: a running feeder holds the settings and t
 loaded at its start. Nothing is killed by `--stop` or `--restart`; the task in flight finishes
 and merges first.
 
-How it ends, by exit code: 0 it left on its own terms, the stop file or a day with nothing
-ready. 1 a person is needed: the checkout is dirty or off its default branch, the runner refused
-the manifest, the run halted with a run scoped class (nothing is counted against the task then),
-or a task that halted twice could not be excluded. 2 every task died within
-minutes for eight hours, which is not a usage limit, so read the summary. 3 another feeder
-already holds this manifest.
+How it ends, by exit code: 0 it left on its own terms, the stop file or an empty queue
+(nothing ready, nothing left to run, no runner holding the lease; at once by default, or
+after `idle_waits_max` waits). 1 a person is needed: the checkout is dirty or off its default
+branch, the ready source is not configured, the runner refused the manifest, the run halted with
+a run scoped class (nothing is counted against the task then), a task that halted twice could
+not be excluded, every ready card was refused with the model it is routed to, or the ready
+source could not be read three cycles in a row with nothing left to run. 2 every task died
+within minutes for eight hours, which is not a usage limit, so read the summary. 3 another
+feeder already holds this manifest.
 
 Three things the feeder tells the operator that a summary alone would not. A task it excluded
 after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest
