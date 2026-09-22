@@ -372,7 +372,7 @@ quick_death_seconds = 600
 limit_wait_seconds = 1800
 limit_waits_max = 16
 idle_wait_seconds = 1800
-idle_waits_max = 48
+idle_waits_max = 0
 lease_wait_seconds = 600
 
 [models]

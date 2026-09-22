@@ -21,7 +21,7 @@ quick_death_seconds = 600    # a launched task that halts sooner than this died 
 limit_wait_seconds = 1800    # the wait when a whole cycle died quickly (a usage limit, probably)
 limit_waits_max = 16         # that many waits in a row, then leave with exit 2
 idle_wait_seconds = 1800     # the wait when nothing is ready and nothing is unsettled
-idle_waits_max = 48          # that many in a row, a day, then leave with exit 0
+idle_waits_max = 0           # waits on an empty queue before leaving with exit 0; 0 leaves at once
 lease_wait_seconds = 600     # the wait when another runner holds the lease
 
 [models]
