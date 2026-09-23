@@ -23,6 +23,17 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     heuristic (a rule of thumb that is usually right, not a detection), and
     `looks_like_usage_limit` is named for what it is.
 
+    One model's limit is read the same way, per model, when the sidecar names a fallback for
+    it (`[models] fallback`, off by default). A task on such a model that died quickly is read
+    as that model's usage limit, even while tasks on other models landed beside it: the model
+    is marked exhausted in the state file for `fallback_hours`, the task is moved to the
+    fallback in the manifest so the next run relaunches it there, its halt is not counted, and
+    new cards routed to the model go to the fallback until the mark expires.
+    `model_limit_moves` is the heuristic, named like the other. A fallback is only taken when
+    it leads to a model that is not exhausted and did not itself die quickly this cycle, so a
+    chain of fallbacks never loops. A cycle where every task died quickly, nothing landed, and
+    some halt has no such fallback is still waited out as a whole.
+
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes three
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
 file; and its log. The tracker is read only here too, so the invariant that the runner never
@@ -126,6 +137,8 @@ class Config:
     ready_source: dict = field(default_factory=dict)
     ready_command: tuple = ()
     pre_cycle_command: tuple = ()
+    model_fallback: dict = field(default_factory=dict)   # empty: no per model fallback
+    fallback_hours: int = 5
 
 
 # Sidecar table and key -> Config field. A key outside this map is an error, because a typo
@@ -137,7 +150,8 @@ _SCHEMA = {
               "idle_wait_seconds": "idle_wait_seconds", "idle_waits_max": "idle_waits_max",
               "lease_wait_seconds": "lease_wait_seconds"},
     "models": {"default": "default_model", "effort": "default_effort",
-               "allowed": "allowed_models"},
+               "allowed": "allowed_models", "fallback": "model_fallback",
+               "fallback_hours": "fallback_hours"},
     "deny": {"ids": "denied_ids", "labels": "denied_labels"},
     "hooks": {"pre_cycle": "pre_cycle_command"},
 }
@@ -194,6 +208,10 @@ def load_config(path):
         elif isinstance(default, str):
             if not isinstance(value, str) or not value.strip():
                 problems.append("%s must be a non-empty string" % spec.name)
+        elif spec.name == "model_fallback":
+            if not isinstance(value, dict) or not all(isinstance(item, str)
+                                                      for item in value.values()):
+                problems.append("models.fallback must be a table of model = \"model\"")
         elif spec.name in ("denied_ids",):
             # A GitHub number is most naturally written bare, so ids may be integers.
             if not isinstance(value, list) or not all(isinstance(item, (str, int))
@@ -225,6 +243,13 @@ def load_config(path):
         config = Config(**values)
         if config.default_model not in config.allowed_models:
             problems.append("models.default %r is not in models.allowed" % config.default_model)
+        for source, target in sorted(config.model_fallback.items()):
+            for model in (source, target):
+                if model not in config.allowed_models:
+                    problems.append("models.fallback names %r, which is not in models.allowed"
+                                    % model)
+            if source == target:
+                problems.append("models.fallback sends %r to itself" % source)
     if problems:
         raise ConfigError("%s: %s" % (path, "; ".join(problems)))
     return config
@@ -315,18 +340,60 @@ def select(cards, listed, config, rank, unsettled_count):
     return fresh, fresh[:room]
 
 
-def looks_like_usage_limit(halted, landed, config):
-    """The heuristic of rule 3, and only a heuristic. True when something halted, nothing
-    landed, and every halt is a process that launched and died inside `quick_death_seconds`.
+def died_quickly(task, config):
+    """A process that launched and died inside `quick_death_seconds`.
 
     A halt with no wall time never launched a process, a pre flight refusal for example, and a
-    usage limit cannot be what stopped a process that never started. So it counts as a real
-    halt. That is one deliberate change from the original script, which read a missing wall
+    usage limit cannot be what stopped a process that never started. So it is not a quick
+    death. That is one deliberate change from the original script, which read a missing wall
     time as zero seconds and would have waited eight hours on a stale branch."""
+    return (task.get("wall_seconds") is not None
+            and task["wall_seconds"] < config.quick_death_seconds)
+
+
+def looks_like_usage_limit(halted, landed, config):
+    """The heuristic of rule 3, and only a heuristic. True when something halted, nothing
+    landed, and every halt died quickly in the sense of `died_quickly`."""
     if not halted or landed:
         return False
-    return all(task.get("wall_seconds") is not None
-               and task["wall_seconds"] < config.quick_death_seconds for task in halted)
+    return all(died_quickly(task, config) for task in halted)
+
+
+def resolve_fallback(model, table, unavailable):
+    """The first model along `model`'s fallback chain that is not in `unavailable`, or None
+    when the chain ends or comes back on itself first. `model` itself is taken to be
+    unavailable. Every model is visited once at most, so no table can make this loop."""
+    seen, current = {model}, model
+    while True:
+        current = table.get(current)
+        if current is None or current in seen:
+            return None
+        if current not in unavailable:
+            return current
+        seen.add(current)
+
+
+def model_limit_moves(halted, models, config, exhausted):
+    """The per model half of rule 3, and a heuristic like the whole cycle half. [(task, from,
+    to)] for every halted task whose model has a fallback and that died quickly: each is read
+    as its model's usage limit and moved.
+
+    `models` is {id: model} for the halted tasks and `exhausted` the models already marked. A
+    model that died quickly this cycle is treated as exhausted too when it is looked at as a
+    fallback, so two models that fall back to each other and both died never send their
+    tasks back and forth; neither is moved, and the whole cycle rule decides."""
+    quick = [task for task in halted if died_quickly(task, config)]
+    dying = {models.get(task["id"]) for task in quick} & set(config.model_fallback)
+    unavailable = set(exhausted) | dying
+    moves = []
+    for task in quick:
+        source = models.get(task["id"])
+        if source not in dying:
+            continue
+        target = resolve_fallback(source, config.model_fallback, unavailable)
+        if target is not None:
+            moves.append((task, source, target))
+    return moves
 
 
 # The outside world.
@@ -400,7 +467,7 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
 
 def new_state():
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
-            "reported": {}, "refused": {}}
+            "reported": {}, "refused": {}, "exhausted": {}}
 
 
 class Feeder:
@@ -526,10 +593,11 @@ class Feeder:
         fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
                               len(unsettled))
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
+        exhausted = self.exhausted_models()
         entries = []
         for card in batch:
-            model, note = choose_model(card, routing, config)
-            notes += [note] if note else []
+            model, note = self.route(card, routing, exhausted)
+            notes += note
             entries.append({"id": card["id"], "title": card["title"], "model": model,
                             "effort": config.default_effort})
         for note in notes:
@@ -542,7 +610,7 @@ class Feeder:
         if self.dry_run:
             for card in fresh[:DRY_RUN_LINES]:
                 self.out.write("   would offer %s on %s: %s\n" % (
-                    card["id"], choose_model(card, routing, config)[0], card["title"][:90]))
+                    card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
             return EXIT_OK
 
         appended = self.append(text, entries)
@@ -631,7 +699,10 @@ class Feeder:
                                           "puts something outside the task in question. No halt "
                                           "was counted. Read the summary."
                                           % (data.get("halt_task"), data.get("halt_class")))
-        if looks_like_usage_limit(halted, landed, config):
+        moves = model_limit_moves(halted, self._models(halted), config, self.exhausted_models())
+        if looks_like_usage_limit(halted, landed, config) and len(moves) < len(halted):
+            # Some quick death has no fallback to take, so the whole cycle rule decides. When
+            # every one has, the moves below replace the wait.
             if self.strike("limit_waits", config.limit_waits_max):
                 return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
                                               "usage limit. Read the summary."
@@ -641,7 +712,10 @@ class Feeder:
                                                            config.limit_wait_seconds))
             return self.wait(config.limit_wait_seconds)
         self.state["limit_waits"] = 0
+        moved = self.fall_back(moves)
         for task in halted:
+            if task["id"] in moved:
+                continue
             count = self.state["halts"].get(task["id"], 0) + 1
             self.state["halts"][task["id"]] = count
             if count < config.max_halts:
@@ -662,6 +736,79 @@ class Feeder:
             self.notify("%s excluded after %d halts, %s" % (task["id"], count, task.get("class")))
         self.save_state()
         return EXIT_OK if self.once else None
+
+    # Per model usage limits.
+    def exhausted_models(self):
+        """{model: marked at} for the models still marked exhausted. A mark older than
+        `fallback_hours` is dropped here and logged, so the next card routed to that model runs
+        on it again, and a quick death there marks it again."""
+        now, hours = self.deps.now(), self.config.fallback_hours
+        active = {}
+        for model, stamp in sorted(self.state["exhausted"].items()):
+            try:
+                marked = datetime.fromisoformat(stamp)
+            except (TypeError, ValueError):
+                marked = None
+            if marked is not None and (now - marked).total_seconds() < hours * 3600:
+                active[model] = stamp
+                continue
+            self.log("%s was marked exhausted at %s, over %dh ago, routing to it again"
+                     % (model, stamp, hours))
+        if active != self.state["exhausted"]:
+            self.state["exhausted"] = active
+            self.save_state()
+        return active
+
+    def route(self, card, routing, exhausted):
+        """(model, [notes]): `choose_model`, then its fallback while that model is exhausted."""
+        model, note = choose_model(card, routing, self.config)
+        notes = [note] if note else []
+        if model in exhausted:
+            target = resolve_fallback(model, self.config.model_fallback, set(exhausted))
+            if target is None:
+                notes.append("card %s is routed to %s, marked exhausted at %s, and no fallback "
+                             "of it is free, keeping %s" % (card["id"], model, exhausted[model],
+                                                            model))
+            else:
+                notes.append("card %s is routed to %s, marked exhausted at %s, appending it on "
+                             "%s" % (card["id"], model, exhausted[model], target))
+                model = target
+        return model, notes
+
+    def _models(self, tasks):
+        """{id: model} each task ran on: the summary's own field, else the manifest's."""
+        listed = manifestedit.task_models(self._read(self.paths.manifest))
+        return {task["id"]: task.get("model") or listed.get(task["id"]) for task in tasks}
+
+    def fall_back(self, moves):
+        """Mark each model in `moves` exhausted and move its tasks to the fallback in the
+        manifest. Returns the ids moved, whose halts are not counted. A task the manifest edit
+        refused stays where it is and its halt counts as any other."""
+        moved, by_source = set(), {}
+        for task, source, target in moves:
+            try:
+                text = self._read(self.paths.manifest)
+                edited = manifestedit.set_model(text, task["id"], target)
+                if edited is not None:
+                    manifestedit.commit(self.paths.manifest, text, edited, env=self.env)
+            except manifestedit.EditError as exc:
+                self.log("%s could not be moved from %s to %s, its halt is counted: %s"
+                         % (task["id"], source, target, exc))
+                continue
+            moved.add(task["id"])
+            by_source.setdefault((source, target), []).append(task["id"])
+        stamp = self.deps.now().isoformat(timespec="seconds")
+        for source in sorted({source for _, source, _ in moves}):
+            self.state["exhausted"][source] = stamp
+        for (source, target), ids in sorted(by_source.items()):
+            message = ("%s died inside %ds on %s, reading that as %s's usage limit: %s marked "
+                       "exhausted for %dh and moved to %s; these halts are not counted"
+                       % (", ".join(ids), self.config.quick_death_seconds, source, source,
+                          source, self.config.fallback_hours, target))
+            self.log(message)
+            self.notify(message)
+        self.save_state()
+        return moved
 
     # The steps.
     def pre_cycle(self, manifest):

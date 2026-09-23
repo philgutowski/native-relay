@@ -1,8 +1,8 @@
 """Manifest edits made by code (feeder plan, KTD2).
 
 Until the feeder, a manifest was written by a person or by the `/relay` skill and only ever read
-by the runner. The feeder changes that: between runs it appends `[[tasks]]` blocks and marks a
-task excluded. This module is the whole of that write path, kept apart from the loop so every
+by the runner. The feeder changes that: between runs it appends `[[tasks]]` blocks, marks a
+task excluded, and moves a task to another model. This module is the whole of that write path, kept apart from the loop so every
 edit can be tested as text in, text out.
 
 The standard library reads TOML (`tomllib`) and cannot write it, so an edit is a line edit that
@@ -10,7 +10,7 @@ leaves every comment and every hand written line exactly where the operator put 
 is only as good as its idea of where a block ends, so nothing here trusts one. Each edit is
 proven three ways before it reaches the real file:
 
-1. `check_append` or `check_exclusion` parses the text before and after with `tomllib` and
+1. `check_append`, `check_exclusion`, or `check_model` parses the text before and after with `tomllib` and
    refuses any edit whose parsed result differs from the one intended. The line editor may be
    wrong about an unusual file; the parser is not.
 2. `commit` writes the candidate to a temporary file beside the manifest and runs the manifest
@@ -188,6 +188,44 @@ def check_exclusion(before, after, task_id, sentence):
         expected.append(entry)
     if new.get("tasks") != expected or _without_tasks(old) != _without_tasks(new):
         raise EditError("the exclusion of %s did not parse as that one change" % task_id)
+
+
+def task_models(text):
+    """{id: model} for every task that names its model, read with the real parser."""
+    return {str(entry.get("id", "")): str(entry["model"]) for entry in _parse(text).get("tasks", [])
+            if isinstance(entry, dict) and "model" in entry}
+
+
+def set_model(text, task_id, model):
+    """The text with one task's `model` line rewritten, or added when the block names none, or
+    None when the task already names that model. The runner reads a model edit between runs as
+    a move and relaunches a halted task where the manifest now sends it."""
+    task_id = str(task_id)
+    block = next((found for found in task_blocks(text) if found.id == task_id), None)
+    if block is None:
+        raise EditError("no [[tasks]] block with id %s could be found to move" % task_id)
+    if block.keys.get("model") == model:
+        return None
+    lines = text.split("\n")
+    at = [position for position in range(block.start + 1, block.insert_at)
+          if re.match(r"^\s*model\s*=", lines[position])]
+    line = "model = %s" % toml_string(model)
+    if at:
+        lines[at[0]] = line
+    else:
+        lines.insert(block.insert_at, line)
+    out = "\n".join(lines)
+    check_model(text, out, task_id, model)
+    return out
+
+
+def check_model(before, after, task_id, model):
+    """Refuse a model edit that changed anything but that one task's model."""
+    old, new = _parse(before), _parse(after)
+    expected = [dict(entry, model=model) if str(entry.get("id", "")) == task_id else entry
+                for entry in old.get("tasks", [])]
+    if new.get("tasks") != expected or _without_tasks(old) != _without_tasks(new):
+        raise EditError("the move of %s to %s did not parse as that one change" % (task_id, model))
 
 
 def _flat(value):
