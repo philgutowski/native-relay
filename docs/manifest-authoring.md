@@ -354,7 +354,7 @@ stem. For `queue.toml`:
 | `queue.order` | you | priority, one card id per line, highest first, `#` comments |
 | `queue.models` | you | model routing, `id model  # why` per line, read fresh each cycle |
 | `queue.feeder.stop` | you, or `feed --stop` | its presence makes the feeder leave after the cycle |
-| `queue.feeder.state.json` | the feeder | halt counts and wait counts |
+| `queue.feeder.state.json` | the feeder | halt counts, wait counts, and models marked exhausted |
 | `queue.feeder.log` | the feeder | one line per decision |
 | `queue.feeder.lock` | the feeder | held while it runs; one feeder per manifest |
 | `queue.feeder.out` | `feed --detach` | the detached feeder's output and every run's |
@@ -379,6 +379,8 @@ lease_wait_seconds = 600
 default = "opus"
 effort = "high"
 allowed = ["fable", "opus", "sonnet"]
+fallback = {}                 # e.g. { fable = "opus" }; empty means no per model fallback
+fallback_hours = 5
 
 [ready]
 labels = ["ready"]            # github: open issues carrying every label
@@ -408,6 +410,19 @@ labels = []
   body line outside the allowed set is ignored and logged. Whatever is chosen still passes
   `validate` before it reaches the manifest, so a model that belongs to another backend is
   refused there and that one card is left out. The closeout keeps `[closeout] model`.
+- `models.fallback` maps a model to the model its tasks move to when it looks limited, and
+  both sides must be in `models.allowed`. Off by default. With `fallback = { fable = "opus" }`,
+  a task on fable that halts within `quick_death_seconds` is read as fable's usage limit, even
+  while tasks on other models land beside it. That is a heuristic, like the whole cycle rule,
+  and a process that never started is never read as one. The feeder marks fable exhausted in
+  its state file, rewrites that task's `model` to opus in the manifest so the next run
+  relaunches it there, does not count the halt toward `max_halts`, and logs and notifies the
+  move. New cards routed to fable are appended on opus, one log line each, until
+  `fallback_hours` have passed; then the next fable card runs on fable again, and a fast death
+  marks it again. A fallback is taken only when it leads to a model that is not marked and did
+  not itself die quickly that cycle, following a chain one model at a time and never coming
+  back to a model it has passed. When every task died quickly, nothing landed, and any of
+  those halts had no such fallback, the whole cycle is waited out as before.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart`. The order and routing files are read at every cycle and need no restart.
 

@@ -504,6 +504,14 @@ is never built until the card is fixed; a card whose text names a `.claude/` pat
 cause. And a card whose routing failed `validate`, a model that belongs to another backend, is
 left out of the manifest and named in the log until its routing changes.
 
+When one model's account runs out while others still work, a fallback keeps the queue moving.
+With `[models] fallback = { fable = "opus" }` in the sidecar, a fable task that dies within
+`quick_death_seconds` is read as fable's usage limit, a heuristic and not a detection: fable is
+marked exhausted for `fallback_hours` (5 by default), the task is moved to opus in the manifest
+and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
+mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
+where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
+
 Start a feeder from a pinned extract of a commit when the operator has one, never from a
 checkout somebody is editing. It launches the runner from its own tree at every cycle.
 
