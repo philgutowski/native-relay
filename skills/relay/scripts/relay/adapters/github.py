@@ -399,22 +399,40 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         supplied for a blocked or halted outcome when the runner wants the card returned there.
         The task process moved the item to the in review status at its first step, so without
         the return every blocked or halted card sits in progress with nobody on it."""
+        # `gh project item-edit` needs the project's node id, which neither field-list nor
+        # item-list returns; `gh project view` does. Both list commands default to a 30 row
+        # page (2026-08-29, PROJECT_ITEM_LIMIT above), so both carry the same explicit limit.
+        ids = (
+            "Read the project id from `gh project view %s --owner %s --format json`, the "
+            "field and option ids from `gh project field-list %s --owner %s --format json "
+            "--limit %d`, and the item id from `gh project item-list %s --owner %s --format "
+            "json --limit %d`."
+            % (self._project_number, self._owner,
+               self._project_number, self._owner, PROJECT_ITEM_LIMIT,
+               self._project_number, self._owner, PROJECT_ITEM_LIMIT)
+        )
         if outcome == OUTCOME_LANDED:
             close = ("Close the issue with `gh issue close <number>` and add one comment naming "
                      "the landing reference below")
             if not self._status_field:
                 return close + "."
             # Closing alone leaves the project item in the in review column, so the board reads
-            # finished work as unfinished. Do both writes; the closeout delta accepts either.
-            return (close + ". Then set the board's single select Status field on its project item to the option "
-                    "`%s` with `gh project item-edit`, reading the project, item, field, and option "
-                    "ids from `gh project field-list` and `gh project item-list`, so the board "
-                    "column matches the closed issue. Do both, not one of them."
-                    % self._status_field)
+            # finished work as unfinished. Do both writes when there is an item to move; the
+            # closeout delta accepts either, since a CLOSED issue is terminal on its own.
+            return (
+                close + ". Then set the board's single select Status field on its project item "
+                "to the option `%s` with `gh project item-edit`, for owner `%s` and project "
+                "number `%s`. %s Do both writes when the issue has an item on that project. If "
+                "it has none, leave the board alone and say so in the comment instead of trying "
+                "to add the issue to the project."
+                % (self._status_field, self._owner, self._project_number, ids)
+            )
         move = ("Do not close the issue and do not move its project item" if not return_to else
-                "Do not close the issue. Move its project item back to `%s`, the status it read "
-                "before this run, since no process is working on it now; use `gh project "
-                "item-edit` with the board's Status field" % return_to)
+                "Do not close the issue. Move its project item back to `%s`, the status it "
+                "read before this run, for owner `%s` and project number `%s`, since no "
+                "process is working on it now. %s Use `gh project item-edit` with the board's "
+                "Status field"
+                % (return_to, self._owner, self._project_number, ids))
         if outcome == OUTCOME_HALTED:
             return ("Add one comment naming the halt class and the cause line below with `gh issue "
                     "comment`. %s: a halted task is not finished." % move)
