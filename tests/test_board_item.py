@@ -420,6 +420,33 @@ class Audit(unittest.TestCase):
         self.assertNotIn("None", findings[0]["text"])
         self.assertNotIn("OPEN", findings[0]["text"])
 
+    def test_an_empty_item_the_audit_read_clears_the_in_review_mark(self):
+        """Issue #78's own review: the audit hands the Runner every readable card's status, and
+        an empty item's None used to be skipped as if nothing were seen. It was read, and it is
+        out of review, so the mark the Runner set at launch comes off."""
+        from relay import run as run_module
+
+        self.store.upsert("12", status=contracts.STATUS_BLOCKED, landing_ref=None,
+                          card_in_review_by_run=True)
+        observed = {}
+        manifest = _manifest(repo=self.repo)
+        audit.build(manifest, self.store,
+                    gh_adapter.GitHubAdapter(manifest, run=TwoTruths({"12": "OPEN"}, {"12": None})),
+                    observed=observed)
+        self.assertEqual(observed, {"12": None})
+        run_module._clear_seen_out_of_review(SimpleNamespace(manifest=manifest, store=self.store),
+                                             observed)
+        self.assertFalse(self.store.get("12")["card_in_review_by_run"])
+
+    def test_a_partial_landing_on_an_empty_item_says_no_status_not_unreadable(self):
+        from relay import verify
+
+        verdict = SimpleNamespace(checks={"card_terminal": {
+            "result": verify.FAIL, "evidence": {"status": None, "terminal": False}}})
+        self.assertEqual(verify.card_status_of(verdict), "no status")
+        verdict.checks["card_terminal"]["evidence"] = {"reason": "gh exited 1"}
+        self.assertEqual(verify.card_status_of(verdict), "gh exited 1")
+
     def test_item_seen_marks_a_landed_item_read_cleanly_as_terminal(self):
         """Issue #61: this is what lets the Runner retire `confirm_board_terminal`'s own
         record finding once a later audit confirms the item, the way #64 already retires

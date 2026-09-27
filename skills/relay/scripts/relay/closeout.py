@@ -404,9 +404,10 @@ def read_back(adapter, manifest, task_id, return_to):
     status, or when the read failed, so the summary lists the card to move by hand. Never a halt:
     the run continues, and the runner never moves the card itself.
 
-    `out_of_review` is True only when the read answered with a status other than the in review
-    one. The caller clears `card_in_review_by_run` on it (issue #64), and on nothing else, since
-    a read that failed has seen nothing.
+    `out_of_review` is True only when the read answered and the answer is not the in review
+    status. The caller clears `card_in_review_by_run` on it (issue #64), and on nothing else, since
+    a read that failed has seen nothing. An answer of no status counts: a GitHub item with no
+    column (issue #78) was read and is out of review.
 
     A None `return_to` is a card whose baseline was never read (issue #51), and the finding names
     `contracts.UNKNOWN_RETURN` in its place. A read that fails then is no finding: nothing says
@@ -435,7 +436,7 @@ def read_back(adapter, manifest, task_id, return_to):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": status, "return_to": return_to,
                 "evidence": "the card reads %s after the closeout" % status}, False
-    return None, bool(status)
+    return None, True
 
 
 def confirm_board_terminal(adapter, manifest, task_id):
