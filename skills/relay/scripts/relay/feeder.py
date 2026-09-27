@@ -828,24 +828,45 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
             # SIGTERM has no Python level exception of its own, unlike SIGINT's
             # KeyboardInterrupt, so without this the hook's group would outlive a feeder ended
             # by signal. The previous handler runs after the group is down, same as launch.py's
-            # own SIGINT/SIGTERM handling around a Task process.
+            # own SIGINT/SIGTERM handling around a Task process, including its guard against a
+            # call off the main thread and against a disposition Python did not itself install
+            # (`getsignal` then answers None, which `signal.signal` refuses as a handler).
             previous = signal.getsignal(signal.SIGTERM)
+            ended = False
+
+            def end_once():
+                # A SIGTERM the handler catches then still unwinds through the `except
+                # BaseException` below as the KeyboardInterrupt it raises, so without this the
+                # group would be ended twice for one signal.
+                nonlocal ended
+                if not ended:
+                    ended = True
+                    end_group(proc)
 
             def handle(signum, frame):
-                end_group(proc)
+                end_once()
                 if callable(previous):
                     previous(signum, frame)
                 else:
                     raise KeyboardInterrupt()
 
-            signal.signal(signal.SIGTERM, handle)
+            installed = False
+            try:
+                signal.signal(signal.SIGTERM, handle)
+                installed = True
+            except ValueError:
+                pass
             try:
                 return proc.wait(timeout=timeout)
             except BaseException:
-                end_group(proc)
+                end_once()
                 raise
             finally:
-                signal.signal(signal.SIGTERM, previous)
+                if installed and previous is not None:
+                    try:
+                        signal.signal(signal.SIGTERM, previous)
+                    except ValueError:
+                        pass
 
     def start_hook(args, cwd, extra_env, output_path):
         # Its own session, like `feed --detach`, so a hook that outlives the feeder is not
@@ -1654,8 +1675,10 @@ class Feeder:
             return None
         # A blocking hook can run for up to `post_cycle_timeout_seconds`, an hour by default,
         # with nothing else to say a feeder is inside it: without this, `feed --status` shows
-        # `cycle_result` as the last event throughout (issue #56).
-        self.emit(EVENT_POST_CYCLE_STARTED, mode=mode, **said)
+        # `cycle_result` as the last event throughout (issue #56). `where` carries the same
+        # three way reading `post_cycle`'s own log line and hook output use, so `status_lines`
+        # need not collapse an unread default branch into the same word as an empty range.
+        self.emit(EVENT_POST_CYCLE_STARTED, mode=mode, where=where, **said)
         exit_code, failure = None, None
         try:
             exit_code = self.deps.run_hook(command, repo, extra, self.paths.hook_out,
