@@ -422,8 +422,13 @@ nothing landed, the Cycle is waited out as a whole. In those two cases the block
 queued for a retry: the next run relaunches it by id with `--retry-blocked`, and no other
 blocked record with it. A queued retry holds its place in the batch like a halted Task, so the
 Cycle after a wait relaunches the dead Tasks first and appends fresh cards only into whatever
-room they leave. A blocked limit death with no free fallback in a Cycle where something landed
-is neither: it stays blocked for a person, like any other blocked record.
+room they leave. A limit death with no free fallback in a Cycle where something landed, or a
+death was slow, holds its model back: the model is marked exhausted as a move would mark it,
+and while none of its fallbacks is free a card routed to it is not appended at all, rather than
+kept on the model to die in seconds. A model a Task landed on in the same Cycle is not held.
+A blocked one is queued for a retry that waits while its model is held. A halted one is still counted, because the Runner relaunches a halted Task on every
+run whatever the Feeder holds. On a model with no fallback entry, or with the fallback off, a
+blocked record is read as a limit death only when its log's `result` line says 429.
 
 The Feeder is the one piece of runner code that writes a Manifest. Every write is a text edit
 that is parsed back and compared with the change intended, validated by the manifest module from

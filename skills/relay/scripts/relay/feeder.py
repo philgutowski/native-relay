@@ -38,7 +38,7 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     message and exited is recorded `blocked` with class `no_envelope`, and a blocked record is
     one the runner never relaunches unasked. `blocked_by_usage_limit` reads such a record, on a
     model that has a fallback, as that model's limit too, confirmed by the log's `result` line
-    when it has one. It is moved like a halt, and the feeder then passes `--retry-blocked ID`
+    when it has one, and on any other model only when that line says 429. It is moved like a halt, and the feeder then passes `--retry-blocked ID`
     for it alone to the next run, so no other blocked record is revived with it. It is a quick
     death for the whole cycle rule too (issue #45): a cycle whose deaths are all of this kind,
     with no fallback free, is waited out like a cycle of halts, and each such record is queued
@@ -51,6 +51,19 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     that fall back to each other still reach `limit_waits_max` and exit 2, with each blocked
     limit death reported blocked. Before, the move that follows the first mark's expiry reset
     the count, and a quick dying task was relaunched every half hour for ever with no report.
+
+    A limit reading no fallback takes, in a cycle the whole cycle rule does not wait out
+    because something landed or a death was slow, holds its model back (issue #52). The model
+    is marked exhausted as a move would mark it, and while none of its fallbacks is free a card
+    routed to it is not appended at all, rather than kept on it to die in seconds, and holds
+    no room in the batch. A model a task landed on that cycle is not held. A blocked limit
+    death there is queued for a retry that waits while its model is held; a halted one is
+    still counted, since the runner relaunches a
+    halted task on every run and rule 2 is what bounds that. When held cards and deferred
+    retries are all that is left, the feeder waits, reason `model_held`, rather than leave or
+    call them refused. The blocked reading also runs on a model with no fallback entry, or with
+    the fallback off, when the log's `result` line confirms a 429: such a cycle of deaths is
+    waited out as the same deaths recorded halted are.
 
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes five
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
@@ -454,18 +467,19 @@ def scanned_ids(cards):
     return reasons
 
 
-def select(cards, listed, config, rank, unsettled_count, scanned):
+def select(cards, listed, config, rank, unsettled_count, scanned, held=()):
     """(fresh, batch). Fresh is every ready card a session may take that the manifest does not
     list yet, in order file order and then by id, including one the R41 scan would refuse.
     `scanned` is `scanned_ids`'s result, and the batch is the head of the ones outside it, as
     long as the room left: the batch size minus the tasks the next run will already launch. A
-    card the scan refuses holds no room, so the next clean card in order fills its slot instead."""
+    card the scan refuses holds no room, so the next clean card in order fills its slot instead.
+    Nor does a card in `held`, one routed to a model held back by a usage limit (issue #52)."""
     fresh = [card for card in cards
              if card["id"] not in listed and card["id"] not in config.denied_ids
              and not any(label in config.denied_labels for label in card.get("labels") or ())]
     fresh.sort(key=lambda card: (rank.get(card["id"], UNRANKED), natural_key(card["id"])))
     room = max(0, config.batch - unsettled_count)
-    eligible = [card for card in fresh if card["id"] not in scanned]
+    eligible = [card for card in fresh if card["id"] not in scanned and card["id"] not in held]
     return fresh, eligible[:room]
 
 
@@ -512,7 +526,7 @@ def result_event(log_text):
     return None
 
 
-def blocked_by_usage_limit(task, config, log_text):
+def blocked_by_usage_limit(task, config, log_text, confirmed_only=False):
     """Issue #39. A blocked record that reads as a usage limit death: no envelope, and a process
     that died inside `quick_death_seconds`, which also means it had no time to write anything a
     retry would have to step over.
@@ -520,11 +534,15 @@ def blocked_by_usage_limit(task, config, log_text):
     The log decides when it can. A `result` event with `api_error_status` 429 is the CLI saying
     the limit is spent; a `result` event saying anything else is a process that finished a turn
     or failed on something else, a model it cannot reach for one, and moving it would not help.
-    With no `result` event to read, the time rule stands alone, as it does for a halt."""
+    With no `result` event to read, the time rule stands alone, as it does for a halt, unless
+    `confirmed_only` asks for the 429 itself: the reading on a model with no fallback entry,
+    where the time rule alone is not enough evidence to wait or hold on (issue #52)."""
     if task.get("class") != contracts.HALT_NO_ENVELOPE or not died_quickly(task, config):
         return False
     event = result_event(log_text)
-    return event is None or event.get("api_error_status") == USAGE_LIMIT_STATUS
+    if event is None:
+        return not confirmed_only
+    return event.get("api_error_status") == USAGE_LIMIT_STATUS
 
 
 def resolve_fallback(model, table, unavailable):
@@ -541,29 +559,40 @@ def resolve_fallback(model, table, unavailable):
         seen.add(current)
 
 
-def model_limit_moves(halted, models, config, exhausted):
-    """The per model half of rule 3, and a heuristic like the whole cycle half. [(task, from,
-    to)] for every task whose model has a fallback and that died quickly: each is read as its
-    model's usage limit and moved. The tasks are the halted ones and the blocked ones
-    `blocked_by_usage_limit` already chose.
+def model_limit_readings(dead, models, config, confirmed=()):
+    """The tasks read as their own model's usage limit: each that died quickly on a model with
+    a fallback entry, and each in `confirmed`, the ids of blocked limit deaths `limit_blocked`
+    already chose, on whatever model (issue #52). A quick halt on a model with no fallback
+    entry is left to the whole cycle rule alone."""
+    return [task for task in dead if died_quickly(task, config)
+            and (models.get(task["id"]) in config.model_fallback or task["id"] in confirmed)]
+
+
+def model_limit_moves(halted, models, config, exhausted, confirmed=()):
+    """The per model half of rule 3, and a heuristic like the whole cycle half. (moves, stays):
+    [(task, from, to)] for every task `model_limit_readings` reads as its model's usage limit
+    whose model has a free fallback, each to be moved, and [task] for the readings whose model
+    has none. The tasks are the halted ones and the blocked ones
+    `blocked_by_usage_limit` already chose, whose ids are `confirmed`.
 
     `models` is {id: model} for those tasks and `exhausted` the models already marked. A
-    model that died quickly this cycle is treated as exhausted too when it is looked at as a
+    model read as limited this cycle is treated as exhausted too when it is looked at as a
     fallback, so two models that fall back to each other and both died never send their
     tasks back and forth; neither is moved, and the whole cycle rule decides, for blocked limit
-    deaths as much as for halts."""
-    quick = [task for task in halted if died_quickly(task, config)]
-    dying = {models.get(task["id"]) for task in quick} & set(config.model_fallback)
+    deaths as much as for halts. A stay is `Feeder.mark_held`'s, when the whole cycle rule
+    does not wait."""
+    readings = model_limit_readings(halted, models, config, confirmed)
+    dying = {models.get(task["id"]) for task in readings}
     unavailable = set(exhausted) | dying
-    moves = []
-    for task in quick:
+    moves, stays = [], []
+    for task in readings:
         source = models.get(task["id"])
-        if source not in dying:
-            continue
         target = resolve_fallback(source, config.model_fallback, unavailable)
-        if target is not None:
+        if target is None:
+            stays.append(task)
+        else:
             moves.append((task, source, target))
-    return moves
+    return moves, stays
 
 
 # The outside world.
@@ -925,7 +954,8 @@ class Feeder:
 
     def wait(self, seconds, reason):
         """Sleep and go round again, or under --once leave without sleeping. `reason` is the
-        word the `waiting` event carries: lease_held, usage_limit, unreadable_source, idle."""
+        word the `waiting` event carries: lease_held, usage_limit, model_held, unreadable_source,
+        idle."""
         if self.once:
             self.leave_reason = ("once", "left after one cycle instead of waiting (%s)" % reason)
             return EXIT_OK
@@ -984,25 +1014,35 @@ class Feeder:
             code = self.take_requests(listed, excluded, records)
             if code is not None:
                 return code
-        retry_ids = self.pending_retries(listed, excluded, records)
+        exhausted = self.exhausted_models()
+        retry_ids, deferred = self.pending_retries(listed, excluded, records, exhausted, text)
         # A blocked task queued for a retry holds room like any task the next run launches.
+        # One deferred while its model is held does not: this run will not launch it.
         unsettled = [task_id for task_id in listed if task_id not in excluded
                      and (records.get(task_id, {}).get("status") not in SETTLED
                           or task_id in retry_ids)]
         cards, readable = self.ready_cards(manifest)
         scanned = scanned_ids(cards)
-        fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
-                              len(unsettled), scanned)
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
-        exhausted = self.exhausted_models()
+        # Routed once per cycle: the held set, the batch, and the dry run all read this.
+        routes = {card["id"]: self.route(card, routing, exhausted) for card in cards
+                  if card["id"] not in listed}
+        held = {card_id for card_id, (model, _) in routes.items() if model is None}
+        fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
+                              len(unsettled), scanned, held)
+        held_fresh = [card["id"] for card in fresh
+                      if card["id"] in held and card["id"] not in scanned]
         entries = []
         for card in batch:
-            model, note = self.route(card, routing, exhausted)
+            model, note = routes[card["id"]]
             notes += note
             entries.append({"id": card["id"], "title": card["title"], "model": model,
                             "effort": config.default_effort})
         for note in notes:
             self.log(note)
+        if held_fresh or deferred:
+            self.log("held back by a model's exhausted mark: cards %s, whose model has no free "
+                     "fallback, and retries %s, until the mark expires" % (held_fresh, deferred))
         entries = [entry for entry in entries
                    if self.state["refused"].get(entry["id"]) != entry["model"]]
         self.log("cycle %d: %d unsettled in the manifest, %d ready and unlisted, appending %s"
@@ -1013,9 +1053,12 @@ class Feeder:
                 reason = scanned.get(card["id"])
                 if reason:
                     self.out.write("   would skip %s: %s\n" % (card["id"], reason))
+                elif card["id"] in held:
+                    self.out.write("   would hold %s on %s until its mark expires: %s\n" % (
+                        card["id"], choose_model(card, routing, config)[0], card["title"][:90]))
                 else:
                     self.out.write("   would offer %s on %s: %s\n" % (
-                        card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
+                        card["id"], routes[card["id"]][0], card["title"][:90]))
             return EXIT_OK
 
         for card in fresh:
@@ -1027,10 +1070,18 @@ class Feeder:
         appended = self.append(text, entries)
         if appended:
             self.state["idle_waits"] = self.state["unreadable_waits"] = 0
+        elif not unsettled and not batch and (held_fresh or deferred):
+            # Work is waiting on a model's mark, not missing (issue #52). The mark expires after
+            # `fallback_hours`, so this wait is bounded without a count of its own, and it is no
+            # evidence either way about the whole cycle rule's row of waits. A batch that was
+            # taken and then all refused is a routing problem, and `idle` stops on it below.
+            self.log("nothing to run until a held model's mark expires, waiting")
+            return self.wait(config.limit_wait_seconds, "model_held")
         elif not unsettled:
             # A card the scan refuses never reached model routing, so it is not evidence of a
             # routing problem (issue #41); only a card that got that far belongs in this check.
-            return self.idle(readable, [card["id"] for card in fresh if card["id"] not in scanned])
+            return self.idle(readable, [card["id"] for card in fresh
+                                        if card["id"] not in scanned and card["id"] not in held])
 
         self.state["cycles"] += 1
         self.state.get("process", {})["cycle"] = self.state["cycles"]
@@ -1164,7 +1215,9 @@ class Feeder:
                                           % (data.get("halt_task"), data.get("halt_class")),
                              "run_scoped_halt")
         dead = halted + limited
-        moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
+        models = self._models(dead)
+        moves, stays = model_limit_moves(dead, models, config, self.exhausted_models(),
+                                         limited_ids)
         quick = looks_like_usage_limit(dead, landed, config)
         if quick and len(moves) < len(dead):
             # Some quick death, halted or a blocked limit death, has no fallback to take, so the
@@ -1200,11 +1253,20 @@ class Feeder:
             # task moves back, and the count began again.
             self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)
+        # A reading with no move, beside a landing or a slow death, holds its model back
+        # (issue #52). Without the mark, `route` kept fresh cards on it and the next cycle filled
+        # the batch with tasks that died in seconds, each with a Closeout of its own. A model a
+        # task landed on this cycle is not at its limit, whatever died quickly beside it.
+        working = set(self._models(landed).values())
+        held = self.mark_held([task for task in stays if models.get(task["id"]) not in working],
+                              models, limited_ids)
         for task in limited:
-            if task["id"] in moved:
+            if task["id"] in moved or models.get(task["id"]) in held:
+                # Moved, it relaunches on the fallback; held, its retry waits for the mark.
                 self.queue_retry(task)
             else:
-                # No fallback is free, so this is an ordinary blocked task again.
+                # Neither moved nor held: the move could not be written, or a task landed on
+                # its model this cycle. Either way it is an ordinary blocked task again.
                 self.report_blocked(task)
         for task in halted:
             if task["id"] in moved:
@@ -1253,21 +1315,63 @@ class Feeder:
             self.save_state()
         return active
 
+    def held_model(self, model, exhausted):
+        """A model marked exhausted whose fallback chain has no free model: nothing routed to
+        it can run anywhere until a mark expires (issue #52)."""
+        return (model in exhausted
+                and resolve_fallback(model, self.config.model_fallback, set(exhausted)) is None)
+
     def route(self, card, routing, exhausted):
-        """(model, [notes]): `choose_model`, then its fallback while that model is exhausted."""
+        """(model, [notes]): `choose_model`, then its fallback while that model is exhausted.
+        The model is None for a card routed to a held model, one `select` leaves out. Before
+        issue #52 such a card was kept on the dead model and died there in seconds."""
         model, note = choose_model(card, routing, self.config)
         notes = [note] if note else []
+        if self.held_model(model, exhausted):
+            return None, notes
         if model in exhausted:
             target = resolve_fallback(model, self.config.model_fallback, set(exhausted))
-            if target is None:
-                notes.append("card %s is routed to %s, marked exhausted at %s, and no fallback "
-                             "of it is free, keeping %s" % (card["id"], model, exhausted[model],
-                                                            model))
-            else:
-                notes.append("card %s is routed to %s, marked exhausted at %s, appending it on "
-                             "%s" % (card["id"], model, exhausted[model], target))
-                model = target
+            notes.append("card %s is routed to %s, marked exhausted at %s, appending it on "
+                         "%s" % (card["id"], model, exhausted[model], target))
+            model = target
         return model, notes
+
+    def mark_held(self, tasks, models, blocked_ids=()):
+        """Mark exhausted the model of each task in `tasks`, the limit readings no fallback took,
+        and return those models (issue #52). `route` then holds back every card routed to one
+        of them while no fallback of it is free, and `pending_retries` each queued retry on one
+        for as long. A halt among them is still counted: the runner relaunches a halted task on
+        every run, and rule 2 is what bounds that."""
+        by_model = {}
+        for task in tasks:
+            by_model.setdefault(models.get(task["id"]), []).append(task["id"])
+        stamp = self.deps.now().isoformat(timespec="seconds")
+        for model, ids in sorted(by_model.items()):
+            if model in self.state["exhausted"]:
+                # Already held: a halted task relaunched on it died again. A new stamp would
+                # push the hold out by another `fallback_hours` and notify the operator twice.
+                self.log("%s died inside %ds on %s, which is already held since %s"
+                         % (", ".join(ids), self.config.quick_death_seconds, model,
+                            self.state["exhausted"][model]))
+                continue
+            self.state["exhausted"][model] = stamp
+            message = ("%s died inside %ds on %s, reading that as %s's usage limit with no free "
+                       "fallback: %s marked exhausted for %dh, and cards routed to it are held "
+                       "back while no fallback of it is free"
+                       % (", ".join(ids), self.config.quick_death_seconds, model, model, model,
+                          self.config.fallback_hours))
+            retried = [task_id for task_id in ids if task_id in blocked_ids]
+            halts = [task_id for task_id in ids if task_id not in blocked_ids]
+            if retried:
+                message += ("; %s read blocked and relaunch with --retry-blocked once %s is no "
+                            "longer held" % (", ".join(retried), model))
+            if halts:
+                message += "; the halts of %s are counted" % ", ".join(halts)
+            self.log(message)
+            self.notify(message)
+        if by_model:
+            self.save_state()
+        return set(by_model)
 
     def _models(self, tasks):
         """{id: model} each task ran on: the summary's own field, else the manifest's."""
@@ -1312,18 +1416,19 @@ class Feeder:
 
     # Blocked tasks and their retries (issue #39).
     def limit_blocked(self, blocked):
-        """The blocked tasks this cycle that read as their model's usage limit, on a model with
-        a fallback, since without one the feeder has nowhere better to send them. A task still
+        """The blocked tasks this cycle that read as their model's usage limit. On a model with
+        a fallback entry the time rule is enough when the log has no `result` line; on any
+        other model, or with the fallback off, the log's 429 must confirm it (issue #52). Such a
+        death is then waited out or held like one on a fallback model, where before it was an
+        ordinary blocked task while the same death recorded halted was waited out. A task still
         queued for a retry is left out: the run never reached it, so its record is the old one
         and was read when it was queued."""
-        if not self.config.model_fallback:
-            return []
         fresh = [task for task in blocked if task["id"] not in self.state["retry_blocked"]]
         models = self._models(fresh)
         return [task for task in fresh
-                if models.get(task["id"]) in self.config.model_fallback
-                and blocked_by_usage_limit(task, self.config,
-                                           self._log_tail(task.get("log_path")))]
+                if blocked_by_usage_limit(
+                    task, self.config, self._log_tail(task.get("log_path")),
+                    confirmed_only=models.get(task["id"]) not in self.config.model_fallback)]
 
     def report_blocked(self, task):
         self.report_once("blocked:" + task["id"], "%s blocked; a later run will not retry it "
@@ -1351,8 +1456,12 @@ class Feeder:
                 unlaunched.add(task_id)
         return unlaunched
 
-    def pending_retries(self, listed, excluded, records):
-        """The ids the next run is to pass as `--retry-blocked`, sorted. A queued id that is no
+    def pending_retries(self, listed, excluded, records, exhausted, text):
+        """(retry, deferred): the ids the next run is to pass as `--retry-blocked`, and the ids
+        still queued but deferred while the model the manifest `text` lists them on is held
+        (issue #52), each sorted. A deferred retry keeps its place in the queue and holds no room
+        in the batch. One on a model that is marked but has a free fallback is not deferred: it
+        relaunches, and a quick death there moves it as any other would. A queued id that is no
         longer listed, is excluded, or no longer reads blocked has nothing to retry, and is
         dropped here rather than carried for ever."""
         queue = self.state["retry_blocked"]
@@ -1362,7 +1471,14 @@ class Feeder:
         if keep != queue:
             self.state["retry_blocked"] = keep
             self.save_state()
-        return sorted(keep, key=natural_key)
+        # The manifest first, not `_models`: a moved retry's record still names the model it
+        # died on, and reading that would defer the move until the dead model's mark expired.
+        listed_models = manifestedit.task_models(text) if exhausted else {}
+        retry, deferred = [], []
+        for task_id in sorted(keep, key=natural_key):
+            model = listed_models.get(task_id) or records[task_id].get("model")
+            (deferred if self.held_model(model, exhausted) else retry).append(task_id)
+        return retry, deferred
 
     def take_requests(self, listed, excluded, records):
         """`feed --retry-blocked ID`: queue those blocked tasks and no others. An id the
