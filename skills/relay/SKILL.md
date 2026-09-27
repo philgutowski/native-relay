@@ -552,7 +552,7 @@ lease. What it is doing is in `<stem>.feeder.log`, one line per decision. Whethe
 every board's feeder, and has reported one board alive while it sat idle for hours. The status
 checks the pid the feeder recorded against that manifest's own lock file. A watcher that needs
 each cycle as it happens runs `feed <manifest> --follow`, which prints JSON lines, `started`,
-`cycle_started`, `cycle_result`, `post_cycle_started` (a post cycle hook has begun) and
+`cycle_started`, `cycle_result`, `post_cycle_started` (a blocking post cycle hook has begun) and
 `post_cycle` (its result, including a hold), `waiting`, and `leaving`, each carrying a `reason`
 where one applies, and ends when the feeder leaves. To change its settings,
 edit the sidecar and `feed <manifest> --restart`: a running feeder holds the settings and the

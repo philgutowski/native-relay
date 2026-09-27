@@ -201,9 +201,10 @@ against the manifest's own lock file, so another manifest's feeder or a recycled
 read as this one alive; a process listing cannot tell two boards apart. `status <manifest>`
 adds the same answer as one `feeder:` line. For a watcher, the feeder writes one JSON line per
 moment to `queue.feeder.events.jsonl`: `started`, `cycle_started` (the ids appended),
-`cycle_result` (the run's exit code and the ids by outcome), `post_cycle_started` (a post cycle
-hook has begun) and `post_cycle` (its result, including a hold), `waiting` (a reason and when it
-ends), and `leaving` (the exit code and a reason word such as `stop_file` or `empty_queue`).
+`cycle_result` (the run's exit code and the ids by outcome), `post_cycle_started` (a blocking post
+cycle hook has begun) and `post_cycle` (its result, including a hold), `waiting` (a reason and
+when it ends), and `leaving` (the exit code and a reason word such as `stop_file` or
+`empty_queue`).
 Every line names its manifest and its pid. `feed <manifest> --follow` prints new lines as they
 come and ends when the feeder leaves, or with a `not_running` line of its own when the feeder
 is gone without saying so; `--events` prints the lines so far. A feeder handing over to
