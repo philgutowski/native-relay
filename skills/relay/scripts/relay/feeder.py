@@ -1488,22 +1488,11 @@ class Feeder:
         """(cards, readable). An unreadable tracker is not a crash: it offers no cards, the
         reason is logged, the tasks already listed still run, and the next cycle asks again.
         `readable` keeps that apart from an empty board, which is what ends an idle feeder."""
-        try:
-            if self.config.ready_command:
-                done = self.deps.run_command(self.config.ready_command, manifest.project.repo,
-                                             COMMAND_TIMEOUT_SECONDS)
-                if done.returncode != 0:
-                    raise ValueError("it exited %d: %s" % (done.returncode,
-                                                           (done.stderr or "").strip()[-300:]))
-                return normalize_cards(json.loads(done.stdout or "null")), True
-            cards, reason = self.deps.build_adapter(manifest).ready(self.config.ready_source)
-            if reason:
-                raise ValueError(reason)
-            return cards, True
-        except (ValueError, OSError, subprocess.SubprocessError,
-                adapters.ConfigurationError) as exc:
-            self.log("the ready source could not be read, offering nothing new: %s" % exc)
+        cards, reason = read_ready(manifest, self.config, self.deps)
+        if reason is not None:
+            self.log("the ready source could not be read, offering nothing new: %s" % reason)
             return [], False
+        return cards, True
 
     def append(self, text, entries):
         """Append the batch, and return the entries that made it in. When the batch as a whole
@@ -1555,6 +1544,72 @@ def ready_source_problem(manifest, config):
     if adapter == "jira" and not str(source.get("jql") or "").strip():
         return "no ready query is configured; set [ready] jql in the feeder sidecar"
     return None
+
+
+def read_ready(manifest, config, deps, timeout=COMMAND_TIMEOUT_SECONDS):
+    """(cards, None) or ([], reason). The one read of the ready source, shared by the loop and
+    by `status`, so the two can never disagree about what the board holds."""
+    try:
+        if config.ready_command:
+            done = deps.run_command(config.ready_command, manifest.project.repo, timeout)
+            if done.returncode != 0:
+                raise ValueError("it exited %d: %s" % (done.returncode,
+                                                       (done.stderr or "").strip()[-300:]))
+            return normalize_cards(json.loads(done.stdout or "null")), None
+        cards, reason = deps.build_adapter(manifest).ready(config.ready_source)
+        if reason:
+            raise ValueError(reason)
+        return cards, None
+    except (ValueError, OSError, subprocess.SubprocessError,
+            adapters.ConfigurationError) as exc:
+        return [], str(exc)
+
+
+# `status` is a question an operator is waiting on, not a cycle, so a ready command gets a minute
+# there rather than the loop's fifteen.
+STATUS_READY_TIMEOUT_SECONDS = 60
+
+
+def ready_queue(manifest, env, deps=None):
+    """([(id, model)], None) for the ready cards the next cycles would take, or (None, sentence)
+    when that cannot be worked out (issue #50). Reads only: no lock, no state write, no pre
+    cycle hook, since `status` must be safe beside a live feeder.
+
+    The filter is the loop's own: not listed in the manifest (the cycle estimate prices those),
+    not denied by id or label, not refused by the R41 scan, and not a card already refused with
+    the model it is routed to. The model is `choose_model`'s, without the exhausted fallback,
+    because that mark lasts hours and the queue it prices lasts longer."""
+    paths = paths_for(manifest.path)
+    try:
+        config = load_config(paths.config)
+    except ConfigError as exc:
+        return None, "the feeder sidecar could not be loaded: %s" % exc
+    problem = ready_source_problem(manifest, config)
+    if problem:
+        return None, problem
+    deps = deps or build_deps(config, env)
+    cards, reason = read_ready(manifest, config, deps, timeout=STATUS_READY_TIMEOUT_SECONDS)
+    if reason is not None:
+        return None, "the ready source could not be read: %s" % reason
+    try:
+        routing, _ = read_routing(Feeder._read(paths.routing), config.allowed_models)
+    except (OSError, ValueError) as exc:
+        return None, "the routing file could not be read: %s" % exc
+    try:
+        refused = read_state(paths).get("refused") or {}
+    except ConfigError:
+        refused = {}
+    listed = {task.id for task in manifest.tasks}
+    scanned = scanned_ids(cards)
+    fresh, _ = select(cards, listed, config, {}, 0, scanned)
+    queue = []
+    for card in fresh:
+        if card["id"] in scanned:
+            continue
+        model, _ = choose_model(card, routing, config)
+        if refused.get(card["id"]) != model:
+            queue.append((card["id"], model))
+    return queue, None
 
 
 def default_branch_of(manifest):

@@ -417,6 +417,9 @@ def cmd_status(args, env, out):
     It answers two questions now (issue #44). Where the run is, which is the cursor, the lease,
     and the terminal record it always printed. And how far along it is, which is the counts, the
     elapsed, and the rough remaining estimate `progress` derives from the record stamps.
+
+    Under a feeder it also reads the ready source, to price the queue behind the cycle (issue
+    #50). That is a read too: it still writes nothing and takes no lease.
     """
     manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
@@ -440,6 +443,8 @@ def cmd_status(args, env, out):
     out.write("cursor: %d of %d task(s)\n" % (cursor, len(manifest.tasks)))
     for line in progress.lines(view):
         out.write(line + "\n")
+    if view["scope"] == progress.SCOPE_CYCLE:
+        out.write(_queue_line(manifest, view, env) + "\n")
     # The state directory is keyed on the manifest's real path, so editing the manifest in place
     # keeps the directory and everything the previous run left in it. Say so rather than clamping
     # the number: the cursor and the terminal record are true facts, about a run this manifest no
@@ -479,6 +484,17 @@ def cmd_status(args, env, out):
         out.write(feeder_line + "\n")
     out.write("state: %s\n" % store.dir)
     return EXIT_OK
+
+
+def _queue_line(manifest, view, env):
+    """The `queue:` line under a feeder (issue #50): the ready queue behind this cycle, priced
+    from the same landed durations. It reads the tracker, so it is the one part of `status` that
+    can fail on something outside the state directory, and a failure is a sentence on this line,
+    never an exit code."""
+    cards, reason = feeder_module.ready_queue(manifest, env)
+    if reason is not None:
+        return progress.queue_line(reason=reason)
+    return progress.queue_line(progress.queue_estimate(view, cards))
 
 
 def _feeder_line(manifest_path):

@@ -516,3 +516,61 @@ class Bar(unittest.TestCase):
     def test_the_status_lines_open_with_the_bar(self):
         data = progress.build(manifest("T-1"), FakeStore({}), now=lambda: NOW)
         self.assertEqual(progress.lines(data)[0], progress.bar(data))
+
+
+class Queue(unittest.TestCase):
+    """Issue #50: the ready queue behind a feeder's cycle, priced from the landed durations of
+    each card's model."""
+
+    def data(self, tasks, ids=("T-1", "T-2", "T-3"), models=None):
+        man = SimpleNamespace(tasks=[SimpleNamespace(id=task_id, model=(models or {}).get(task_id))
+                                     for task_id in ids])
+        return progress.build(man, FakeStore(tasks), now=lambda: NOW)
+
+    def test_each_card_is_priced_at_its_models_mean_and_an_unseen_model_at_the_overall_mean(self):
+        data = self.data({
+            "T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100, model="opus"),
+            "T-2": record(contracts.STATUS_LANDED, NOW - 500, NOW - 200, model="fable"),
+            "T-3": record(contracts.STATUS_LANDED, NOW - 500, NOW - 400, model="opus"),
+        })
+        queue = progress.queue_estimate(data, [("9", "opus"), ("10", "fable"), ("11", "sonnet")])
+        # opus 100, fable 300, sonnet on the overall mean of 100, 300, 100.
+        self.assertEqual(queue["seconds"], 100 + 300 + 500 / 3)
+        self.assertEqual((queue["cards"], queue["on_overall"], queue["landed_sample"]), (3, 1, 3))
+
+    def test_a_record_with_no_model_takes_the_manifests(self):
+        data = self.data({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)},
+                         models={"T-1": "fable"})
+        self.assertEqual(data["landed_by_model"], {"fable": [100.0]})
+        self.assertEqual(progress.queue_estimate(data, [("9", "fable")])["on_overall"], 0)
+
+    def test_only_landed_tasks_with_a_duration_are_drawn_from(self):
+        data = self.data({
+            "T-1": record(contracts.STATUS_LANDED, model="opus"),
+            "T-2": record(contracts.STATUS_BLOCKED, NOW - 500, NOW - 200, model="opus"),
+            "T-3": record(contracts.STATUS_RUNNING, NOW - 50, model="opus"),
+        })
+        self.assertEqual(data["landed_by_model"], {})
+        queue = progress.queue_estimate(data, [("9", "opus")])
+        self.assertIsNone(queue["seconds"])
+        self.assertEqual(progress.queue_line(queue),
+                         "queue: 1 ready card(s), no estimate yet, no landed task carries a "
+                         "duration")
+
+    def test_the_line_names_the_count_the_sample_and_what_it_does_not_know(self):
+        data = self.data({"T-1": record(contracts.STATUS_LANDED, NOW - 4000, NOW, model="opus")})
+        line = progress.queue_line(progress.queue_estimate(data, [("9", "opus"), ("10", "fable")]))
+        self.assertEqual(line, "queue: roughly 2h 13m for 2 ready card(s) beyond this cycle, from "
+                               "the mean landed duration of each card's model over 1 landed "
+                               "task(s) (1 on the overall mean, their model has no landed task); "
+                               "it does not count cards not ready yet or residuals not yet filed")
+
+    def test_an_empty_queue_says_so_rather_than_pricing_nothing(self):
+        data = self.data({})
+        self.assertEqual(progress.queue_line(progress.queue_estimate(data, [])),
+                         "queue: no ready card waits beyond this cycle; it does not count cards "
+                         "not ready yet or residuals not yet filed")
+
+    def test_a_reason_replaces_the_figure(self):
+        self.assertEqual(progress.queue_line(reason="the ready source could not be read: 502"),
+                         "queue: no estimate, the ready source could not be read: 502")

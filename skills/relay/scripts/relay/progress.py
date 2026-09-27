@@ -138,6 +138,16 @@ def build(manifest, store, now=time.time, raw=None, live=True):
     landed = [entry["elapsed_seconds"] for entry in mine
               if entry["status"] == contracts.STATUS_LANDED
               and entry["elapsed_seconds"] is not None]
+    # The same landed durations again, by the model each task ran on, for pricing a feeder's
+    # ready queue (issue #50). The record's model is what ran; the manifest's is the fallback for
+    # a record written before records carried one.
+    listed_models = {task.id: getattr(task, "model", None) for task in manifest.tasks}
+    by_model = {}
+    for entry in mine:
+        if entry["status"] == contracts.STATUS_LANDED and entry["elapsed_seconds"] is not None:
+            model = ((records.get(entry["id"]) or {}).get("model")
+                     or listed_models.get(entry["id"]) or "")
+            by_model.setdefault(model, []).append(entry["elapsed_seconds"])
 
     return {
         "tasks": entries,
@@ -148,6 +158,7 @@ def build(manifest, store, now=time.time, raw=None, live=True):
         "measured_count": len(measured),
         "landed_sample": len(landed),
         "estimate_seconds": _estimate(mine, landed),
+        "landed_by_model": by_model,
         "scope": _scope(manifest),
     }
 
@@ -177,6 +188,57 @@ def _estimate(entries, landed):
         if entry["status"] in contracts.IN_FLIGHT_STATUSES:
             remaining += max(0.0, mean - (entry["elapsed_seconds"] or 0))
     return remaining
+
+
+def queue_estimate(data, cards):
+    """The ready queue behind a feeder's cycle, priced (issue #50). `cards` is [(id, model)] for
+    the ready cards the manifest does not list yet. Each is priced at the mean landed duration of
+    its model, or at the mean of every landed task when its model has none, so one card routed to
+    a model nothing has run on yet still counts rather than vanishing from the sum.
+
+    The cycle estimate and this one are kept apart rather than added: the cycle is the run in
+    flight and this is what the feeder will append after it, and an operator deciding whether to
+    leave a machine on overnight needs to see both."""
+    by_model = data.get("landed_by_model") or {}
+    landed = [seconds for values in by_model.values() for seconds in values]
+    result = {"cards": len(cards), "seconds": None, "on_overall": 0, "landed_sample": len(landed)}
+    if not landed:
+        return result
+    overall = sum(landed) / len(landed)
+    total = 0.0
+    for _, model in cards:
+        values = by_model.get(model)
+        if values:
+            total += sum(values) / len(values)
+        else:
+            total += overall
+            result["on_overall"] += 1
+    result["seconds"] = total
+    return result
+
+
+# What the queue figure cannot see, said beside it every time it prints.
+QUEUE_BLIND = "it does not count cards not ready yet or residuals not yet filed"
+
+
+def queue_line(queue=None, reason=None):
+    """The `queue:` line `status` prints under a feeder. `reason` is the sentence for a queue
+    that could not be read, and replaces the figure."""
+    if reason is not None:
+        return "queue: no estimate, %s" % reason
+    if not queue["cards"]:
+        return "queue: no ready card waits beyond this cycle; %s" % QUEUE_BLIND
+    if queue["seconds"] is None:
+        return ("queue: %d ready card(s), no estimate yet, no landed task carries a duration"
+                % queue["cards"])
+    fallback = ""
+    if queue["on_overall"]:
+        fallback = (" (%d on the overall mean, their model has no landed task)"
+                    % queue["on_overall"])
+    return ("queue: roughly %s for %d ready card(s) beyond this cycle, from the mean landed "
+            "duration of each card's model over %d landed task(s)%s; %s"
+            % (duration(queue["seconds"]), queue["cards"], queue["landed_sample"], fallback,
+               QUEUE_BLIND))
 
 
 def duration(seconds):
