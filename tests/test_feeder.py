@@ -810,6 +810,16 @@ class Exits(FeederCase):
         self.assertIn("every ready card was refused with the model it is routed to, and nothing "
                       "is left to run: 1", self.log_text())
 
+    def test_a_scan_refused_card_alone_reads_as_an_empty_queue_not_all_refused(self):
+        # Issue #41: a card the scan refuses never reached model routing, so it must not read
+        # as the "change the routing" case meant for a genuine model refusal.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.runs, [])
+        self.assertIn("the queue is empty, leaving", self.log_text())
+        self.assertNotIn("Change the routing", self.log_text())
+        self.assertIn("1 would be skipped at launch", self.log_text())
+
     def test_a_ready_source_that_is_not_configured_is_refused_before_a_cycle(self):
         github = SimpleNamespace(tracker=SimpleNamespace(adapter="github"))
         self.assertIsNone(feeder.ready_source_problem(github, feeder.Config(
