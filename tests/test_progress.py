@@ -410,10 +410,6 @@ class AgainstARealStore(unittest.TestCase):
             self.assertIsNone(data["estimate_seconds"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Phrase(unittest.TestCase):
     """The clause a phase event carries."""
 
@@ -574,3 +570,7 @@ class Queue(unittest.TestCase):
     def test_a_reason_replaces_the_figure(self):
         self.assertEqual(progress.queue_line(reason="the ready source could not be read: 502"),
                          "queue: no estimate, the ready source could not be read: 502")
+
+
+if __name__ == "__main__":
+    unittest.main()

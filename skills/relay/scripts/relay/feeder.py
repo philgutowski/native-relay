@@ -415,8 +415,11 @@ def normalize_cards(payload):
         task_id = entry.get("id", entry.get("number"))
         if task_id in (None, ""):
             raise ValueError("a card carries neither an id nor a number")
+        raw_labels = entry.get("labels") or []
+        if not isinstance(raw_labels, list):
+            raise ValueError("card %s carries labels that are not a JSON array" % task_id)
         labels = tuple(str(label.get("name") if isinstance(label, dict) else label)
-                       for label in entry.get("labels") or [])
+                       for label in raw_labels)
         cards.append({"id": str(task_id), "title": str(entry.get("title") or ""),
                       "description": str(entry.get("description") or entry.get("body") or ""),
                       "labels": labels})
@@ -1566,7 +1569,8 @@ def read_ready(manifest, config, deps, timeout=COMMAND_TIMEOUT_SECONDS):
 
 
 # `status` is a question an operator is waiting on, not a cycle, so a ready command gets a minute
-# there rather than the loop's fifteen.
+# there rather than the loop's fifteen. An adapter read keeps its own network timeouts, which
+# this does not shorten.
 STATUS_READY_TIMEOUT_SECONDS = 60
 
 
@@ -1575,10 +1579,12 @@ def ready_queue(manifest, env, deps=None):
     when that cannot be worked out (issue #50). Reads only: no lock, no state write, no pre
     cycle hook, since `status` must be safe beside a live feeder.
 
-    The filter is the loop's own: not listed in the manifest (the cycle estimate prices those),
-    not denied by id or label, not refused by the R41 scan, and not a card already refused with
-    the model it is routed to. The model is `choose_model`'s, without the exhausted fallback,
-    because that mark lasts hours and the queue it prices lasts longer."""
+    The filter is the loop's `select` and `scanned_ids`: not listed in the manifest (the cycle
+    estimate prices those), not denied by id or label, not refused by the R41 scan. Then a card
+    already refused with the model it is routed to is dropped, as the loop drops it. The model is
+    `choose_model`'s, without the exhausted fallback, because that mark lasts hours and the queue
+    it prices lasts longer; the refused check uses the same model, so while a fallback is active
+    it can disagree with the loop about a card refused on one side of it."""
     paths = paths_for(manifest.path)
     try:
         config = load_config(paths.config)
@@ -1597,8 +1603,11 @@ def ready_queue(manifest, env, deps=None):
         return None, "the routing file could not be read: %s" % exc
     try:
         refused = read_state(paths).get("refused") or {}
-    except ConfigError:
-        refused = {}
+    except ConfigError as exc:
+        # The feeder itself stops on this file, so the queue figure has nothing to stand on.
+        return None, str(exc)
+    if not isinstance(refused, dict):
+        return None, "%s holds a refused set that is not a JSON object" % paths.state
     listed = {task.id for task in manifest.tasks}
     scanned = scanned_ids(cards)
     fresh, _ = select(cards, listed, config, {}, 0, scanned)

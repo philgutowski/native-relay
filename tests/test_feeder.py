@@ -1681,10 +1681,6 @@ class RealRunner(FeederCase):
         self.assertIn("the post cycle hook exited 0", out.getvalue())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReadyQueue(FeederCase):
     """Issue #50: `ready_queue`, what `status` prices behind the cycle. The loop's own filter,
     read without writing anything."""
@@ -1724,6 +1720,21 @@ class ReadyQueue(FeederCase):
         self.assertIn("the feeder sidecar could not be loaded", reason)
         self.assertIn("feeder.bacth is not a feeder setting", reason)
 
+    def test_a_state_file_that_cannot_be_read_is_a_sentence_not_an_empty_refused_set(self):
+        manifest = self.listed_after_one_cycle()
+        self.write(self.paths.state, "{not json")
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(cards)
+        self.assertIn("could not be read", reason)
+        self.write(self.paths.state, json.dumps({"refused": ["6"]}))
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(cards)
+        self.assertIn("refused set that is not a JSON object", reason)
+
+    def test_labels_that_are_not_an_array_are_a_value_error(self):
+        with self.assertRaisesRegex(ValueError, "card 7 carries labels that are not a JSON array"):
+            feeder.normalize_cards([{"number": 7, "labels": 5}])
+
     def test_it_writes_nothing_beside_the_manifest(self):
         manifest = self.listed_after_one_cycle()
         directory = os.path.dirname(self.manifest_path)
@@ -1732,3 +1743,7 @@ class ReadyQueue(FeederCase):
         feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
         self.assertEqual({name: os.stat(os.path.join(directory, name)).st_mtime_ns
                           for name in os.listdir(directory)}, before)
+
+
+if __name__ == "__main__":
+    unittest.main()

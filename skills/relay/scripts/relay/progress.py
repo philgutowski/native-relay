@@ -135,12 +135,10 @@ def build(manifest, store, now=time.time, raw=None, live=True):
 
     measured = [entry["elapsed_seconds"] for entry in mine
                 if entry["elapsed_seconds"] is not None]
-    landed = [entry["elapsed_seconds"] for entry in mine
-              if entry["status"] == contracts.STATUS_LANDED
-              and entry["elapsed_seconds"] is not None]
-    # The same landed durations again, by the model each task ran on, for pricing a feeder's
-    # ready queue (issue #50). The record's model is what ran; the manifest's is the fallback for
-    # a record written before records carried one.
+    # The landed durations by the model each task ran on, so a feeder's ready queue can be priced
+    # per model (issue #50), and flattened for the cycle estimate, which is one sample drawn once.
+    # The record's model is what ran; the manifest's is the fallback for a record written before
+    # records carried one.
     listed_models = {task.id: getattr(task, "model", None) for task in manifest.tasks}
     by_model = {}
     for entry in mine:
@@ -148,6 +146,7 @@ def build(manifest, store, now=time.time, raw=None, live=True):
             model = ((records.get(entry["id"]) or {}).get("model")
                      or listed_models.get(entry["id"]) or "")
             by_model.setdefault(model, []).append(entry["elapsed_seconds"])
+    landed = [seconds for values in by_model.values() for seconds in values]
 
     return {
         "tasks": entries,
@@ -199,12 +198,12 @@ def queue_estimate(data, cards):
     The cycle estimate and this one are kept apart rather than added: the cycle is the run in
     flight and this is what the feeder will append after it, and an operator deciding whether to
     leave a machine on overnight needs to see both."""
-    by_model = data.get("landed_by_model") or {}
-    landed = [seconds for values in by_model.values() for seconds in values]
-    result = {"cards": len(cards), "seconds": None, "on_overall": 0, "landed_sample": len(landed)}
-    if not landed:
+    by_model = data["landed_by_model"]
+    result = {"cards": len(cards), "seconds": None, "on_overall": 0,
+              "landed_sample": data["landed_sample"]}
+    if not data["landed_sample"]:
         return result
-    overall = sum(landed) / len(landed)
+    overall = sum(sum(values) for values in by_model.values()) / data["landed_sample"]
     total = 0.0
     for _, model in cards:
         values = by_model.get(model)

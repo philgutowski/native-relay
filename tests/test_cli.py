@@ -935,6 +935,17 @@ class StatusQueue(CliCase):
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("queue: no estimate, the ready source could not be read:", out)
 
+    def test_an_unexpected_error_pricing_the_queue_is_a_sentence_too(self):
+        self.complete_run()
+        self.write_sidecar(self.printing())
+        with mock.patch.object(cli.feeder_module, "ready_queue",
+                               side_effect=TypeError("an adapter returned None")):
+            code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: no estimate, the ready queue could not be priced: TypeError: an "
+                      "adapter returned None", out)
+        self.assertIn("terminal record:", out)
+
     def test_without_a_sidecar_there_is_no_queue_line(self):
         self.complete_run()
         _, out = self.call("status", self.manifest_path)

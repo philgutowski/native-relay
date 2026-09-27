@@ -491,7 +491,13 @@ def _queue_line(manifest, view, env):
     from the same landed durations. It reads the tracker, so it is the one part of `status` that
     can fail on something outside the state directory, and a failure is a sentence on this line,
     never an exit code."""
-    cards, reason = feeder_module.ready_queue(manifest, env)
+    try:
+        cards, reason = feeder_module.ready_queue(manifest, env)
+    except (ValueError, TypeError, AttributeError, KeyError, OSError,
+            subprocess.SubprocessError, adapters.ConfigurationError) as exc:
+        # An adapter or a state file shaped in a way nothing above names. The rest of `status`
+        # is the answer the operator came for, so this line never takes it down.
+        reason = "the ready queue could not be priced: %s: %s" % (type(exc).__name__, exc)
     if reason is not None:
         return progress.queue_line(reason=reason)
     return progress.queue_line(progress.queue_estimate(view, cards))
