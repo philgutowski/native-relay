@@ -474,6 +474,10 @@ the operator, rather than guessing:
 - What makes a card ready on their board: labels on GitHub, a JQL query on Jira, nothing for
   markdown, or a ready command of their own that prints cards as JSON. If the board derives its
   ready labels, the command that recomputes them is the `pre_cycle` hook.
+- What should follow each landing: the full gate on the merged default branch, a test server
+  moved to the new commit, a push on a cadence. That is the `post_cycle` hook, which learns the
+  landed ids and the merge range from its environment. Blocking, and whether a failure holds
+  the feeder, or detached for work that takes a person or a browser.
 - Which cards are never a session's to take. Those go in `[deny]` by id or by label.
 - Which cards deserve the stronger model, one `id model  # why` line each in `<stem>.models`.
   A working test: the card needs design judgment before any code. It is read fresh every

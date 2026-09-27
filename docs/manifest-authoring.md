@@ -358,6 +358,7 @@ stem. For `queue.toml`:
 | `queue.feeder.log` | the feeder | one line per decision |
 | `queue.feeder.lock` | the feeder | held while it runs; one feeder per manifest |
 | `queue.feeder.out` | `feed --detach` | the detached feeder's output and every run's |
+| `queue.feeder.hook.out` | the feeder | the post cycle hook's output, a header line per cycle |
 
 The sidecar, with its defaults:
 
@@ -393,15 +394,41 @@ labels = []
 
 [hooks]
 # pre_cycle = ["python3", "scripts/board.py", "sync"]
+# post_cycle = ["python3", "scripts/after_cycle.py"]
+post_cycle_mode = "blocking"  # or "detached"
+post_cycle_hold = false       # blocking only: a nonzero exit stops the feeder
+post_cycle_timeout_seconds = 3600
 ```
 
 - A key the feeder does not know is an error. A typo that was ignored would run a default for a
   day.
-- `ready.command` and `hooks.pre_cycle` are argument lists, never shell strings, the same rule as
-  `gate.command`. Both run in the target repository. The ready command prints a JSON array of
-  cards, each with `id` or `number`, `title`, `body` or `description`, and `labels`, which is the
-  shape `gh issue list --json number,title,body,labels` already prints. Use it when ready is a
-  rule labels cannot say, such as a card that waits for other cards to close.
+- `ready.command`, `hooks.pre_cycle`, and `hooks.post_cycle` are argument lists, never shell
+  strings, the same rule as `gate.command`. All three run in the target repository. The ready
+  command prints a JSON array of cards, each with `id` or `number`, `title`, `body` or
+  `description`, and `labels`, which is the shape `gh issue list --json number,title,body,labels`
+  already prints. Use it when ready is a rule labels cannot say, such as a card that waits for
+  other cards to close.
+- `hooks.post_cycle` runs after every `relay run` the feeder settles. A run that another runner's lease or a
+  refused manifest stopped before it ran settles nothing and runs no hook. The hook learns the
+  cycle from its environment: `RELAY_CYCLE`, `RELAY_RUN_EXIT`, `RELAY_LANDED`, `RELAY_HALTED`,
+  `RELAY_BLOCKED`, and `RELAY_SKIPPED` (that cycle's ids, space separated, empty for none),
+  `RELAY_MANIFEST`, `RELAY_REPO`, `RELAY_DEFAULT_BRANCH`, `RELAY_MERGE_BASE` and
+  `RELAY_MERGE_HEAD` (the default branch's sha before and after the run), `RELAY_MERGE_RANGE`
+  (`base..head`, empty when the branch did not move), and `RELAY_CYCLE_JSON`, all of it as one
+  JSON object. Its output is appended to `<stem>.feeder.hook.out`; the feeder log and a
+  `post_cycle` event record the result. It runs before the halt and usage limit rules, so a
+  limit wait never delays it and a cycle that ends in a stop still runs it.
+- `post_cycle_mode = "blocking"`, the default, waits for the hook, up to
+  `post_cycle_timeout_seconds`, and logs its exit code. A nonzero exit, a timeout, or a command
+  that cannot start is logged and the feeder goes on, unless `post_cycle_hold = true`: then the
+  feeder stops with exit 2 and reason `post_cycle_held` instead of starting the next cycle or
+  waiting. Halt counts and retries are still recorded first. Use it for work the next cycle
+  should wait on: the full gate on the merged default branch, a push on a cadence. A blocking
+  hook must leave the checkout on its default branch and clean, or the next cycle stops there.
+- `post_cycle_mode = "detached"` starts the hook in its own session and does not wait; the log
+  records its pid, and `post_cycle_hold` is refused beside it. Use it for work that takes a
+  person or a browser. It runs beside the next cycle, so it must not touch the checkout the
+  runner merges into; give it a worktree of its own.
 - With GitHub and no `ready.labels`, or Jira and no `ready.jql`, the feeder offers nothing. It
   never reads a whole backlog as ready.
 - Markdown needs no `[ready]` at all: every unchecked box is ready, since the file has no way to
