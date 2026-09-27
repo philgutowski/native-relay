@@ -306,9 +306,14 @@ settled; 2 landed, 1 running, 5 todo; T-3 running 4m 12s; roughly 40m left`, whe
 move and once a minute in between. It is a new line each time rather than one that redraws, so it
 reads the same in a terminal, in a session's tool output, and in `runner.log`. It never notifies.
 
-Under a feeder the manifest holds only the current cycle, so the estimate on each of these lines
-reads `roughly 1h 2m left in this cycle`. It prices the cycle's cards, not the ready queue behind
-them.
+Under a feeder the manifest's unsettled tasks are only the current cycle, so the estimate on each of
+these lines reads `roughly 1h 2m left in this cycle`. It prices the cycle's cards, not the ready
+queue behind them. `status` prices that queue on a line of its own, `queue: roughly 21h 4m for 37
+ready card(s) beyond this cycle`, reading the ready source the feeder reads and applying its deny
+set. Each card is priced at the mean landed duration of the model it would be routed to, or at the
+mean of every landed task when that model has none. It cannot count cards that are not ready yet or
+residuals nobody has filed, and says so. A ready source that cannot be read prints a sentence on
+that line and never fails `status`.
 
 A board stays honest across a run. The task process moves a card to the in review status at its
 first step, and a Closeout for a blocked or halted task returns it to the status it read before

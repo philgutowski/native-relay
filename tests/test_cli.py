@@ -877,6 +877,103 @@ class StatusBar(CliCase):
             [line for line in lines if line.startswith("progress:")][0]))
 
 
+class StatusQueue(CliCase):
+    """Issue #50: under a feeder `status` also prices the ready queue behind the cycle, on a line
+    of its own. The ready source here is the sidecar's command, a local Python one liner, so the
+    real read path runs without a tracker."""
+
+    READY = json.dumps([{"number": 7, "title": "seven", "labels": []},
+                        {"number": 8, "title": "eight", "labels": [{"name": "attended"}]},
+                        {"number": 9, "title": "nine"}])
+
+    def write_sidecar(self, script, extra=""):
+        sidecar = os.path.splitext(self.manifest_path)[0] + ".feeder.toml"
+        with open(sidecar, "w") as handle:
+            handle.write('[ready]\ncommand = %s\n%s'
+                         % (json.dumps([sys.executable, "-c", script]), extra))
+
+    def printing(self):
+        return "import sys; sys.stdout.write(%r)" % self.READY
+
+    def test_a_feeder_manifest_prints_the_queue_beside_the_cycle_estimate(self):
+        self.complete_run()
+        self.write_sidecar(self.printing(), '[deny]\nlabels = ["attended"]\n')
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        lines = out.splitlines()
+        queue = [line for line in lines if line.startswith("queue:")]
+        self.assertEqual(len(queue), 1, out)
+        # 7 and 9 on the default opus, which nothing here ran on, so both on the overall mean.
+        self.assertRegex(queue[0], r"^queue: roughly \d+[smh].* for 2 ready card\(s\) beyond this "
+                                   r"cycle, .* over 2 landed task\(s\) \(2 on the overall mean")
+        self.assertIn("residuals not yet filed", queue[0])
+        remaining = [line for line in lines if line.startswith("remaining:")][0]
+        self.assertIn("in this cycle", remaining)
+        self.assertEqual(lines.index(queue[0]), lines.index(remaining) + 1)
+
+    def test_with_nothing_landed_the_queue_has_no_estimate_either(self):
+        self.seed_stale_reclaim_on_t1()
+        self.write_sidecar(self.printing())
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: 3 ready card(s), no estimate yet, no landed task carries a duration",
+                      out)
+
+    def test_an_unreadable_ready_source_is_a_sentence_and_never_fails_status(self):
+        self.complete_run()
+        self.write_sidecar("import sys; sys.stderr.write('board offline'); sys.exit(3)")
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: no estimate, the ready source could not be read: it exited 3: "
+                      "board offline", out)
+        self.assertIn("state:", out)
+
+    def test_output_that_is_not_json_is_a_sentence_too(self):
+        self.complete_run()
+        self.write_sidecar("print('not json')")
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: no estimate, the ready source could not be read:", out)
+
+    def test_an_unexpected_error_pricing_the_queue_is_a_sentence_too(self):
+        self.complete_run()
+        self.write_sidecar(self.printing())
+        with mock.patch.object(cli.feeder_module, "ready_queue",
+                               side_effect=TypeError("an adapter returned None")):
+            code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: no estimate, the ready queue could not be priced: TypeError: an "
+                      "adapter returned None", out)
+        self.assertIn("terminal record:", out)
+
+    def test_without_a_sidecar_there_is_no_queue_line(self):
+        self.complete_run()
+        _, out = self.call("status", self.manifest_path)
+        self.assertNotIn("queue:", out)
+
+    def test_status_takes_no_lease_and_writes_nothing(self):
+        self.complete_run()
+        self.write_sidecar(self.printing())
+        holder = self.store()
+        self.assertTrue(holder.acquire().ok)
+
+        def snapshot():
+            seen = {}
+            for root, dirs, files in os.walk(self.tmp.name):
+                dirs[:] = [name for name in dirs if name != ".git"]
+                for name in files:
+                    path = os.path.join(root, name)
+                    seen[path] = os.stat(path).st_mtime_ns
+            return seen
+
+        before = snapshot()
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("queue: roughly", out)
+        self.assertEqual(snapshot(), before)
+        holder.release()
+
+
 class AuditVerb(CliCase):
     """Stale cards, R7 and R8: the verb on demand, and `status` showing the run end audit."""
 

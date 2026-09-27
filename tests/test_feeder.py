@@ -1681,5 +1681,69 @@ class RealRunner(FeederCase):
         self.assertIn("the post cycle hook exited 0", out.getvalue())
 
 
+class ReadyQueue(FeederCase):
+    """Issue #50: `ready_queue`, what `status` prices behind the cycle. The loop's own filter,
+    read without writing anything."""
+
+    def listed_after_one_cycle(self):
+        self.adapter.ready_cards = [card(1)]
+        self.plans = [{}]
+        self.feed(feeder.Config(batch=1))
+        return mf.load(self.manifest_path)
+
+    def test_it_drops_the_listed_the_denied_the_scanned_and_the_refused_and_routes_the_rest(self):
+        manifest = self.listed_after_one_cycle()
+        self.adapter.ready_cards = [card(1), card(2), card(3, labels=("attended",)),
+                                    card(4, description="edit .claude/skills/x"), card(5),
+                                    card(6), card(7), card(8, description="**Model:** sonnet")]
+        self.write(self.paths.config, '[deny]\nids = [2]\nlabels = ["attended"]\n')
+        self.write(self.paths.routing, "5 fable\n7 fable\n")
+        saved = feeder.read_state(self.paths)
+        saved["refused"] = {"6": "opus", "7": "opus"}
+        self.write(self.paths.state, json.dumps(saved))
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(reason)
+        # 7 was refused on opus and now routes to fable, which is the change that releases it.
+        self.assertEqual(cards, [("5", "fable"), ("7", "fable"), ("8", "sonnet")])
+
+    def test_an_unreadable_ready_source_is_a_sentence(self):
+        manifest = self.listed_after_one_cycle()
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         (None, "the ready source could not be read: gh exited 1: HTTP 502"))
+
+    def test_a_broken_sidecar_is_a_sentence(self):
+        manifest = self.listed_after_one_cycle()
+        self.write(self.paths.config, "[feeder]\nbacth = 5\n")
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(cards)
+        self.assertIn("the feeder sidecar could not be loaded", reason)
+        self.assertIn("feeder.bacth is not a feeder setting", reason)
+
+    def test_a_state_file_that_cannot_be_read_is_a_sentence_not_an_empty_refused_set(self):
+        manifest = self.listed_after_one_cycle()
+        self.write(self.paths.state, "{not json")
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(cards)
+        self.assertIn("could not be read", reason)
+        self.write(self.paths.state, json.dumps({"refused": ["6"]}))
+        cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertIsNone(cards)
+        self.assertIn("refused set that is not a JSON object", reason)
+
+    def test_labels_that_are_not_an_array_are_a_value_error(self):
+        with self.assertRaisesRegex(ValueError, "card 7 carries labels that are not a JSON array"):
+            feeder.normalize_cards([{"number": 7, "labels": 5}])
+
+    def test_it_writes_nothing_beside_the_manifest(self):
+        manifest = self.listed_after_one_cycle()
+        directory = os.path.dirname(self.manifest_path)
+        before = {name: os.stat(os.path.join(directory, name)).st_mtime_ns
+                  for name in os.listdir(directory)}
+        feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
+        self.assertEqual({name: os.stat(os.path.join(directory, name)).st_mtime_ns
+                          for name in os.listdir(directory)}, before)
+
+
 if __name__ == "__main__":
     unittest.main()
