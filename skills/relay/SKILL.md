@@ -34,7 +34,7 @@ Resolve `<runner>` once, from this skill's own directory as the harness gave it 
 Read the file at `<rubric>` before proposing a backend. That path is under this skill's own
 directory, not the target repo. If the file cannot be opened, stop rather than inventing routing.
 
-The ten verbs, with the follower options on the two that follow:
+The eleven verbs, with the follower options on the two that follow:
 
 ```bash
 python3 <runner> validate <manifest>            # check the manifest and its target repo
@@ -68,10 +68,10 @@ python3 <runner> feed <manifest> --once         # one cycle: append a batch, run
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
 python3 <runner> feed <manifest> --release      # clear a failed post cycle hook's hold once the default branch is repaired; starts nothing
-python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
-python3 <runner> feed <manifest> --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle
-python3 <runner> feed <manifest> --pin          # extract the default branch's commit and start the feeder from there instead of this checkout, taking over a live one with restart semantics
-python3 <runner> feed <manifest> --pin --dry-run  # the same, but only say what it would extract; writes nothing
+python3 <runner> feed <manifest> --pin --restart --detach --notify  # ask, wait for it to leave, take its place, pinned
+python3 <runner> feed <manifest> --pin --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle, pinned
+python3 <runner> feed <manifest> --pin          # from a git work tree, extract the default branch's commit (reusing an extract whose sha is unchanged) and start the feeder from it, taking over a live one with restart semantics; from an existing extract or a plugin install copy this is a plain restart and extracts nothing
+python3 <runner> feed <manifest> --pin --dry-run  # say what would be extracted, then also run the ordinary dry run of the next cycle with this checkout's code, noted; writes nothing
 python3 <runner> feed <manifest> --status       # is this manifest's feeder running, and what did its last cycle do; add --json for data
 python3 <runner> feed <manifest> --follow       # its events as JSON lines until it leaves; --events prints the ones so far
 ```
@@ -569,8 +569,10 @@ each cycle as it happens runs `feed <manifest> --follow`, which prints JSON line
 where one applies, and ends when the feeder leaves. To change its settings,
 edit the sidecar and `feed <manifest> --restart`: a running feeder holds the settings and the
 code it loaded at its start, so a plain restart with no `--pin` keeps running from a checkout
-when it was never pinned. Add `--pin` to also re-extract the current default branch commit into
-a fresh pinned tree and hand the feeder over to it. Nothing is killed by `--stop`, `--restart`,
+when it was never pinned. Add `--pin`, run from a git work tree, to also re-extract the current
+default branch commit (reusing an extract whose sha is unchanged rather than remaking it) into a
+pinned tree and hand the feeder over to it; from an existing extract or a plugin install copy
+`--pin` is a plain restart and extracts nothing. Nothing is killed by `--stop`, `--restart`,
 or `--pin`; the task in flight finishes and merges first.
 
 How it ends, by exit code: 0 it left on its own terms, the stop file or an empty queue
@@ -635,12 +637,15 @@ terminal with exit 1, and the running feeder is left untouched.
 Start a feeder pinned to a commit, `feed <manifest> --pin`, rather than from a checkout somebody
 may still edit: it launches the runner from its own tree at every cycle, so an edit made there can
 reach the next task the runner launches, even one in the same batch, since the runner reads brief
-templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's commit,
-never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the feeder
-from it, taking over a live one with restart semantics; `--pin --dry-run` says what it would
-extract and writes nothing, and adding `--detach` to that pair is refused rather than launching a
-real feeder from the checkout `--pin` exists to avoid. A feeder started from a checkout instead
-prints the checkout warning,
+templates while a batch is in flight. From a git work tree, `feed <manifest> --pin` extracts the
+default branch's commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>`,
+reusing an extract whose sha is unchanged rather than remaking it, and starts the feeder from it,
+taking over a live one with restart semantics; from an existing extract or a plugin install copy
+`--pin` is a plain restart and extracts nothing. `--pin --dry-run` says what would be extracted,
+then also runs the ordinary dry run of the next cycle with this checkout's code, noted, and writes
+nothing itself; adding `--detach` to that pair is refused rather than launching a real feeder from
+the checkout `--pin` exists to avoid. A feeder started from a checkout instead prints the checkout
+warning,
 naming the tree it runs from, at launch and in its log: that is the signal to relaunch it with
 `--pin` before trusting the next cycle.
 
