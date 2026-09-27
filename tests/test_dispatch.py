@@ -6,6 +6,7 @@ import _paths
 import _repo
 from relay import contracts, gitread, manifest as mf, pair, run as runner, state
 from test_run import CLOSE_SH, COMMENT_SH, HELPER, MANIFEST, RunCase, task_branch_sh
+
 GROK_COMPLETE = os.path.join(_paths.FIXTURES_DIR, "backends", "grok",
                              "session-transcript-complete.jsonl")
 

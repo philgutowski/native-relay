@@ -76,10 +76,14 @@ class _Run:
     # Dispatch only (issue #71). Flights still alive when the coordinator gave up waiting for
     # them, as `{task, process_group}`. Named in the terminal record, never marked crashed.
     surviving_flights: list = field(default_factory=list)
-    # Whether a launch on the main thread releases the lease from its interrupt handler. Serial
-    # `run` does. Dispatch does not (issue #79): its builds in flight are still alive when the
-    # Closeout's handler runs, so the release waits for `_concurrent_loop` to stop them first.
-    release_on_interrupt: bool = True
+
+    @property
+    def release_on_interrupt(self):
+        """Whether a launch on the main thread releases the lease from its interrupt handler.
+        Serial `run` does. Dispatch, the one run with a schedule, does not (issue #79): its builds
+        in flight are still alive when the Closeout's handler runs, so the release waits for
+        `_concurrent_loop` to stop them first."""
+        return self.schedule is None
 
 
 @dataclass
@@ -1128,8 +1132,7 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
         for line in scheduler.render(schedule).splitlines():
             stream(line)
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
-                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule,
-                  release_on_interrupt=False)
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule)
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
@@ -1551,12 +1554,13 @@ def _begin_task(cfg, task):
 
 
 def _launch_begun(cfg, begun, cwd, on_started=None):
-    """Blocking launch of a begun task. Serial run uses the repo; dispatch uses a worktree."""
+    """Blocking launch of a begun task on the main thread, which serial run uses on the repo.
+    Dispatch launches its builds through `_spawn_flight` instead."""
     launched = launch.launch(
         cfg.manifest, begun.task, begun.brief_text, begun.log_path,
         cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
-        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream,
-        heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=cwd,
+        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream, heartbeat=cfg.store.heartbeat,
+        on_release=cfg.store.release if cfg.release_on_interrupt else None, cwd=cwd,
         on_started=on_started, **cfg.launch_kwargs)
     if not launched.launch_error:
         cfg.used_backends.add(begun.task.backend)
@@ -1743,8 +1747,9 @@ def _signal_group(pgid, signum):
 
 
 def _flight_exited(flight):
-    """No process is left in the flight's group. A flight with no group yet has exited only once
-    its thread has returned without starting one. The thread is not waited on once the group is
+    """No process is left in the flight's group. A flight with no group, because its process has
+    not started yet or was gone before launch could read its group, has exited only once its
+    thread has returned. The thread is not waited on once the group is
     empty: a descendant that left the group can hold the pipe open and keep the launch's reader
     waiting long past the bound, and nothing of this build is running in the meantime."""
     if not flight.pgid:
