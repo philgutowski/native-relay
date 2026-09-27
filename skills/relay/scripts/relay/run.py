@@ -565,13 +565,16 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
     finding = closeout.confirm_blocked_comment(cfg.adapter, item.task.id, item.baseline_comment_id)
     if finding:
         item.findings.append(finding)
+    returned = {}
     if return_to or unknown:
-        finding = closeout.confirm_card_returned(cfg.adapter, cfg.manifest, item.task.id, return_to)
+        finding, out = closeout.read_back(cfg.adapter, cfg.manifest, item.task.id, return_to)
         if finding:
             item.findings.append(finding)
+        if out:
+            returned["card_in_review_by_run"] = False
     cfg.store.upsert(item.task.id, status=contracts.STATUS_BLOCKED,
                      halt_class=item.digest.get("halt_class") or contracts.HALT_BLOCKED_ENVELOPE,
-                     branch=stranded["branch"], findings=item.findings)
+                     branch=stranded["branch"], findings=item.findings, **returned)
     return pushed.get("lease", integration_lease), gitread.rev_parse(cfg.repo, cfg.default), None
 
 
@@ -687,7 +690,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
                          model=task.model, halt_class=None, halt_stage=None,
                          halt_message=None, halt_evidence=None, envelope_verdict=None,
-                         host_at_start=None, host_at_end=None,
+                         host_at_start=None, host_at_end=None, card_in_review_by_run=True,
                          unenforced_restrictions=(_unenforced_scalar(manifest, capability)
                                                   if not capability.enforces_at_launch else None))
             workers.append(item)
@@ -804,7 +807,19 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                 _write_terminal(store, env, contracts.RUN_CRASHED)
             except Exception:
                 pass
+            _mark_in_flight_crashed(store)
         store.release()
+
+
+def _mark_in_flight_crashed(store):
+    """Issue #64: a Runner leaving without a terminal record, an interrupt from the keyboard most
+    often, drives nothing it launched any more. Its records in flight are marked the way a
+    reclaim marks them, so none is left reading running with no process behind it. Best effort,
+    like the terminal write before it: the exception already on its way out is the one to keep."""
+    try:
+        store.mark_in_flight_crashed(state.CRASH_INTERRUPTED)
+    except Exception:
+        pass
 
 
 def _holder_phrase(acquired):
@@ -969,6 +984,7 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
                                 used_backends=config.used_backends, announce=announce)
             except Exception:
                 pass
+            _mark_in_flight_crashed(store)
         store.release()
 
 
@@ -1087,6 +1103,7 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
                                 used_backends=config.used_backends, announce=announce)
             except Exception:
                 pass
+            _mark_in_flight_crashed(store)
         store.release()
 
 
@@ -1432,7 +1449,9 @@ def _begin_task(cfg, task):
     # branch inside a well formed sentence. The host snapshots clear for the same reason: an
     # attempt that never reaches its own launch must not print the last one's host line.
     # Issue #51: a relaunch can read the in review status its last attempt left behind, and
-    # `launch_baseline` keeps the status the card read before that attempt instead.
+    # `launch_baseline` keeps the status the card read before that attempt instead. Issue #64:
+    # this attempt's Task moves the card at its first step, so the record says so from here
+    # until a read back after a Closeout finds the card out of review.
     baseline_status = closeout.launch_baseline(manifest, record, card_status.get("status"),
                                                store.audit())
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
@@ -1444,7 +1463,7 @@ def _begin_task(cfg, task):
                  excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
-                 unenforced_restrictions=unenforced)
+                 unenforced_restrictions=unenforced, card_in_review_by_run=True)
 
     return _Begun(task=task, card=card, branch=branch, baseline_sha=baseline_sha,
                   baseline_comment_id=baseline_comment_id, brief_text=brief_text,
@@ -1968,10 +1987,15 @@ def _blocked_route(ctx, halt_class):
     finding = closeout.confirm_blocked_comment(ctx.adapter, ctx.task.id, ctx.baseline_comment_id)
     if finding:
         ctx.findings.append(finding)
+    # Issue #64: a read back that finds the card out of review is the runner's last word on it,
+    # and it is what lets the next launch tell the operator's staging from this run's leftover.
+    returned = {}
     if return_to or unknown:
-        finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, ctx.task.id, return_to)
+        finding, out = closeout.read_back(ctx.adapter, ctx.manifest, ctx.task.id, return_to)
         if finding:
             ctx.findings.append(finding)
+        if out:
+            returned["card_in_review_by_run"] = False
     # The class arrives from the digest, so the evidence has to cover every class that can
     # reach here: blocked_envelope wants the blocker, no_envelope the last message, timeout the
     # tree and the minutes. Recording only the stranded head left each of them a placeholder.
@@ -1995,7 +2019,7 @@ def _blocked_route(ctx, halt_class):
     evidence.update(ctx.digest.get("timeout") or {})
     ctx.store.upsert(ctx.task.id, status=contracts.STATUS_BLOCKED, halt_class=halt_class,
                      branch=stranded["branch"], findings=ctx.findings,
-                     halt_evidence=evidence)
+                     halt_evidence=evidence, **returned)
 
 
 def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None, gate=None,
@@ -2142,11 +2166,12 @@ def _note_halt(ctx, halt):
                      halt_class=halt.halt_class, cause_line=halt.message, return_to=return_to,
                      baseline_unknown=unknown)
         if return_to or unknown:
-            finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, halt.task_id,
-                                                     return_to)
+            finding, out = closeout.read_back(ctx.adapter, ctx.manifest, halt.task_id, return_to)
             if finding:
                 ctx.findings.append(finding)
                 ctx.store.upsert(halt.task_id, findings=ctx.findings)
+            if out:
+                ctx.store.upsert(halt.task_id, card_in_review_by_run=False)
     except Exception as exc:
         if ctx.stream is not None:
             ctx.stream("%s: could not comment halt %s on the tracker: %s"

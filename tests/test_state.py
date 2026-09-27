@@ -243,6 +243,36 @@ class Heartbeat(StateCase):
         self.store(pid=200).break_lease()
         self.assertEqual(self.store(pid=200).acquire().code, st.OK)
 
+    def test_break_lease_marks_records_in_flight_as_a_reclaim_does(self):
+        """Issue #64: a broken lease leaves the same dead records a reclaim finds, and a record
+        still reading running would be taken for a Task at work."""
+        holder = self.store(pid=100)
+        holder.acquire()
+        holder.upsert("T-1", status=contracts.STATUS_RUNNING, branch="relay/T-1")
+        holder.upsert("T-2", status=contracts.STATUS_MERGING)
+        holder.upsert("T-3", status=contracts.STATUS_BLOCKED)
+        self.assertEqual(self.store(pid=200).break_lease(), ("T-1", "T-2"))
+        records = self.store(pid=200).records()
+        for task_id, before in (("T-1", "running"), ("T-2", "merging")):
+            record = records[task_id]
+            self.assertEqual((record["status"], record["halt_class"]),
+                             (contracts.STATUS_HALTED, contracts.HALT_RUNNER_CRASHED))
+            self.assertEqual(record["halt_evidence"]["cause"], "lease_broken")
+            self.assertEqual(record["halt_evidence"]["status_before"], before)
+            self.assertEqual(record["halt_evidence"]["previous_holder"]["holder_pid"], 100)
+            self.assertIsNone(record["ended_at"])
+        self.assertEqual(records["T-3"]["status"], contracts.STATUS_BLOCKED)
+
+    def test_marking_in_flight_records_names_the_cause_and_its_own_holder(self):
+        store = self.store(pid=100)
+        store.acquire()
+        store.upsert("T-1", status=contracts.STATUS_RUNNING)
+        self.assertEqual(store.mark_in_flight_crashed("interrupted"), ("T-1",))
+        evidence = store.get("T-1")["halt_evidence"]
+        self.assertEqual((evidence["cause"], evidence["previous_holder"]["holder_pid"]),
+                         ("interrupted", 100))
+        self.assertEqual(store.mark_in_flight_crashed("interrupted"), ())
+
 
 class Records(StateCase):
     def test_validate_downgrades_landed_without_verify_at(self):

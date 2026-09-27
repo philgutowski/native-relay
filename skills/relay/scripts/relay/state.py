@@ -34,8 +34,14 @@ RECORD_FIELDS = (
     "branch", "landing_ref", "verify", "halt_class", "halt_stage", "halt_evidence", "findings",
     "closeout", "started_at", "ended_at", "wall_seconds", "active_seconds", "transcript_path",
     "brief_sha256", "excluded_reason", "skip_reason", "continued_past", "backend", "model", "binary_path",
-    "args", "host_at_start", "host_at_end",
+    "args", "host_at_start", "host_at_end", "card_in_review_by_run",
 )
+
+# Why `_mark_crashed` marked a record, in its `halt_evidence.cause` (issue #64). A reclaim is the
+# only one of the three that finds a lease somebody else left.
+CRASH_RECLAIMED = "lease_reclaimed"
+CRASH_LEASE_BROKEN = "lease_broken"
+CRASH_INTERRUPTED = "interrupted"
 
 
 @dataclass
@@ -315,7 +321,7 @@ class StateStore:
             previous = None
             if lease and not self._is_mine(lease):
                 previous = dict(lease)
-                reclaimed = self._mark_crashed(state, previous)
+                reclaimed = self._mark_crashed(state, previous, CRASH_RECLAIMED)
             state["lease"] = dict(
                 self._holder(), acquired_at=_iso(now), heartbeat_at=_iso(now), ttl_seconds=self.ttl_seconds
             )
@@ -363,20 +369,25 @@ class StateStore:
         finally:
             os.close(fd)
 
-    def _mark_crashed(self, state, previous):
+    def _mark_crashed(self, state, previous, cause):
         """R55: a reclaimed lease turns every running or merging record into halted with class
         runner_crashed, and records the old holder per-record in halt_evidence.previous_holder
         rather than in a run-level terminal record.
+
+        Issue #64: a broken lease and an interrupted run leave the same dead records, and each
+        marks them here too, `cause` saying which of the three it was. A record left reading
+        running is otherwise a Task at work to every reader, `status` and the audit included.
 
         Round six #40: when the crashed task's own stdout log shows it killed the previous
         holder's pid, that self-kill is attached to the record as a runner_self_kill finding
         instead of leaving the halt bare (classify.scan_self_kill)."""
         ids = []
-        victim_pid = previous.get("holder_pid")
+        victim_pid = (previous or {}).get("holder_pid")
         for task_id, record in state.get("tasks", {}).items():
             if record.get("status") in contracts.IN_FLIGHT_STATUSES:
                 record["halt_evidence"] = {
                     "status_before": record.get("status"),
+                    "cause": cause,
                     "previous_holder": previous,
                     "last_git_op": (state.get("git_ops") or [None])[-1],
                 }
@@ -445,12 +456,36 @@ class StateStore:
         return released["ok"]
 
     def break_lease(self):
-        """Operator only (`relay lease --break`): clear both leases regardless of holder."""
-        self._mutate(lambda state: state.update(lease=None))
+        """Operator only (`relay lease --break`): clear both leases regardless of holder. Every
+        record in flight is marked as a reclaim marks it (issue #64), since the holder those
+        records belonged to no longer owns them. Returns the marked ids."""
+        marked = {}
+
+        def fn(state):
+            lease = state.get("lease")
+            marked["ids"] = self._mark_crashed(state, dict(lease) if lease else None,
+                                               CRASH_LEASE_BROKEN)
+            state["lease"] = None
+
+        # `ended_at` withheld for the reason `acquire` gives: the break is not when work stopped.
+        self._mutate(fn, explicit={"ended_at"})
         try:
             os.remove(self.repo_lock_path)
         except FileNotFoundError:
             pass
+        return marked["ids"]
+
+    def mark_in_flight_crashed(self, cause=CRASH_INTERRUPTED):
+        """Issue #64: the Runner's own way out when it wrote no terminal record, an interrupt from
+        the keyboard most often. Nothing it launched is still being driven, so its records in
+        flight are marked the way a reclaim would mark them. Returns the marked ids."""
+        marked = {}
+
+        def fn(state):
+            marked["ids"] = self._mark_crashed(state, self._holder(), cause)
+
+        self._mutate(fn, explicit={"ended_at"})
+        return marked["ids"]
 
     def lease(self):
         state = self.read()

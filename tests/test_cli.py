@@ -1254,7 +1254,18 @@ class LeaseVerb(CliCase):
         code, out = self.call("lease", self.manifest_path, "--break")
         self.assertEqual(code, cli.EXIT_OK)
         self.assertIn("lease broken", out)
+        self.assertNotIn("record(s) in flight", out)
         self.assertIsNone(self.store().lease())
+
+    def test_break_names_the_records_it_marked(self):
+        """Issue #64: a break marks the records in flight as a reclaim would, and says so."""
+        holder = self.store()
+        holder.acquire()
+        holder.upsert("T-1", status=contracts.STATUS_RUNNING)
+        code, out = self.call("lease", self.manifest_path, "--break")
+        self.assertEqual(code, cli.EXIT_OK)
+        self.assertIn("1 record(s) in flight marked runner_crashed: T-1", out)
+        self.assertEqual(self.store().get("T-1")["halt_class"], contracts.HALT_RUNNER_CRASHED)
 
 
 class FeederManifestBeforeItsFirstCycle(CliCase):

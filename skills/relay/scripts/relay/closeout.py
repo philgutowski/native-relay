@@ -348,20 +348,20 @@ def baseline_unknown(manifest, record):
 
 
 def launch_baseline(manifest, record, status, last_audit=None):
-    """The baseline a launch records, given the status it just read (issue #51). A relaunch of a
-    card a blocked or halted attempt left in review reads the in review status, and recording
-    that would make `return_to_for` take the leftover for an operator's staging and never return
-    the card.
+    """The baseline a launch records, given the status it just read (issues #51 and #64). A
+    relaunch of a card an earlier attempt left in review reads the in review status, and
+    recording that would make `return_to_for` take the leftover for an operator's staging and
+    never return the card.
 
     So on a record an earlier launch already read (`baseline_sha` marks one, because only the
     two launch writes set it and they always set it), and whose earlier baseline was not itself
     the in review status, two reads keep that earlier baseline. An empty read, which knows
-    nothing newer. And an in review read when the runner left the card there: `last_audit`, the
-    store's last run end audit, named it a stale card, or the record is a crashed runner's,
-    which ran no Closeout. Without that evidence an in review read is the operator staging the
-    card again, and `return_to_for` leaves staging alone. The earlier baseline may itself be
-    empty, and then the card stays unknown rather than turning into a staged one. Any other read
-    wins: a card the operator moved between runs goes back to where they put it."""
+    nothing newer. And an in review read when the runner left the card there, which
+    `_left_in_review` answers from the runner's own last read of the card rather than from any
+    audit. Without that an in review read is the operator staging the card again, and
+    `return_to_for` leaves staging alone. The earlier baseline may itself be empty, and then the
+    card stays unknown rather than turning into a staged one. Any other read wins: a card the
+    operator moved between runs goes back to where they put it."""
     in_review = manifest.tracker.in_review_status
     earlier = record.get("baseline_tracker_status")
     if not record.get("baseline_sha") or _same(earlier, in_review):
@@ -374,7 +374,19 @@ def launch_baseline(manifest, record, status, last_audit=None):
 
 
 def _left_in_review(record, last_audit):
-    """Evidence that the runner, not the operator, left this card in the in review status."""
+    """Whether the runner, not the operator, left this card in the in review status.
+
+    Issue #64: `card_in_review_by_run` is the answer. Every launch sets it, because the Task's
+    first step moves the card, and only a read back after a Closeout that finds the card out of
+    review clears it. So a broken lease, an interrupt, a dirty timeout, and a crash all leave it
+    set with no audit needed, and a card the runner saw returned and the operator staged since
+    reads as staged whatever an older audit says.
+
+    A record written before the field existed carries None, and only then is the old inference
+    used: the last run end audit named the card stale, or the record is a crashed runner's."""
+    left = record.get("card_in_review_by_run")
+    if left is not None:
+        return bool(left)
     if record.get("halt_class") == contracts.HALT_RUNNER_CRASHED:
         return True
     return any(finding.get("task") == record.get("id")
@@ -387,10 +399,19 @@ def _same(a, b):
 
 
 def confirm_card_returned(adapter, manifest, task_id, return_to):
-    """R4 of the stale cards plan: after a Closeout told to return the card, read it back. A
-    finding when it still reads the in review status, or when the read failed, so the summary
-    lists the card to move by hand. Never a halt: the run continues, and the runner never moves
-    the card itself.
+    """The finding half of `read_back`, for a caller with no record to update."""
+    return read_back(adapter, manifest, task_id, return_to)[0]
+
+
+def read_back(adapter, manifest, task_id, return_to):
+    """R4 of the stale cards plan: after a Closeout told to return the card, read it back.
+    Returns `(finding, out_of_review)`. The finding comes when the card still reads the in review
+    status, or when the read failed, so the summary lists the card to move by hand. Never a halt:
+    the run continues, and the runner never moves the card itself.
+
+    `out_of_review` is True only when the read answered with a status other than the in review
+    one. The caller clears `card_in_review_by_run` on it (issue #64), and on nothing else, since
+    a read that failed has seen nothing.
 
     A None `return_to` is a card whose baseline was never read (issue #51), and the finding names
     `contracts.UNKNOWN_RETURN` in its place. A read that fails then is no finding: nothing says
@@ -403,23 +424,23 @@ def confirm_card_returned(adapter, manifest, task_id, return_to):
         card = adapter.status(task_id) or {}
     except Exception as exc:
         if unknown:
-            return None
+            return None, False
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": "unreadable", "return_to": return_to,
-                "evidence": "the tracker could not be read to confirm the return: %s" % exc}
+                "evidence": "the tracker could not be read to confirm the return: %s" % exc}, False
     if card.get("skipped") and unknown:
-        return None
+        return None, False
     if card.get("skipped"):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": "unreadable", "return_to": return_to,
                 "evidence": "the tracker could not be read to confirm the return: %s"
-                            % card["skipped"]}
+                            % card["skipped"]}, False
     status = card.get("status")
     if _same(status, in_review):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": status, "return_to": return_to,
-                "evidence": "the card reads %s after the closeout" % status}
-    return None
+                "evidence": "the card reads %s after the closeout" % status}, False
+    return None, bool(status)
 
 
 def confirm_board_terminal(adapter, manifest, task_id):

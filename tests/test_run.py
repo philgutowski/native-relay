@@ -2869,6 +2869,92 @@ class _BoardRoutes:
         self.assertEqual(self.card(), self.IN_REVIEW)
         self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
 
+    def relaunch_is_told_to_return(self):
+        """The relaunch after an attempt that ran no Closeout: the Task blocks again, and the
+        Closeout does what its brief tells it."""
+        self.assertEqual(self.card(), self.IN_REVIEW)
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again", move_to=self.BASELINE)
+        self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(record["baseline_tracker_status"], self.BASELINE)
+        self.assert_told_to_return(self.brief(".closeout"))
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
+    def test_a_relaunch_after_the_lease_was_broken_keeps_the_first_baseline(self):
+        """Issue #64. The runner died with the Task mid flight, after its start step moved the
+        card and before it made a branch, and the operator ran `lease --break` rather than wait
+        for the reclaim. No Closeout ran and no audit was written, so the in review read at the
+        relaunch is the runner's leftover, not the operator's staging."""
+        from unittest import mock
+
+        class _Killed(BaseException):
+            """Stands in for SIGKILL: nothing below the launch runs, not even the lease release
+            or the crash marking in `run`'s own `finally`."""
+
+        self.task_moves_card("blocked.jsonl", branch=False)
+        with mock.patch.object(runner, "_complete_task", side_effect=_Killed), \
+                mock.patch.object(state.StateStore, "release"), \
+                mock.patch.object(state.StateStore, "mark_in_flight_crashed"):
+            with self.assertRaises(_Killed):
+                self.go_board()
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_RUNNING)
+        self.store().break_lease()
+        record = self.store().get("T-1")
+        self.assertEqual((record["status"], record["halt_class"]),
+                         (contracts.STATUS_HALTED, contracts.HALT_RUNNER_CRASHED))
+        self.assertEqual(record["halt_evidence"]["cause"], "lease_broken")
+        self.relaunch_is_told_to_return()
+
+    def test_a_relaunch_after_an_interrupted_run_keeps_the_first_baseline(self):
+        """Issue #64. An interrupt from the keyboard passes every `except Exception`, so the
+        run's `finally` is all that runs: it releases the lease and writes a crashed terminal
+        record with no audit. The record in flight is marked the way a reclaim marks it, and
+        the relaunch keeps the status the first launch read."""
+        from unittest import mock
+        self.task_moves_card("blocked.jsonl", branch=False)
+        with mock.patch.object(runner, "_complete_task", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual((record["status"], record["halt_class"]),
+                         (contracts.STATUS_HALTED, contracts.HALT_RUNNER_CRASHED))
+        self.assertEqual(record["halt_evidence"]["cause"], "interrupted")
+        self.assertIsNone(self.store().lease())
+        self.assertIsNone(self.store().audit())
+        self.relaunch_is_told_to_return()
+
+    def test_a_card_restaged_in_review_after_an_old_audit_named_it_stays_staged(self):
+        """Issue #64. The audit is replaced only at a run end that reaches it. The first run
+        left the card in review and its audit said so. The second run returned the card, and was
+        interrupted before its own audit, so the first audit still names the card. The operator
+        then staged it in review on purpose, and the runner's last read of the card, which showed
+        it returned, is what says so."""
+        from unittest import mock
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked on the design question")
+        self.go_board()
+        self.assertEqual([f["task"] for f in self.store().audit()["findings"]], ["T-1"])
+
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again", move_to=self.BASELINE)
+        with mock.patch.object(runner, "_audit_cards", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.go_board(retry_blocked=True)
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertEqual([f["task"] for f in self.store().audit()["findings"]], ["T-1"])
+
+        self.set_card("T-1", self.IN_REVIEW)
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked a third time")
+        self.go_board(retry_blocked=True)
+        self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], self.IN_REVIEW)
+        self.assertNotIn("back to", self.brief(".closeout").lower())
+        self.assertEqual(self.card(), self.IN_REVIEW)
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
     def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):
         self.task_moves_card("blocked.jsonl")
         self.closeout("blocked on the design question", move_to=self.BASELINE, unreadable=True)
@@ -3222,3 +3308,8 @@ class TripleCoordinator(RunCase):
         records = self.store().records()
         self.assertEqual([records[task.id]["baseline_tracker_status"] for task in manifest.tasks],
                          ["To Do"] * 3)
+        # Issue #64: a triple writes no audit, so the record's own flag is the relaunch's only
+        # evidence, and a coordinator leaving with no terminal record marks what it launched.
+        self.assertEqual([(records[task.id]["card_in_review_by_run"], records[task.id]["status"],
+                           records[task.id]["halt_class"]) for task in manifest.tasks],
+                         [(True, contracts.STATUS_HALTED, contracts.HALT_RUNNER_CRASHED)] * 3)
