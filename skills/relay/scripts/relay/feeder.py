@@ -1015,9 +1015,14 @@ class Feeder:
         # life of the state file (issue #58): `reported` otherwise carries `scan_skip:<id>`
         # forward for ever, and an operator who missed the first line never sees another. Unlike
         # STREAKS this is not guarded by `not self.once`: a `--once` cron start is as much a
-        # start as a long lived process is, and the mechanism paragraph names it explicitly.
-        for key in [key for key in self.state["reported"] if key.startswith("scan_skip:")]:
-            del self.state["reported"][key]
+        # start as a long lived process is, and the mechanism paragraph names it explicitly. A
+        # tight `--once` cron line against a persistently dirty card therefore renotifies every
+        # tick rather than once; that repetition is the tradeoff this issue asks for, naming the
+        # card at every start, not a bug to quiet later.
+        # Safe to clear blindly because `scanned_ids` is recomputed from the ready cards, unasked,
+        # at the top of every cycle (below), so a card still dirty is renamed within one cycle.
+        self.state["reported"] = {key: message for key, message in self.state["reported"].items()
+                                  if not key.startswith("scan_skip:")}
         # Written while the lock is held, so the pid here is the lock holder's (issue #36).
         self.state["process"] = {
             "pid": self.pid, "hostname": socket.gethostname(),
@@ -1201,9 +1206,16 @@ class Feeder:
         elif not unsettled:
             # A card the scan refuses never reached model routing, so it is not evidence of a
             # routing problem (issue #41); only a card that got that far belongs in this check.
-            return self.idle(readable, [card["id"] for card in fresh
-                                        if card["id"] not in scanned and card["id"] not in held],
-                             [card["id"] for card in fresh if card["id"] in scanned])
+            # `scan_refused` is issue #58's own case: waits like the rest, but must not read as
+            # a true empty queue, so it is threaded separately rather than folded into fresh_ids.
+            fresh_ids, scan_refused = [], []
+            for fresh_card in fresh:
+                card_id = fresh_card["id"]
+                if card_id in scanned:
+                    scan_refused.append(card_id)
+                elif card_id not in held:
+                    fresh_ids.append(card_id)
+            return self.idle(readable, fresh_ids, scan_refused)
 
         self.state["cycles"] += 1
         self.state.get("process", {})["cycle"] = self.state["cycles"]
@@ -1232,7 +1244,7 @@ class Feeder:
             status: sorted((task["id"] for task in by_status.get(status, ())), key=natural_key)
             for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED)})
 
-    def idle(self, readable, fresh_ids, scanned_ids=()):
+    def idle(self, readable, fresh_ids, scan_refused=()):
         """Nothing was appended and no listed task is left to run, while no runner holds the
         lease. Four things look like that and only one is a true empty queue.
 
@@ -1242,7 +1254,7 @@ class Feeder:
         were all refused by validate are not an empty queue either: the board has work, and
         only a person changing the routing can release it, so the feeder stops and names them.
 
-        Ready cards the launch scan refuses (`scanned_ids`) wait like an empty queue, since a
+        Ready cards the launch scan refuses (`scan_refused`) wait like an empty queue, since a
         card wanting a reword is not the same urgency as a routing mismatch (issue #41), but the
         `leaving` event must not call that a true empty queue either (issue #58): a watcher
         reading `empty_queue` off the last event would conclude nothing was ever ready, when the
@@ -1268,12 +1280,12 @@ class Feeder:
                                           "Change the routing and start the feeder again."
                                           % ", ".join(fresh_ids), "all_refused")
         if self.strike("idle_waits", config.idle_waits_max):
-            if scanned_ids:
+            if scan_refused:
                 return self.stop(EXIT_OK, "the queue is empty except for cards the launch scan "
                                           "refuses, leaving: %s. Nothing else is ready, nothing "
                                           "is left to run, and no runner holds the lease. Reword "
                                           "the named cards to release them."
-                                          % ", ".join(scanned_ids), "empty_queue_scanned")
+                                          % ", ".join(scan_refused), "empty_queue_scanned")
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
