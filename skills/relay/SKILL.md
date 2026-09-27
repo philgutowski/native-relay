@@ -575,8 +575,8 @@ holds its place in the batch, and then relaunches on its own model with `--retry
 the cycle after the wait runs the dead tasks first and appends fresh cards only into the room
 they leave. In a cycle where something landed, or a death was slow, a limit death with no free
 fallback holds its model back instead: the model is marked exhausted, cards routed to it are not
-appended while none of its fallbacks is free, and a blocked one waits for the mark to expire and
-then relaunches with `--retry-blocked`. A halted one there is still counted toward `max_halts`.
+appended while none of its fallbacks is free, and a blocked one waits while its model is held and
+then relaunches with `--retry-blocked`. A model a task landed on that cycle is never held. A halted one there is still counted toward `max_halts`.
 When held cards and waiting retries are all that is left, the feeder waits (reason
 `model_held`) rather than leave. A blocked limit death on a model with no fallback entry, or with
 the fallback off, is read the same way only when its log's `result` line says 429. To relaunch one blocked task by hand, `feed <manifest> --restart

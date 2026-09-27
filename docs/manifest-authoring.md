@@ -491,8 +491,9 @@ post_cycle_timeout_seconds = 3600
 - In a cycle where something landed or a death was slow, a limit death with no free fallback
   holds its model back. The model is marked exhausted for `fallback_hours`, and while none of
   its fallbacks is free, a card routed to it is left out of the manifest and its batch slot goes
-  to the next card, with one log line per cycle naming the held cards. A blocked one is queued
-  for a retry that waits for its model's mark to expire. A halted one is still counted toward
+  to the next card, with one log line per cycle naming the held cards. A model a task landed on
+  that cycle is not held. A blocked one is queued for a retry that waits while its model is
+  held, and a second death on a model already held keeps the first mark. A halted one is still counted toward
   `max_halts`, because the runner relaunches a halted task on every run. When held cards and
   waiting retries are all that is left, the feeder waits `limit_wait_seconds` with the event
   reason `model_held` rather than leave, and that wait neither adds to nor resets the count of

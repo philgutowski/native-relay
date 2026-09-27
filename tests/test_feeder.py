@@ -871,9 +871,53 @@ class HeldModel(FeederCase):
         self.assertEqual(self.state()["limit_waits"], 0)
         self.assertIn("nothing to run until a held model's mark expires, waiting",
                       self.log_text())
-        self.assertIn("2 read blocked and relaunch with --retry-blocked when the mark expires",
-                      self.log_text())
+        self.assertIn("2 read blocked and relaunch with --retry-blocked once fable is no longer "
+                      "held", self.log_text())
         self.assertNotIn("2 blocked; a later run will not retry it", self.log_text())
+
+    def test_a_landing_on_the_same_model_rules_out_a_hold(self):
+        # 3 landed on fable in the cycle 2 died on it, so fable is working: no mark, no hold,
+        # and 2 is an ordinary blocked task.
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        self.write(self.paths.routing, "2 fable\n3 fable\n")
+        self.plans = [{"2": self.blocked(4)}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("2 blocked; a later run will not retry it", self.log_text())
+
+    def test_an_already_held_model_is_not_stamped_again(self):
+        # 2 halted once on fable and relaunches there; fable was held at 08:30, with its fallback
+        # opus marked too. Its second death
+        # beside 1's landing keeps the first stamp, and the operator is not told twice.
+        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "2"\nmodel = "fable"\n'
+                                                   'effort = "high"\n')
+        self.records["2"] = {"id": "2", "status": "halted", "model": "fable",
+                             "started_at": "old", "wall_seconds": 8}
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), halts={"2": 1},
+            exhausted={"fable": "2026-09-19T08:30:00", "opus": "2026-09-19T08:00:00"})))
+        self.adapter.ready_cards = [card(1)]
+        self.plans = [{"2": halted(9)}]
+        self.feed(feeder.Config(default_model="sonnet", model_fallback={"fable": "opus"}))
+        self.assertEqual(self.ran_on[0], {"1": "sonnet", "2": "fable"})
+        self.assertEqual(self.state()["exhausted"], {"fable": "2026-09-19T08:30:00",
+                                                     "opus": "2026-09-19T08:00:00"})
+        self.assertIn("2 died inside 600s on fable, which is already held since "
+                      "2026-09-19T08:30:00", self.log_text())
+        self.assertFalse(any("marked exhausted" in note for note in self.notes), self.notes)
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"2"})
+
+    def test_a_refused_batch_beside_a_held_card_still_stops_as_all_refused(self):
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), refused={"1": "sonnet"},
+            exhausted={"fable": "2026-09-19T08:30:00"})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.assertEqual(self.feed(self.CONFIG), 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn("every ready card was refused with the model it is routed to, and nothing "
+                      "is left to run: 1.", self.log_text())
 
     def test_the_held_wait_neither_strikes_nor_resets_the_usage_limit_waits(self):
         self.write(self.paths.state, json.dumps(dict(
