@@ -93,6 +93,14 @@ task and in total, and a rough estimate of what is left drawn from the mean of t
 have landed. The estimate says it has none rather than guessing when no landed task carries a
 duration.
 
+Every launched task's record also carries `host_at_start` and `host_at_end`, the host's one minute
+load average, free and inactive memory, and cumulative swap counters, read just before the Task
+process starts and just after it exits. `summary` prints them as one `host:` line under the
+timing, with swap as the difference between the two reads. When a task ran slower than its
+neighbours, read that line before blaming the card: rising load, vanishing free and inactive
+memory, or thousands of swapouts mean the host was starved, and a red gate under those conditions
+is not evidence about the code.
+
 `audit` reads every task's card and says which ones disagree with the record and with git. The
 runner performs the same audit at the end of every run and writes it to the state file, where
 `status` and `summary` show it, so the verb is for a fresh look between runs. It takes no lease

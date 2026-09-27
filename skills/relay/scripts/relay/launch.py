@@ -30,7 +30,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from . import backends, contracts, manifest as manifest_module
+from . import backends, contracts, host, manifest as manifest_module
 
 SIGKILL_GRACE_SECONDS = 15
 TICK_SECONDS = 1.0
@@ -46,6 +46,10 @@ class LaunchResult:
     killed_group: bool = False
     wall_seconds: float = 0.0
     active_seconds: float = 0.0
+    # Issue #32: what the host was doing either side of the process, so a slow task can be told
+    # from a slow machine. Taken outside the timed span; see host.snapshot.
+    host_at_start: dict | None = None
+    host_at_end: dict | None = None
     transcript_path: str | None = None
     transcript_present: bool = False
     log_path: str | None = None
@@ -294,7 +298,8 @@ def _kill_group(proc, grace_seconds, pgid=None):
 def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=None, home=None,
            base_env=None, heartbeat=None, heartbeat_interval=contracts.LEASE_HEARTBEAT_SECONDS,
            stream=print, sigkill_grace_seconds=SIGKILL_GRACE_SECONDS, popen=subprocess.Popen,
-           on_release=None, allowed=None, disallowed=None, cwd=None, on_started=None, repo=None):
+           on_release=None, allowed=None, disallowed=None, cwd=None, on_started=None, repo=None,
+           host_probe=host.snapshot):
     """Run one task or closeout process to completion, a timeout, or a lost lease.
 
     `active_seconds` is measured on the monotonic clock, which does not advance while the host
@@ -305,6 +310,10 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     `cwd` is the process working directory. Dispatch sets it to the Task's worktree so two
     builds do not share a tree. Default is the Manifest repo, which is today's serial path.
     `on_started(pid, pgid)` fires once the child exists, so a coordinator can abort a sibling.
+
+    `host_probe` is called once before the clocks start and once after they stop, so reading the
+    host never spends the task's budget. Its two results are the record's `host_at_start` and
+    `host_at_end` (issue #32).
     """
     # Serial callers omit ``repo`` and retain the manifest checkout contract.  A triple
     # coordinator passes its independently cloned worker path, which is also passed to the
@@ -324,6 +333,7 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     result.args = list(args)
     result.binary_path = shutil.which(args[0], path=env.get("PATH"))
 
+    result.host_at_start = _probe(host_probe)
     started_wall = time.time()
     started = time.monotonic()
     try:
@@ -333,6 +343,7 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
         result.launch_error = "could not start %s: %s" % (args[0], exc)
         result.wall_seconds = time.time() - started_wall
         result.active_seconds = time.monotonic() - started
+        result.host_at_end = _probe(host_probe)
         result.transcript_path, result.transcript_present = find_transcript(
             home, cwd, session_id, backend=task.backend, log_path=log_path)
         return result
@@ -442,6 +453,18 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     result.exit_code = proc.poll()
     result.active_seconds = time.monotonic() - started
     result.wall_seconds = time.time() - started_wall
+    result.host_at_end = _probe(host_probe)
     result.transcript_path, result.transcript_present = find_transcript(
         home, cwd, session_id, backend=task.backend, log_path=log_path)
     return result
+
+
+def _probe(host_probe):
+    """A snapshot, or None. host.snapshot never raises, but an injected probe may, and the
+    start call sits ahead of the Popen with nothing around it to catch."""
+    if host_probe is None:
+        return None
+    try:
+        return host_probe()
+    except Exception:
+        return None

@@ -345,6 +345,30 @@ class CauseLineTable(unittest.TestCase):
         # enforcing backend's task and the suite stays green.
         self.assertNotIn("tasks[1].unenforced_restrictions", sources)
 
+    def test_host_conditions_reach_the_json_and_one_text_line_beside_the_timing(self):
+        """Issue #32. The two snapshots ride the entry as the record holds them, and the text
+        prints them as one line so a slow task on a loaded host is visible without the JSON. A
+        record written before the fields existed prints no line rather than a row of None."""
+        start = {"load_1m": 1.0, "free_bytes": 1 << 30, "inactive_bytes": 2 << 30,
+                 "swapins": 0, "swapouts": 10}
+        end = dict(start, load_1m=8.0, swapouts=510)
+        self.store.upsert("T-1", status=contracts.STATUS_LANDED,
+                          halt_class=contracts.HALT_LANDED, backend="claude", findings=[],
+                          wall_seconds=60.0, active_seconds=60.0,
+                          host_at_start=start, host_at_end=end)
+        self.store.upsert("T-2", status=contracts.STATUS_LANDED,
+                          halt_class=contracts.HALT_LANDED, backend="claude", findings=[])
+        data = self.summarise([("T-1", "claude"), ("T-2", "claude")])
+        self.assertEqual(data["tasks"][0]["host_at_start"], start)
+        self.assertEqual(data["tasks"][0]["host_at_end"], end)
+        self.assertIsNone(data["tasks"][1]["host_at_start"])
+        text = summary.render(data)
+        self.assertIn("host: load 1.00 to 8.00", text)
+        self.assertIn("0 swapins and 500 swapouts during the task", text)
+        sources = [source for _, source in summary.lines(data)]
+        self.assertIn("tasks[0].host_at_start", sources)
+        self.assertNotIn("tasks[1].host_at_start", sources)
+
     def test_cause_line_keeps_a_backend_scalar_when_other_record_values_are_structured(self):
         original = contracts.HALT_LINES[contracts.HALT_UNEXPECTED_ERROR]
         contracts.HALT_LINES[contracts.HALT_UNEXPECTED_ERROR] = "{backend}: {error}"

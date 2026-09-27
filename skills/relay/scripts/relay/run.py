@@ -401,6 +401,7 @@ def _triple_classify(cfg, item):
     cfg.store.upsert(item.task.id, session_id=launched.session_id,
                      transcript_path=launched.transcript_path,
                      wall_seconds=launched.wall_seconds, active_seconds=launched.active_seconds,
+                     host_at_start=launched.host_at_start, host_at_end=launched.host_at_end,
                      findings=item.findings, binary_path=launched.binary_path, args=launched.args,
                      envelope_verdict=digest["envelope_verdict"])
     if launched.launch_error:
@@ -1479,6 +1480,7 @@ def _complete_task(cfg, begun, launched, tree_repo=None):
     store.upsert(task.id, session_id=launched.session_id,
                  transcript_path=launched.transcript_path, wall_seconds=launched.wall_seconds,
                  active_seconds=launched.active_seconds, findings=findings,
+                 host_at_start=launched.host_at_start, host_at_end=launched.host_at_end,
                  binary_path=launched.binary_path, args=launched.args,
                  envelope_verdict=digest["envelope_verdict"])
 
