@@ -297,11 +297,16 @@ def hand_landing(repo, baseline_sha, head_sha, task_id):
 
 def card_status_of(verdict):
     """The tracker status the card read when the verdict was taken, for the partial_landing
-    cause line. A card the adapter could not read says so rather than rendering a placeholder."""
+    cause line. A card the adapter could not read says so rather than rendering a placeholder.
+    A card it read with no status, a GitHub item with no column (issue #78), says that instead:
+    the read worked, and "unreadable" would send the operator after a failure that never
+    happened."""
     check = verdict.checks.get("card_terminal") or {}
     evidence = check.get("evidence") or {}
     if evidence.get("status"):
         return evidence["status"]
+    if "status" in evidence:
+        return "no status"
     return evidence.get("reason") or "unreadable"
 
 

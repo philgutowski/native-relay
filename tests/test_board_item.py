@@ -202,6 +202,48 @@ class BoardLag(unittest.TestCase):
         self.assertEqual(public, set(adapters.INTERFACE))
 
 
+class OpenIssueStatus(unittest.TestCase):
+    """Issue #78: an open issue's status once a board column is declared. It fell back to the
+    issue state, so an item with no Status recorded `OPEN` as its baseline and a blocked
+    Closeout was told to move the item back to a column the board does not have."""
+
+    def test_an_item_on_the_board_with_no_status_reads_no_status(self):
+        result = _adapter(TwoTruths({"12": "OPEN"}, {"12": None})).status("12")
+        self.assertIsNone(result["status"])
+        self.assertFalse(result["terminal"])
+        self.assertIsNone(result["skipped"])
+
+    def test_an_issue_the_declared_project_does_not_carry_reads_no_status(self):
+        result = _adapter(TwoTruths({"12": "OPEN"}, {"13": "Todo"})).status("12")
+        self.assertIsNone(result["status"])
+        self.assertFalse(result["terminal"])
+        self.assertIsNone(result["skipped"])
+
+    def test_an_item_with_a_status_reads_that_status(self):
+        result = _adapter(TwoTruths({"12": "OPEN"}, {"12": "Todo"})).status("12")
+        self.assertEqual(result["status"], "Todo")
+
+    def test_no_status_field_keeps_the_issue_state_and_reads_no_board(self):
+        run = TwoTruths({"12": "OPEN"}, {"12": None})
+        self.assertEqual(_adapter(run, status_field=None).status("12")["status"], "OPEN")
+        self.assertFalse(any(call[:3] == ["gh", "project", "item-list"] for call in run.calls))
+
+    def test_a_closed_issue_still_reads_closed_and_terminal(self):
+        result = _adapter(TwoTruths({"12": "CLOSED"}, {"12": None})).status("12")
+        self.assertEqual(result["status"], "CLOSED")
+        self.assertTrue(result["terminal"])
+
+    def test_the_baseline_an_empty_item_records_is_unknown(self):
+        """The launch records what `status()` read, and the Closeout's move follows the record,
+        so the whole chain is `status()` through `launch_baseline` to the two refusal rules."""
+        manifest = _manifest()
+        read = _adapter(TwoTruths({"12": "OPEN"}, {"12": None})).status("12")
+        record = {"baseline_tracker_status": closeout.launch_baseline(manifest, {},
+                                                                       read["status"])}
+        self.assertIsNone(closeout.return_to_for(manifest, record))
+        self.assertTrue(closeout.baseline_unknown(manifest, record))
+
+
 class ItemConfirmedTerminal(unittest.TestCase):
     """Issue #61's own review: the narrower answer `board_lag` cannot give, since its
     "nothing to report" covers both a confirmed item and one off the board entirely."""
@@ -368,6 +410,42 @@ class Audit(unittest.TestCase):
         audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
         self.assertEqual(
             sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+
+    def test_a_reopened_landed_card_with_an_empty_item_says_no_status(self):
+        """Issue #78: an open issue's empty item now reads None rather than `OPEN`, and the
+        reopened sentence names that as words rather than printing `None`."""
+        findings = self.build(TwoTruths({"12": "OPEN"}, {"12": None}))
+        self.assertEqual([f["class"] for f in findings], [contracts.AUDIT_REOPENED])
+        self.assertIn("its card reads no status", findings[0]["text"])
+        self.assertNotIn("None", findings[0]["text"])
+        self.assertNotIn("OPEN", findings[0]["text"])
+
+    def test_an_empty_item_the_audit_read_clears_the_in_review_mark(self):
+        """Issue #78's own review: the audit hands the Runner every readable card's status, and
+        an empty item's None used to be skipped as if nothing were seen. It was read, and it is
+        out of review, so the mark the Runner set at launch comes off."""
+        from relay import run as run_module
+
+        self.store.upsert("12", status=contracts.STATUS_BLOCKED, landing_ref=None,
+                          card_in_review_by_run=True)
+        observed = {}
+        manifest = _manifest(repo=self.repo)
+        audit.build(manifest, self.store,
+                    gh_adapter.GitHubAdapter(manifest, run=TwoTruths({"12": "OPEN"}, {"12": None})),
+                    observed=observed)
+        self.assertEqual(observed, {"12": None})
+        run_module._clear_seen_out_of_review(SimpleNamespace(manifest=manifest, store=self.store),
+                                             observed)
+        self.assertFalse(self.store.get("12")["card_in_review_by_run"])
+
+    def test_a_partial_landing_on_an_empty_item_says_no_status_not_unreadable(self):
+        from relay import verify
+
+        verdict = SimpleNamespace(checks={"card_terminal": {
+            "result": verify.FAIL, "evidence": {"status": None, "terminal": False}}})
+        self.assertEqual(verify.card_status_of(verdict), "no status")
+        verdict.checks["card_terminal"]["evidence"] = {"reason": "gh exited 1"}
+        self.assertEqual(verify.card_status_of(verdict), "gh exited 1")
 
     def test_item_seen_marks_a_landed_item_read_cleanly_as_terminal(self):
         """Issue #61: this is what lets the Runner retire `confirm_board_terminal`'s own

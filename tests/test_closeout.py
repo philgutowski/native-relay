@@ -772,7 +772,7 @@ class LaunchBaselineFromTheRunnersOwnRead(LaunchBaseline):
 
 
 class ReadBack(CloseoutCase):
-    """Issue #64: the read back says whether it saw the card out of review, and only a status
+    """Issue #64: the read back says whether it saw the card out of review, and only a read
     that answered counts."""
 
     def read(self, status, return_to="Todo"):
@@ -782,12 +782,17 @@ class ReadBack(CloseoutCase):
     def test_a_returned_card_is_out_of_review(self):
         self.assertEqual(self.read({"status": "Todo"}), (None, True))
 
+    def test_a_card_read_with_no_status_is_out_of_review(self):
+        """Issue #78: a GitHub item with no column answers None from a read that worked. That
+        is a card out of review, not a read that saw nothing."""
+        for return_to in ("Todo", None):
+            self.assertEqual(self.read({"status": None}, return_to), (None, True))
+
     def test_a_card_in_review_or_unreadable_is_not(self):
         finding, out = self.read({"status": self.manifest.tracker.in_review_status})
         self.assertEqual((finding["class"], out), (contracts.CARD_LEFT_IN_REVIEW, False))
         for return_to in ("Todo", None):
             self.assertFalse(self.read(adapters.skipped("refused"), return_to)[1])
-            self.assertFalse(self.read({"status": None}, return_to)[1])
 
 
 class ConfirmUnknownReturn(CloseoutCase):

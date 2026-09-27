@@ -288,10 +288,12 @@ def _clear_seen_out_of_review(cfg, observed):
     """Issue #64: the audit's read of a card is a read of the runner's own, and a card it finds
     out of review is one the runner no longer holds there, whoever moved it: a Closeout whose read
     back failed, or the operator repairing a `card_left_in_review` by hand. Clearing the mark here
-    is what lets a later deliberate staging of that card stand. Nothing here may stop the run."""
+    is what lets a later deliberate staging of that card stand. Nothing here may stop the run.
+    `observed` holds readable cards only, so a None in it is a card read with no status, a
+    GitHub item with no column (issue #78), and that is out of review too."""
     in_review = cfg.manifest.tracker.in_review_status
     for task_id, status in observed.items():
-        if not status or closeout._same(status, in_review):
+        if closeout._same(status, in_review):
             continue
         try:
             record = cfg.store.get(task_id)

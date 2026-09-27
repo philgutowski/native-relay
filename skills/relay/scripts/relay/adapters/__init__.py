@@ -91,10 +91,15 @@ def unknown_baseline_move(in_review, thing):
     read before the run (issue #51). "Keeps its current status" is false here whenever the Task's
     start step ran, and there is no known status to return the card to, so the Closeout is told
     both halves and asked to hand the move to the operator rather than guess one. The runner reads
-    the card back afterwards and lists it as a check by hand if it still reads in review."""
+    the card back afterwards and lists it as a check by hand if it still reads in review.
+
+    The same sentence serves a GitHub item read with no Status set (issue #78), which is why it
+    names both causes: saying only that the read failed sent the operator after a tracker fault
+    that never happened."""
     status = "`%s`" % in_review if in_review else "its in review status"
-    return ("The runner could not read this %s's status before this run, so it has no status "
-            "to return it to, and this run's task process may have moved it to %s at its first "
+    return ("The runner could not read a status for this %s before this run, because the read "
+            "failed or no status was set, so it has no status to return it to, and this run's "
+            "task process may have moved it to %s at its first "
             "step with no process working on it now. Leave the %s where it is rather than guess a "
             "status, and say in your comment that it needs moving back to %s by hand"
             % (thing, status, thing, contracts.UNKNOWN_RETURN))

@@ -465,7 +465,16 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         `_board_lag` already does: an open, non closed issue with `status_field` declared reads
         the project board here too, so a run end audit checking many cards through plain
         `status()` made one board read per card before this. Every other adapter, and every
-        single-card caller here, passes nothing and reads fresh, same as always."""
+        single-card caller here, passes nothing and reads fresh, same as always.
+
+        With `status_field` declared, an open issue's status is its project item's alone, and
+        None when the item has no Status set or the project does not carry the issue (issue
+        #78). It used to fall back to the issue state, so an item added to the board and never
+        given a column recorded `OPEN` as its baseline, a word from another vocabulary, and a
+        blocked Closeout was told to move the item back to a column the board does not have.
+        None reads as an unknown baseline instead, which is what the Closeout's unknown
+        baseline sentence exists for. The issue state stays the status only where no board
+        column is declared, and for a closed issue, which is terminal and never a baseline."""
         payload, reason = self._issue(task_id)
         if payload is None:
             return skipped(reason)
@@ -478,7 +487,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         if reason:
             return skipped("the project board could not be read: %s" % reason)
         terminal = bool(board) and str(board).lower() == str(self._status_field).lower()
-        return {"status": board or state, "terminal": terminal, "reference": None, "skipped": None}
+        return {"status": board or None, "terminal": terminal, "reference": None, "skipped": None}
 
     def comments_since(self, task_id, baseline_comment_id):
         entries, _ = self._comments(task_id)

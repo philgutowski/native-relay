@@ -353,6 +353,37 @@ class StartStepAgreesWithCloseout(AdapterCase):
                         self.assertNotIn(phrase, text.lower())
         self.assertEqual(moved, 2)
 
+    def test_a_github_item_with_no_status_gets_the_unknown_baseline_sentence(self):
+        """Issue #78, found live: an open issue whose project item had no Status read the issue
+        state `OPEN` as its status, the launch recorded that as the baseline, and the blocked
+        Closeout was told to move the item back to `OPEN`, a column the board did not have. The
+        real adapter reads a board holding the item with no Status, and its answer goes through
+        the same record and renderer the run loop uses."""
+        board = {"items": [{"id": "PVTI_1", "content": {"type": "Issue", "number": 1,
+                                                        "title": "t", "body": "d"}}],
+                 "totalCount": 1}
+        issue = {"id": "I_1", "title": "t", "body": "d", "state": "OPEN", "comments": []}
+
+        def run(args, timeout=None):
+            if "project" in args:
+                return _Proc(0, json.dumps(board), "")
+            return _Proc(0, json.dumps(issue), "")
+
+        manifest = self.github_manifest(status_field="Done")
+        adapter = gh_adapter.GitHubAdapter(manifest, run=run)
+        read = adapter.status("1")
+        self.assertIsNone(read["status"], "the issue state stood in for an empty board status")
+        baseline = closeout.launch_baseline(manifest, {}, read["status"])
+        after = self.card_after_task(manifest)
+        for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
+            with self.subTest(outcome=outcome):
+                text = self.closeout_text(manifest, adapter, outcome, baseline)
+                self.assertIn(adapters.unknown_baseline_move(after, "project item"), text)
+                self.assertNotIn("back to `", text, "no status to move to may be named")
+                for word in ("OPEN", "CLOSED"):
+                    self.assertNotIn("`%s`" % word, text,
+                                     "an issue state was named as a board status")
+
 
 class _JsonOpener:
     """One canned JSON answer for every request, with the URLs kept for the assertions."""
