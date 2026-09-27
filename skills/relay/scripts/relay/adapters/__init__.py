@@ -100,21 +100,29 @@ def unknown_baseline_move(in_review, thing):
             % (thing, status, thing, contracts.UNKNOWN_RETURN))
 
 
-def board_lag(adapter, task_id):
+def board_lag(adapter, task_id, cache=None):
     """Returns (lag, reason) for a landed task's board item, or (None, None) for an adapter
     with nothing to check (issue #43).
 
     Only GitHub keeps two truths about one card, the issue's state and its project item's
     status, and `status` answers terminal from the first alone. The read lives behind a private
     method rather than a tenth interface method because it is GitHub's alone: Jira and markdown
-    have one status per card, so there is nothing for them to disagree with."""
+    have one status per card, so there is nothing for them to disagree with.
+
+    `cache`, when given, is a dict the adapter may keep its one full board read in and reuse
+    across a batch of calls (issue #61): the run end audit checks every landed task's item in
+    one pass, and without a shared cache that pass made one full board read per card rather than
+    one for the whole audit. `None`, the default, is every existing single-card caller: a
+    Closeout confirming the one card it just landed reads the board itself, same as before."""
     read = getattr(adapter, "_board_lag", None)
     if read is None:
         return None, None
     # A raise is a reason like any other failed read, so both callers report it rather than
     # turning a report into a halt.
     try:
-        return read(task_id)
+        if cache is None:
+            return read(task_id)
+        return read(task_id, cache=cache)
     except Exception as exc:
         return None, "the board read raised: %s" % exc
 

@@ -30,7 +30,8 @@ def _finding(klass, task_id, text, card_status=None, record_status=None):
             "card_status": card_status, "record_status": record_status}
 
 
-def build(manifest, store, adapter, env=None, live=False, records=None, observed=None):
+def build(manifest, store, adapter, env=None, live=False, records=None, observed=None,
+          item_seen=None):
     """The audit as data: a list of findings, empty when every card agrees.
 
     `live` is whether a Runner is driving this manifest now. Under a live run a record in flight
@@ -46,6 +47,12 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
     `observed`, when a dict, is filled with the status each readable card answered, keyed by task
     id. The Runner uses it to clear `card_in_review_by_run` on a card it has now seen out of
     review (issue #64); this module still writes nothing.
+
+    `item_seen`, when a dict, is filled `True` for a landed task whose project item read cleanly
+    at the terminal status (issue #61). The Runner uses it to retire `confirm_board_terminal`'s
+    own record finding, the way it clears `card_in_review_by_run` above; nothing here writes it.
+    Every landed task's item read shares one `board_cache` for the pass, so a run with many
+    landed cards makes one full board read rather than one per card.
     """
     try:
         records = dict(records if records is not None else store.records())
@@ -61,6 +68,7 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
         head = None
 
     findings = []
+    board_cache = {}
     for task in manifest.tasks:
         task_id = task.id
         record = records.get(task_id) or {}
@@ -98,9 +106,11 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
                 % (task_id, (record.get("landing_ref") or "an unrecorded reference")[:12],
                    status), status, record_status))
         elif record_status == contracts.STATUS_LANDED:
-            finding = _item_lag(adapter, task_id, status, record_status)
+            finding = _item_lag(adapter, task_id, status, record_status, cache=board_cache)
             if finding:
                 findings.append(finding)
+            elif item_seen is not None:
+                item_seen[task_id] = True
         elif terminal and record_status != contracts.STATUS_LANDED:
             if _landed_by_hand(repo, record, head, task_id):
                 continue
@@ -112,12 +122,15 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
     return findings
 
 
-def _item_lag(adapter, task_id, status, record_status):
+def _item_lag(adapter, task_id, status, record_status, cache=None):
     """Issue #43, the between runs half of `closeout.confirm_board_terminal`: a landed record on
     a terminal card whose project item does not read the terminal status. GitHub answers terminal
     from a closed issue alone, so `status` here is `CLOSED` and the item's column is invisible
-    without its own read. An adapter with one status per card has nothing to add."""
-    lag, reason = adapters.board_lag(adapter, task_id)
+    without its own read. An adapter with one status per card has nothing to add.
+
+    `cache` (issue #61) is `build`'s one dict for the whole pass, so every landed task's read
+    shares the one full board read GitHub's adapter makes into it rather than one each."""
+    lag, reason = adapters.board_lag(adapter, task_id, cache=cache)
     if reason:
         return _finding(contracts.AUDIT_UNREADABLE, task_id,
                         "%s's project item could not be read: %s" % (task_id, reason),

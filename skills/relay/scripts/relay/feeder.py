@@ -724,12 +724,40 @@ def pin_plan(tree, home, manifest):
                behind_origin=bool(remote) and not gitread.is_ancestor(tree, remote, sha))
 
 
+# A partial folder's own `finally` covers an exception mid extract, never a kill or a power
+# loss: neither leaves Python's cleanup code a turn to run. Left alone, one of those sits beside
+# the extracts forever. Swept here at a day old (issue #61), so a partial another `--pin` is
+# writing to right now, whose mtime `tar` keeps moving forward, is never mistaken for one.
+PARTIAL_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def sweep_partials(destination, now=None):
+    """Remove every `<name>.partial-<pid>` directory beside `destination` older than a day."""
+    now = time.time() if now is None else now
+    parent = os.path.dirname(destination)
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return
+    for name in entries:
+        if ".partial-" not in name:
+            continue
+        path = os.path.join(parent, name)
+        try:
+            age = now - os.stat(path).st_mtime
+        except OSError:
+            continue
+        if age > PARTIAL_MAX_AGE_SECONDS:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def pin_extract(tree, pin, run=subprocess.run):
     """Extract `pin.sha` from the repository at `tree` into `pin.destination` and return the
     directory. The directory is named for the sha, so it is the same directory every time the
     default branch is at the same commit, and an existing one that holds the runner is reused
     untouched, since a feeder may be running from it."""
     destination = pin.destination
+    sweep_partials(destination)
     if not os.path.isfile(_extract_entry(destination)):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         partial = "%s.partial-%d" % (destination, os.getpid())

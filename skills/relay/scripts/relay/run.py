@@ -242,9 +242,10 @@ def _audit_cards(cfg):
     audit is one finding on the run, and a failure writing it costs the record and not the
     terminal record that follows."""
     observed = {}
+    item_seen = {}
     try:
         findings = audit.build(cfg.manifest, cfg.store, cfg.adapter, env=cfg.env, live=False,
-                               observed=observed)
+                               observed=observed, item_seen=item_seen)
     except Exception as exc:
         findings = [{"class": contracts.AUDIT_FAILED, "task": None,
                      "text": "the card audit failed: %s" % exc,
@@ -254,12 +255,33 @@ def _audit_cards(cfg):
     except Exception:
         pass
     _clear_seen_out_of_review(cfg, observed)
+    _retire_confirmed_item_findings(cfg, item_seen)
     if cfg.stream is not None:
         for line in audit.lines(findings):
             try:
                 cfg.stream(line)
             except Exception:
                 pass
+
+
+def _retire_confirmed_item_findings(cfg, item_seen):
+    """Issue #61: `closeout.confirm_board_terminal` writes its finding once, at the landed
+    Closeout, and nothing before this cleared it once the operator moved the item by hand. The
+    run end audit's own read of the same item is the read that retires it, the same shape #64
+    already gave the in review mark: a card the audit has now seen at the terminal status is
+    one the record should stop naming. Nothing here may stop the run."""
+    for task_id, seen in item_seen.items():
+        if not seen:
+            continue
+        try:
+            record = cfg.store.get(task_id)
+            findings = (record or {}).get("findings") or []
+            kept = [finding for finding in findings
+                   if finding.get("class") != contracts.BOARD_ITEM_NOT_TERMINAL]
+            if len(kept) != len(findings):
+                cfg.store.upsert(task_id, findings=kept)
+        except Exception:
+            pass
 
 
 def _clear_seen_out_of_review(cfg, observed):

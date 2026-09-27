@@ -1,5 +1,5 @@
 ---
-title: tests/_repo.make_repo always sets origin/HEAD, so a default branch fallback passed every test and still returns None on the real native-relay checkout
+title: tests/_repo.make_repo always sets origin/HEAD, but three tests in test_feeder_pin.py already delete it to cover the real checkout's fallback
 date: 2026-09-27
 category: logic-errors
 module: feeder
@@ -15,7 +15,7 @@ symptoms:
 tags: [stub-cli, fixture-fidelity, origin-head, default-branch, first-live-run, self-hosted-checkout]
 ---
 
-# tests/_repo.make_repo always sets origin/HEAD, so a default branch fallback passed every test and still returns None on the real native-relay checkout
+# tests/_repo.make_repo always sets origin/HEAD, but three tests in test_feeder_pin.py already delete it to cover the real checkout's fallback
 
 ## Problem
 
@@ -36,13 +36,20 @@ pointed at a different repository hits the fallback, gets `None`, and refuses wi
 
 ## What Didn't Work
 
-**The full suite, 1505 tests, green.** `tests/_repo.make_repo` is the one fixture every test
-in the suite uses to build a working repository, and it always runs
-`git remote set-head origin main` (`tests/_repo.py:50`) as part of building the bare origin and
-pushing to it. So every test that exercises `gitread.default_branch`, or anything that falls
-back to it, sees the ref present and resolvable. No test in the suite can produce the state the
-operator's own checkout is actually in, because the fixture always does the one step a real
-checkout may never have done.
+**A first read of the full suite, 1505 tests, green, taken as proof the fallback was
+untested.** `tests/_repo.make_repo` is the one fixture nearly every test in the suite uses to
+build a working repository, and it always runs `git remote set-head origin main`
+(`tests/_repo.py:50`) as part of building the bare origin and pushing to it, so most tests that
+touch `gitread.default_branch` see the ref present and resolvable. Read alone, that looked like
+no test in the suite could produce the state the operator's own checkout was actually in.
+
+That read overstates it. `tests/test_feeder_pin.py` already deletes the ref, with
+`git remote set-head origin -d`, in three places: `Unresolvable.test_no_default_branch_anywhere_is_refused_with_a_sentence`,
+`Unresolvable.test_another_repo_and_no_origin_head_is_refused_with_the_fix`, and
+`Verb.test_pin_refuses_when_the_default_branch_cannot_be_resolved`. Each builds a repository with
+`make_repo` and then undoes the one step that closes the gap, so `pin_plan`'s fallback path and
+its refusal sentence are exercised on exactly the state the operator's checkout was in, and the
+suite already covers them.
 
 ## Solution
 
@@ -50,20 +57,21 @@ Not fixed by task 48, and not a defect in what it landed. `pin_plan`'s refusal i
 behavior: it names the exact command that resolves the gap, and a self hosted manifest that
 names `project.default_branch` is unaffected, since that path never reaches
 `gitread.default_branch` at all. The task's own closing comment recorded the same operator
-note. This doc exists so the next session that touches a default branch lookup does not read
-1505 green tests as proof the fallback works on a real checkout.
+note. This doc exists so the next session that touches a default branch lookup checks
+`test_feeder_pin.py`'s pattern of deleting the ref by hand, rather than assuming a green suite
+alone means the fallback is untested.
 
 ## Why This Works
 
 This is the same shape as
 `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`,
 one layer down: not a stubbed CLI agreeing with its own parser, but a fixture repository
-agreeing with its own consumer. `tests/_repo.make_repo` was written to give every test a
-repository that behaves the way the code expects a repository to behave, and
-`git remote set-head origin main` is a completely reasonable thing to include in "a repository
-that behaves normally." It just means the fixture can never exercise the one gap that made
-task 48 refuse on the operator's own machine, because the fixture closes that gap every time it
-runs.
+agreeing with its own consumer, everywhere a test builds one and stops there.
+`tests/_repo.make_repo` was written to give every test a repository that behaves the way the
+code expects a repository to behave, and `git remote set-head origin main` is a completely
+reasonable thing to include in "a repository that behaves normally." A test that wants the gap
+`make_repo` closes has to reopen it by hand afterward, the way `test_feeder_pin.py` already
+does; a test built on the fixture alone, with no such step, cannot exercise it.
 
 ## Prevention
 

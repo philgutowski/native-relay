@@ -102,7 +102,14 @@ class GitHubAdapter:
         except ValueError as exc:
             return None, "gh returned output that is not JSON: %s" % exc
 
-    def _board(self):
+    def _board(self, cache=None):
+        """`cache`, when given, is a dict this read may reuse across a batch of calls (issue
+        #61): the run end audit checks many landed cards in one pass, and each call used to make
+        its own `gh project item-list`, bounding the pass at 30 seconds times the landed count
+        rather than once. A single-card caller passes nothing and reads fresh every time, same
+        as before."""
+        if cache is not None and "board" in cache:
+            return cache["board"]
         payload, reason = self._gh([
             "gh", "project", "item-list", str(self._project_number),
             "--owner", str(self._owner), "--format", "json",
@@ -111,12 +118,13 @@ class GitHubAdapter:
             # had moved was still classified partial_landing.
             "--limit", str(PROJECT_ITEM_LIMIT),
         ])
-        if payload is None:
-            return None, reason
-        return payload, None
+        result = (None, reason) if payload is None else (payload, None)
+        if cache is not None:
+            cache["board"] = result
+        return result
 
-    def _items(self):
-        payload, reason = self._board()
+    def _items(self, cache=None):
+        payload, reason = self._board(cache=cache)
         if payload is None:
             return [], reason
         return payload.get("items") or [], None
@@ -138,7 +146,7 @@ class GitHubAdapter:
                 return item.get("status"), None
         return None, None
 
-    def _project_item(self, task_id):
+    def _project_item(self, task_id, cache=None):
         """Returns (on_board, status, reason) for this repository's issue on the declared project.
 
         Stricter than `_project_status` in two ways, because its answer is reported rather than
@@ -150,7 +158,7 @@ class GitHubAdapter:
         repository, reason = self._repository_name()
         if reason:
             return False, None, reason
-        payload, reason = self._board()
+        payload, reason = self._board(cache=cache)
         if reason:
             return False, None, reason
         items = payload.get("items") or []
@@ -179,17 +187,20 @@ class GitHubAdapter:
             self._repository = identity["name"]
         return self._repository, None
 
-    def _board_lag(self, task_id):
+    def _board_lag(self, task_id, cache=None):
         """Issue #43. Returns (lag, reason): `lag` names the item's status and the terminal one
         when the issue's item on the declared project reads anything but `status_field`.
 
         `status()` stops at a closed issue and never reads the board, so a Closeout that closed
         the issue and skipped or failed the item edit landed with the item still in review and
         nothing reported. This is the read that notices. An issue the project does not carry has
-        no item to lag, and no `status_field` means no board column is declared terminal."""
+        no item to lag, and no `status_field` means no board column is declared terminal.
+
+        `cache` (issue #61) is passed straight through to `_project_item`; see `_board` for what
+        it saves."""
         if not self._status_field:
             return None, None
-        on_board, status, reason = self._project_item(task_id)
+        on_board, status, reason = self._project_item(task_id, cache=cache)
         if reason:
             return None, reason
         if not on_board or (status and str(status).lower() == str(self._status_field).lower()):
