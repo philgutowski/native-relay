@@ -192,7 +192,7 @@ FINDING_ROWS = {
     contracts.CARD_LEFT_IN_REVIEW: (
         {"task": "T-1", "card_status": "In Progress", "return_to": "Todo",
          "evidence": "the card reads In Progress after the closeout"},
-        "closeout.confirm_card_returned, after a Closeout told to return a blocked or halted card",
+        "closeout.read_back, after a Closeout told to return a blocked or halted card",
     ),
     contracts.BOARD_ITEM_NOT_TERMINAL: (
         {"task": "T-1", "card_status": "In review", "terminal_status": "Done",

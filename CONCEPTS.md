@@ -302,8 +302,8 @@ That status is the baseline the record keeps across a relaunch (issues #51 and #
 of a card an earlier attempt left in review reads in review, and recording that would read as the
 operator's staging, which is never undone, so the card would never go back. The Runner tells the
 two apart from its own reads, not from an audit: every launch marks the record, because the Task
-moves the card at its first step, and only a read back after a Closeout that finds the card out
-of review clears the mark. With the mark set, an in review read keeps the earlier baseline; with
+moves the card at its first step, and only a read of the card that finds it out of review clears
+the mark: the read back after a Closeout, or the run end audit. With the mark set, an in review read keeps the earlier baseline; with
 it clear, the operator put the card there and it stays. A status other than in review is the
 operator's move and wins either way.
 

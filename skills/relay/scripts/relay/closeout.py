@@ -398,11 +398,6 @@ def _same(a, b):
     return bool(a) and bool(b) and str(a).lower() == str(b).lower()
 
 
-def confirm_card_returned(adapter, manifest, task_id, return_to):
-    """The finding half of `read_back`, for a caller with no record to update."""
-    return read_back(adapter, manifest, task_id, return_to)[0]
-
-
 def read_back(adapter, manifest, task_id, return_to):
     """R4 of the stale cards plan: after a Closeout told to return the card, read it back.
     Returns `(finding, out_of_review)`. The finding comes when the card still reads the in review

@@ -272,6 +272,21 @@ class Heartbeat(StateCase):
         self.assertEqual((evidence["cause"], evidence["previous_holder"]["holder_pid"]),
                          ("interrupted", 100))
         self.assertEqual(store.mark_in_flight_crashed("interrupted"), ())
+        self.assertIsNotNone(store.get("T-1")["ended_at"])
+
+    def test_marking_on_the_way_out_leaves_another_holders_records_alone(self):
+        """A runner that lost its stale lease to another and then left must not mark the new
+        holder's live records. A free lease is the interrupt's shape and is marked."""
+        dead = self.store(pid=100)
+        dead.acquire()
+        self.store(pid=200).break_lease()
+        live = self.store(pid=200)
+        live.acquire()
+        live.upsert("T-2", status=contracts.STATUS_RUNNING)
+        self.assertEqual(dead.mark_in_flight_crashed("interrupted"), ())
+        self.assertEqual(live.get("T-2")["status"], contracts.STATUS_RUNNING)
+        live.release()
+        self.assertEqual(dead.mark_in_flight_crashed("interrupted"), ("T-2",))
 
 
 class Records(StateCase):

@@ -30,7 +30,7 @@ def _finding(klass, task_id, text, card_status=None, record_status=None):
             "card_status": card_status, "record_status": record_status}
 
 
-def build(manifest, store, adapter, env=None, live=False, records=None):
+def build(manifest, store, adapter, env=None, live=False, records=None, observed=None):
     """The audit as data: a list of findings, empty when every card agrees.
 
     `live` is whether a Runner is driving this manifest now. Under a live run a record in flight
@@ -42,6 +42,10 @@ def build(manifest, store, adapter, env=None, live=False, records=None):
     `records` lets a caller hand in the store's records rather than take a second read. A
     failure reading git or the store is one finding on the run, never an exception out of here:
     an audit that raised would turn a report into a halt.
+
+    `observed`, when a dict, is filled with the status each readable card answered, keyed by task
+    id. The Runner uses it to clear `card_in_review_by_run` on a card it has now seen out of
+    review (issue #64); this module still writes nothing.
     """
     try:
         records = dict(records if records is not None else store.records())
@@ -72,6 +76,8 @@ def build(manifest, store, adapter, env=None, live=False, records=None):
                 None, record_status))
             continue
         status = card.get("status")
+        if observed is not None:
+            observed[task_id] = status
         terminal = bool(card.get("terminal"))
         in_flight = record_status in contracts.IN_FLIGHT_STATUSES
 

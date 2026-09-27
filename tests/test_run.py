@@ -2914,8 +2914,14 @@ class _BoardRoutes:
         record with no audit. The record in flight is marked the way a reclaim marks it, and
         the relaunch keeps the status the first launch read."""
         from unittest import mock
+
+        def interrupted(*_args, **_kwargs):
+            # The launch's own signal handler releases the lease before it raises.
+            self.store().release()
+            raise KeyboardInterrupt()
+
         self.task_moves_card("blocked.jsonl", branch=False)
-        with mock.patch.object(runner, "_complete_task", side_effect=KeyboardInterrupt):
+        with mock.patch.object(runner, "_complete_task", side_effect=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 self.go_board()
         record = self.store().get("T-1")
@@ -2954,6 +2960,25 @@ class _BoardRoutes:
         self.assertNotIn("back to", self.brief(".closeout").lower())
         self.assertEqual(self.card(), self.IN_REVIEW)
         self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
+    def test_a_card_moved_by_hand_after_a_leftover_can_be_staged_on_purpose(self):
+        """Issue #64, from the code review. The operator fixed a `card_left_in_review` by hand
+        and a later run's audit read the card out of review. That read is the runner's own, so a
+        deliberate staging after it stands, the way the audit inference treated it."""
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked on the design question")
+        self.go_board()
+        self.assertTrue(self.store().get("T-1")["card_in_review_by_run"])
+        self.set_card("T-1", self.BASELINE)
+        self.go_board()
+        self.assertFalse(self.store().get("T-1")["card_in_review_by_run"])
+
+        self.set_card("T-1", self.IN_REVIEW)
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again")
+        self.go_board(retry_blocked=True)
+        self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], self.IN_REVIEW)
+        self.assertEqual(self.card(), self.IN_REVIEW)
 
     def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):
         self.task_moves_card("blocked.jsonl")
@@ -3253,6 +3278,18 @@ class TripleCoordinator(RunCase):
         create_worker.assert_not_called()
         launch_worker.assert_not_called()
         release.assert_called_once()
+
+    def test_a_runner_leaving_on_an_error_names_no_interrupt(self):
+        """Issue #64, from the code review: the cause is the exception on its way out."""
+        store = self.store()
+        store.acquire()
+        store.upsert("T-1", status=contracts.STATUS_RUNNING)
+        with self.assertRaises(RuntimeError):
+            try:
+                raise RuntimeError("a full disk")
+            finally:
+                runner._mark_in_flight_crashed(store)
+        self.assertEqual(store.get("T-1")["halt_evidence"]["cause"], state.CRASH_EXITED)
 
     def test_a_jira_triple_records_each_cards_status_from_before_its_start_transition(self):
         """Issue #51. The Jira coordinator moves every card to in review before any worker

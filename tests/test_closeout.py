@@ -795,7 +795,7 @@ class ConfirmUnknownReturn(CloseoutCase):
 
     def confirm(self, status):
         adapter = FakeAdapter(statuses={"T-1": status})
-        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", None)
+        return closeout.read_back(adapter, self.manifest, "T-1", None)[0]
 
     def test_a_card_left_in_review_names_the_todo_status(self):
         finding = self.confirm({"status": self.manifest.tracker.in_review_status})
@@ -816,7 +816,7 @@ class ConfirmCardReturned(CloseoutCase):
 
     def confirm(self, statuses):
         adapter = FakeAdapter(statuses=statuses)
-        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", "Todo")
+        return closeout.read_back(adapter, self.manifest, "T-1", "Todo")[0]
 
     def test_a_card_back_at_its_status_confirms(self):
         self.assertIsNone(self.confirm({"T-1": {"status": "Todo"}}))
@@ -838,6 +838,6 @@ class ConfirmCardReturned(CloseoutCase):
             def status(self, task_id):
                 raise RuntimeError("down")
 
-        finding = closeout.confirm_card_returned(Exploding(), self.manifest, "T-1", "Todo")
+        finding, _out = closeout.read_back(Exploding(), self.manifest, "T-1", "Todo")
         self.assertEqual(finding["class"], contracts.CARD_LEFT_IN_REVIEW)
         self.assertIn("down", finding["evidence"])

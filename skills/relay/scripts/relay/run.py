@@ -26,6 +26,7 @@ The runner never writes to the tracker (R19). Every tracker write in this file h
 closeout process the runner launched; the runner reads the result back and decides from it.
 """
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -232,8 +233,10 @@ def _audit_cards(cfg):
     writes the findings under the Lease. Nothing here may stop the run: a failure inside the
     audit is one finding on the run, and a failure writing it costs the record and not the
     terminal record that follows."""
+    observed = {}
     try:
-        findings = audit.build(cfg.manifest, cfg.store, cfg.adapter, env=cfg.env, live=False)
+        findings = audit.build(cfg.manifest, cfg.store, cfg.adapter, env=cfg.env, live=False,
+                               observed=observed)
     except Exception as exc:
         findings = [{"class": contracts.AUDIT_FAILED, "task": None,
                      "text": "the card audit failed: %s" % exc,
@@ -242,12 +245,30 @@ def _audit_cards(cfg):
         cfg.store.write_audit(findings)
     except Exception:
         pass
+    _clear_seen_out_of_review(cfg, observed)
     if cfg.stream is not None:
         for line in audit.lines(findings):
             try:
                 cfg.stream(line)
             except Exception:
                 pass
+
+
+def _clear_seen_out_of_review(cfg, observed):
+    """Issue #64: the audit's read of a card is a read of the runner's own, and a card it finds
+    out of review is one the runner no longer holds there, whoever moved it: a Closeout whose read
+    back failed, or the operator repairing a `card_left_in_review` by hand. Clearing the mark here
+    is what lets a later deliberate staging of that card stand. Nothing here may stop the run."""
+    in_review = cfg.manifest.tracker.in_review_status
+    for task_id, status in observed.items():
+        if not status or closeout._same(status, in_review):
+            continue
+        try:
+            record = cfg.store.get(task_id)
+            if record and record.get("card_in_review_by_run"):
+                cfg.store.upsert(task_id, card_in_review_by_run=False)
+        except Exception:
+            pass
 
 
 LEASE_POLL_SECONDS = 60
@@ -613,6 +634,9 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
     leases = ()
     workers = ()
     wrote_terminal = False
+    # `_triple_halt` writes its terminal and returns without setting `wrote_terminal`, so the
+    # `finally` tells this run's terminal from an earlier run's by comparing against this one.
+    prior_terminal = (store.read() or {}).get("terminal")
     tracker = _triple_tracker(manifest)
     try:
         # The pre-read is retained as durable evidence, but only the exact re-read after the
@@ -802,22 +826,28 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                 stream("triple remote lease retained: %s" % released.reason)
         elif leases and stream is not None:
             stream("triple remote lease retained: a worker process group may still be running")
-        if not wrote_terminal and not ((store.read() or {}).get("terminal")):
+        if not wrote_terminal and (store.read() or {}).get("terminal") == prior_terminal:
             try:
                 _write_terminal(store, env, contracts.RUN_CRASHED)
             except Exception:
                 pass
-            _mark_in_flight_crashed(store)
+            # A worker that may still be running is still driving its record.
+            if _triple_workers_stopped(workers):
+                _mark_in_flight_crashed(store)
         store.release()
 
 
 def _mark_in_flight_crashed(store):
     """Issue #64: a Runner leaving without a terminal record, an interrupt from the keyboard most
     often, drives nothing it launched any more. Its records in flight are marked the way a
-    reclaim marks them, so none is left reading running with no process behind it. Best effort,
-    like the terminal write before it: the exception already on its way out is the one to keep."""
+    reclaim marks them, so none is left reading running with no process behind it. Called from a
+    `finally`, where the exception on its way out names the cause. Best effort, like the terminal
+    write before it: that exception is the one to keep."""
+    leaving = sys.exc_info()[1]
+    cause = (state.CRASH_INTERRUPTED if isinstance(leaving, KeyboardInterrupt)
+             else state.CRASH_EXITED)
     try:
-        store.mark_in_flight_crashed(state.CRASH_INTERRUPTED)
+        store.mark_in_flight_crashed(cause)
     except Exception:
         pass
 

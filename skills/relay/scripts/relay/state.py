@@ -42,6 +42,7 @@ RECORD_FIELDS = (
 CRASH_RECLAIMED = "lease_reclaimed"
 CRASH_LEASE_BROKEN = "lease_broken"
 CRASH_INTERRUPTED = "interrupted"
+CRASH_EXITED = "exited_without_terminal"
 
 
 @dataclass
@@ -458,7 +459,13 @@ class StateStore:
     def break_lease(self):
         """Operator only (`relay lease --break`): clear both leases regardless of holder. Every
         record in flight is marked as a reclaim marks it (issue #64), since the holder those
-        records belonged to no longer owns them. Returns the marked ids."""
+        records belonged to no longer owns them. Returns the marked ids.
+
+        A live holder is marked too, deliberately. The break is the operator saying the holder
+        is gone, and one that is not finds its heartbeat refused and halts its own Task as
+        runner_crashed at that point, so the early mark names the class the record ends on.
+        Leaving the mark to a stale lease alone would leave a runner that died inside its lease's
+        lifetime, the usual reason to break one, reading running with nothing behind it."""
         marked = {}
 
         def fn(state):
@@ -478,13 +485,24 @@ class StateStore:
     def mark_in_flight_crashed(self, cause=CRASH_INTERRUPTED):
         """Issue #64: the Runner's own way out when it wrote no terminal record, an interrupt from
         the keyboard most often. Nothing it launched is still being driven, so its records in
-        flight are marked the way a reclaim would mark them. Returns the marked ids."""
-        marked = {}
+        flight are marked the way a reclaim would mark them. Returns the marked ids.
+
+        Only while the lease is this process's or free. Free is the interrupt's own shape: the
+        launch's signal handler releases the lease before the interrupt reaches the run loop. A
+        lease somebody else holds means a runner that reclaimed this one's stale lease is driving
+        the records in flight now, and they are not this process's to mark.
+
+        Unlike a reclaim or a break, the moment of marking is when the work stopped, so the
+        ending is stamped."""
+        marked = {"ids": ()}
 
         def fn(state):
+            lease = state.get("lease")
+            if lease and not self._is_mine(lease):
+                return
             marked["ids"] = self._mark_crashed(state, self._holder(), cause)
 
-        self._mutate(fn, explicit={"ended_at"})
+        self._mutate(fn)
         return marked["ids"]
 
     def lease(self):
