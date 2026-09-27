@@ -17,8 +17,10 @@ from types import SimpleNamespace
 import _paths
 from _fakes import FakeAdapter
 import _repo
-from relay import (summary as summary_module, backends, classify, closeout, contracts, gitread, gitwrite, launch,
-                   manifest as mf, run as runner, state, verify)
+from test_adapters import STAY_PUT
+from relay import (summary as summary_module, adapters, audit, backends, classify, closeout, contracts, gitread,
+                   gitwrite, launch, manifest as mf, run as runner, state, verify)
+from relay.adapters import github as github_adapter, jira as jira_adapter
 
 TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
 
@@ -2431,6 +2433,350 @@ class AuditUnderMarkdown(RunCase):
         self.assertNotIn(contracts.CARD_LEFT_IN_REVIEW,
                          [f["class"] for f in blocked["findings"]])
         self.assertNotIn("stale", seen[-1])
+
+
+# Issue #13. The default manifest above runs the markdown adapter, whose card is an open box or
+# a checked one, so a card sitting in review is a state no RunCase can produce. The cases below
+# run the loop against the real GitHub and Jira adapters with only their read side replaced by a
+# board in a directory. The stub's Task and Closeout scripts write that directory the way a real
+# process writes a board, and `closeout_instructions` stays the production text, so the closeout
+# brief the loop renders carries the sentence a real Closeout would be given.
+
+class BoardReads:
+    """The read half of an adapter, answered from files: `<id>.status` holds the status name,
+    `<id>.comments` one comment per line, and an `<id>.unreadable` file makes every read of that
+    card fail the way a real one does, as a skip rather than an exception. Mixed in ahead of a
+    real adapter class, so every method it does not name is that adapter's own."""
+
+    def __init__(self, manifest, root, **transport):
+        super().__init__(manifest, **transport)
+        self._root = root
+        self._leaks = []
+        # Terminal the way each real adapter reads it: GitHub by its board's status_field
+        # option alone, Jira by done_statuses.
+        tracker = manifest.tracker
+        done = (tracker.status_field,) if tracker.adapter == "github" else tracker.done_statuses
+        self._done = {str(name).lower() for name in done}
+
+    def _leak(self, what):
+        """A read that got past the board to the real transport. Recorded rather than only
+        raised, because the run loop and the audit swallow an exception from a read, and the
+        case's tearDown fails on anything recorded here."""
+        self._leaks.append(what)
+        raise AssertionError("the file board should answer every read; reached %s" % what)
+
+    def _file(self, task_id, kind):
+        return os.path.join(self._root, "%s.%s" % (task_id, kind))
+
+    def _unreadable(self, task_id):
+        return os.path.exists(self._file(task_id, "unreadable"))
+
+    def _comments(self, task_id):
+        try:
+            with open(self._file(task_id, "comments")) as handle:
+                lines = [line.rstrip("\n") for line in handle if line.strip()]
+        except FileNotFoundError:
+            return []
+        return [{"id": str(n), "body": body, "created": None} for n, body in enumerate(lines, 1)]
+
+    def candidates(self):
+        return []
+
+    def ready(self, source):
+        return [], "the file board has no ready read"
+
+    def read(self, task_id):
+        if self._unreadable(task_id):
+            return {"id": task_id, "skipped": "the board refused the read"}
+        return {"id": task_id, "title": "task %s" % task_id, "description": "",
+                "status": self.status(task_id)["status"]}
+
+    def status(self, task_id):
+        if self._unreadable(task_id):
+            return adapters.skipped("the board refused the read")
+        with open(self._file(task_id, "status")) as handle:
+            name = handle.read().strip()
+        return {"status": name, "terminal": name.lower() in self._done, "reference": None,
+                "skipped": None}
+
+    def comments_since(self, task_id, baseline_comment_id):
+        if self._unreadable(task_id):
+            return []
+        entries = self._comments(task_id)
+        if baseline_comment_id is None:
+            return entries
+        ids = [entry["id"] for entry in entries]
+        baseline = str(baseline_comment_id)
+        return entries[ids.index(baseline) + 1:] if baseline in ids else []
+
+    def closing_reference(self, task_id, ref):
+        for entry in self._comments(task_id):
+            if adapters.reference_hit(entry["body"], ref):
+                return entry["id"]
+        return None
+
+
+class _LeakOpener:
+    def __init__(self, board):
+        self.board = board
+
+    def open(self, request, timeout=None):
+        return self.board._leak("Jira at %s" % request.get_full_url())
+
+
+class GitHubBoard(BoardReads, github_adapter.GitHubAdapter):
+    def __init__(self, manifest, root):
+        super().__init__(manifest, root,
+                         run=lambda args, timeout=None: self._leak(" ".join(args)))
+
+
+class JiraBoard(BoardReads, jira_adapter.JiraAdapter):
+    def __init__(self, manifest, root):
+        super().__init__(manifest, root, opener=_LeakOpener(self),
+                         env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
+
+
+BOARD_TRACKER = """[tracker]
+adapter = "markdown"
+file = "tracker.md"
+done_statuses = ["closed"]
+in_review_status = "in review"
+"""
+
+# One task is enough: every scenario below is about what happens to one card.
+BOARD_TASKS = '[[tasks]]\nid = "T-1"\nmodel = "sonnet"\neffort = "low"\n'
+
+# The Task's start step, then the branch. The Closeout's moves come after the comment it makes.
+TASK_MOVES_CARD_SH = """set -e
+printf '%s' > "$RELAY_BOARD/%s.status"
+"""
+CLOSEOUT_COMMENTS_SH = """set -e
+echo "%s" >> "$RELAY_BOARD/%s.comments"
+"""
+CLOSEOUT_MOVES_SH = """printf '%s' > "$RELAY_BOARD/%s.status"
+"""
+CLOSEOUT_LANDS_SH = """set -e
+printf '%s' > "$RELAY_BOARD/%s.status"
+echo "Landed at $(git rev-parse origin/main)" >> "$RELAY_BOARD/%s.comments"
+"""
+
+
+class _BoardRoutes:
+    """The status transition routes of the run loop, against a card that really moves. Mixed
+    into one case per adapter below; `TRACKER`, `BASELINE`, `IN_REVIEW`, `DONE`, and `BOARD`
+    come from there."""
+
+    def setUp(self):
+        super().setUp()
+        self.board_dir = os.path.join(self.tmp.name, "board")
+        os.makedirs(self.board_dir)
+        self.set_card("T-1", self.BASELINE)
+        self.write_board_manifest()
+        self.lines = []
+
+    def tearDown(self):
+        leaks = self.adapter._leaks
+        super().tearDown()
+        self.assertEqual(leaks, [], "a read reached the real transport past the file board")
+
+    def write_board_manifest(self, continue_past=False, gate=None):
+        text = MANIFEST.replace("__REPO__", self.repo).replace(BOARD_TRACKER, self.TRACKER)
+        text = text[:text.index("[[tasks]]")] + BOARD_TASKS
+        if continue_past:
+            text += "\n[on_halt]\ncontinue_past_task_halt = true\n"
+        if gate is not None:
+            text = text.replace('command = ["true"]', "command = %s" % json.dumps(list(gate)))
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text)
+        self.manifest = mf.load(self.manifest_path)
+        self.assertEqual(self.manifest.tracker.adapter, self.ADAPTER)
+        self.adapter = self.BOARD(self.manifest, self.board_dir)
+
+    def base_env(self):
+        return dict(super().base_env(), RELAY_BOARD=self.board_dir)
+
+    def set_card(self, task_id, status):
+        with open(os.path.join(self.board_dir, task_id + ".status"), "w") as handle:
+            handle.write(status)
+
+    def card(self, task_id="T-1"):
+        with open(os.path.join(self.board_dir, task_id + ".status")) as handle:
+            return handle.read()
+
+    def task_moves_card(self, fixture, task_id="T-1"):
+        start = TASK_MOVES_CARD_SH % (self.IN_REVIEW, task_id)
+        self.queue_entry(fixture, start + task_branch_sh(task_id))
+
+    def closeout(self, comment, move_to=None, unreadable=False, task_id="T-1"):
+        script = CLOSEOUT_COMMENTS_SH % (comment, task_id)
+        if move_to:
+            script += CLOSEOUT_MOVES_SH % (move_to, task_id)
+        if unreadable:
+            script += 'touch "$RELAY_BOARD/%s.unreadable"\n' % task_id
+        self.queue_entry("closeout_skipped.jsonl", script)
+
+    def go_board(self, expect=runner.EXIT_OK):
+        seen = []
+        outcome = self.go(adapter=self.adapter, notifier=seen.append, stream=self.lines.append)
+        self.assertEqual(outcome.exit_code, expect, outcome.message)
+        return seen
+
+    def brief(self, suffix):
+        with open(self.store().path("briefs", "T-1%s.md" % suffix)) as handle:
+            return handle.read()
+
+    def findings(self, klass, task_id="T-1"):
+        record = self.store().get(task_id)
+        return [f for f in record.get("findings") or [] if f["class"] == klass]
+
+    def assert_told_to_return(self, text):
+        self.assertIn("`%s`" % self.BASELINE, text)
+        self.assertIn("before this run", text)
+        for phrase in STAY_PUT:
+            self.assertNotIn(phrase, text.lower())
+
+    def test_the_task_moves_the_card_and_the_blocked_closeout_is_told_to_move_it_back(self):
+        self.task_moves_card("blocked.jsonl")
+        self.closeout("blocked on the design question", move_to=self.BASELINE)
+        seen = self.go_board()
+        self.assertIn("Move the tracker card to `%s`" % self.IN_REVIEW, self.brief(""))
+        self.assert_told_to_return(self.brief(".closeout"))
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], self.BASELINE)
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+        self.assertEqual(self.findings(contracts.BLOCKED_UNRECORDED), [])
+        self.assertEqual(self.store().audit()["count"], 0)
+        self.assertNotIn("stale", seen[-1])
+
+    def test_the_halted_closeout_is_told_to_move_the_card_back(self):
+        self.write_board_manifest(continue_past=True,
+                                  gate=["bash", "-c", GATE_REFUSES_SH % "src/t_1.py"])
+        self.task_moves_card("success.jsonl")
+        self.closeout("halted on the gate", move_to=self.BASELINE)
+        self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_HALTED)
+        self.assertEqual(record["halt_class"], contracts.HALT_GATE_REFUSED)
+        self.assert_told_to_return(self.brief(".closeout"))
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+        self.assertEqual(self.store().audit()["count"], 0)
+
+    def test_a_halted_card_left_in_review_is_a_finding_and_a_stale_card(self):
+        self.write_board_manifest(continue_past=True,
+                                  gate=["bash", "-c", GATE_REFUSES_SH % "src/t_1.py"])
+        self.task_moves_card("success.jsonl")
+        self.closeout("halted on the gate")
+        seen = self.go_board()
+        mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual(len(mine), 1, self.store().get("T-1")["findings"])
+        self.assertEqual(mine[0]["card_status"], self.IN_REVIEW)
+        self.assertEqual(mine[0]["return_to"], self.BASELINE)
+        card_audit = self.store().audit()
+        self.assertEqual([f["class"] for f in card_audit["findings"]],
+                         [contracts.AUDIT_STALE_IN_REVIEW])
+        self.assertIn("`%s`" % self.BASELINE, card_audit["findings"][0]["text"])
+        self.assertIn("1 stale card(s)", seen[-1])
+
+    def test_a_blocked_card_left_in_review_is_a_finding_and_a_stale_card(self):
+        self.task_moves_card("blocked.jsonl")
+        self.closeout("blocked on the design question")
+        self.go_board()
+        mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual([(f["card_status"], f["return_to"]) for f in mine],
+                         [(self.IN_REVIEW, self.BASELINE)])
+        self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
+                         [contracts.AUDIT_STALE_IN_REVIEW])
+
+    def test_a_halt_after_a_landing_never_sends_the_card_back(self):
+        """The landing refusal of `return_to_for`: the landed Closeout commented the landing but
+        never closed the card, so verify halts the task with a landing reference on its record.
+        Moving that card back to its baseline would undo a landing."""
+        self.task_moves_card("success.jsonl")
+        self.queue_entry("closeout_skipped.jsonl",
+                         CLOSEOUT_COMMENTS_SH % ("Landed at $(git rev-parse origin/main)", "T-1"))
+        self.closeout("halted after the landing")
+        self.go_board(expect=runner.EXIT_HALTED)
+        record = self.store().get("T-1")
+        self.assertEqual(record["halt_class"], contracts.HALT_PARTIAL_LANDING)
+        self.assertTrue(record["landing_ref"])
+        halted = self.brief(".closeout")
+        self.assertIn("Landed at %s, but the run then halted." % record["landing_ref"], halted)
+        self.assertNotIn("`%s`" % self.BASELINE, halted)
+        self.assertNotIn("back to", halted.lower())
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
+    def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):
+        self.task_moves_card("blocked.jsonl")
+        self.closeout("blocked on the design question", move_to=self.BASELINE, unreadable=True)
+        self.go_board()
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_BLOCKED)
+        mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["card_status"], "unreadable")
+        self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
+                         [contracts.AUDIT_UNREADABLE])
+
+    def test_a_landed_card_reopened_by_hand_is_an_audit_finding(self):
+        self.task_moves_card("success.jsonl")
+        self.queue_entry("closeout_skipped.jsonl",
+                         CLOSEOUT_LANDS_SH % (self.DONE, "T-1", "T-1"))
+        self.go_board()
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.store().audit()["count"], 0)
+        self.set_card("T-1", self.BASELINE)
+        findings = audit.build(self.manifest, self.store(), self.adapter)
+        self.assertEqual([f["class"] for f in findings], [contracts.AUDIT_REOPENED])
+
+    def test_no_envelope_with_commits_and_the_card_in_review_routes_to_a_landing(self):
+        """KTD6: the one route that reads the card to decide a landing. Under markdown the card
+        never reads in review, so this route was reachable only through a hand built adapter."""
+        self.task_moves_card("no_envelope.jsonl")
+        self.queue_entry("closeout_skipped.jsonl",
+                         CLOSEOUT_LANDS_SH % (self.DONE, "T-1", "T-1"))
+        self.go_board()
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.card(), self.DONE)
+        self.assertTrue(any("routed on commits plus the card in %s" % self.IN_REVIEW in line
+                            for line in self.lines), self.lines)
+
+    def test_no_envelope_with_commits_and_the_card_never_moved_is_blocked(self):
+        self.queue_entry("no_envelope.jsonl", task_branch_sh("T-1"))
+        self.closeout("blocked with no envelope")
+        self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(record["halt_class"], contracts.HALT_NO_ENVELOPE)
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertIn("relay/T-1", self.relay_branches())
+
+
+class GitHubBoardRoutes(_BoardRoutes, RunCase):
+    ADAPTER = "github"
+    BOARD = GitHubBoard
+    BASELINE, IN_REVIEW, DONE = "Todo", "In review", "Done"
+    TRACKER = """[tracker]
+adapter = "github"
+owner = "example-org"
+project_number = 6
+status_field = "Done"
+done_statuses = ["Done"]
+in_review_status = "In review"
+"""
+
+
+class JiraBoardRoutes(_BoardRoutes, RunCase):
+    ADAPTER = "jira"
+    BOARD = JiraBoard
+    BASELINE, IN_REVIEW, DONE = "To Do", "In Review", "Done"
+    TRACKER = """[tracker]
+adapter = "jira"
+site = "example.atlassian.net"
+project_key = "EX"
+done_statuses = ["Done"]
+in_review_status = "In Review"
+"""
 
 
 NO_PUSH_MANIFEST = MANIFEST.replace('mode = "local_merge"', 'mode = "local_merge"\npush = false')

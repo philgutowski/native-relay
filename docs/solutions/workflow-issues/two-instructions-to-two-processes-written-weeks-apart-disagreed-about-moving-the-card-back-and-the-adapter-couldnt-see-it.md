@@ -158,6 +158,18 @@ reopened state, an unreadable card, needs a test that deliberately exercises `Fa
 equivalent with that richer shape, not one that trusts the markdown-backed default to have
 covered it.
 
+Both risks now have a guard (issue #13). `StartStepAgreesWithCloseout` in
+`tests/test_adapters.py` renders the Task brief's start step and each adapter's blocked and
+halted Closeout brief through the production renderers, with `return_to` from
+`closeout.return_to_for`, and fails when a card the Task moved is not moved back, when a card it
+never moved is, or when any stay put sentence from `STAY_PUT` reappears. `GitHubBoardRoutes` and
+`JiraBoardRoutes` in `tests/test_run.py` run the loop against the real GitHub and Jira adapters
+with only their read side replaced by a file backed board that the stub's Task and Closeout
+scripts write, so an in review, returned, reopened, or unreadable card is a state the suite
+produces. Reintroducing the stale sentence in `jira.py` and `github.py` fails eight of those
+tests. The board is still a double: a new route that depends on how a real adapter reads a card
+belongs in `BoardReads` only after that read is mirrored there.
+
 ## When to Apply
 
 - Editing `task_tracker_steps` (`skills/relay/scripts/relay/adapters/__init__.py:77-117`) or any other Task-brief step that
