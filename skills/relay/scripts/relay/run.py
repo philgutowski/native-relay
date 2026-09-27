@@ -1289,11 +1289,20 @@ class _Flight:
 
 def retries_blocked(retry_blocked, task_id):
     """Whether a blocked record for `task_id` is retried this run. `--retry-blocked` alone is
-    True and retries every one; with ids it is a set, and only those are retried (issue #39),
-    so one blocked task can be relaunched without reviving every older blocked record too."""
-    if isinstance(retry_blocked, (set, frozenset, tuple, list)):
+    True and retries every one; with ids it is a frozenset, and only those are retried (issue
+    #39), so one blocked task can be relaunched without reviving every older blocked record."""
+    if isinstance(retry_blocked, frozenset):
         return task_id in retry_blocked
     return bool(retry_blocked)
+
+
+def retry_blocked_argv(retry_blocked):
+    """The flags that carry `retry_blocked` to a child `run`, in the one shape `retries_blocked`
+    reads: one `--retry-blocked ID` per named id, the bare flag only for True, and nothing for
+    an empty set, which must never widen into the bare flag and retry every blocked record."""
+    if isinstance(retry_blocked, frozenset):
+        return [part for task_id in sorted(retry_blocked) for part in ("--retry-blocked", task_id)]
+    return ["--retry-blocked"] if retry_blocked else []
 
 
 def _one_task(cfg, task):

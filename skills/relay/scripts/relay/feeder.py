@@ -66,7 +66,7 @@ from dataclasses import dataclass, field, fields
 from datetime import datetime
 
 from . import (adapters, contracts, gitread, manifest as manifest_module, manifestedit,
-               state as state_module, summary as summary_module)
+               run as run_module, state as state_module, summary as summary_module)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -372,9 +372,11 @@ def looks_like_usage_limit(halted, landed, config):
 
 
 def result_event(log_text):
-    """The last `result` event in a task's stream-json stdout, or None when there is none: the
-    process was killed first, the text is a tail that cut it off, or the backend prints another
-    format. A line that is not JSON, a torn first line of a tail above all, is passed over."""
+    """The last attempt's `result` event in a task's stream-json stdout, or None when it has
+    none: the process was killed first, or the backend prints another format. The runner
+    appends every attempt of a task to one log, so the search stops at the last attempt's own
+    `init` line rather than reading an earlier attempt's result as this one's. A line that is
+    not JSON, a torn first line of a tail above all, is passed over."""
     for line in reversed((log_text or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -383,8 +385,12 @@ def result_event(log_text):
             event = json.loads(line)
         except ValueError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result":
             return event
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return None
     return None
 
 
@@ -482,10 +488,9 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
     import time
 
     def run_cycle(manifest_path, retry_ids=()):
-        command = [sys.executable, "-u", runner_entry(), "run", manifest_path]
-        for task_id in retry_ids:
-            # One id per flag, never the bare flag, which would retry every blocked record.
-            command += ["--retry-blocked", task_id]
+        # A frozenset, so the ids stay named: never the bare flag, which retries every one.
+        command = ([sys.executable, "-u", runner_entry(), "run", manifest_path]
+                   + run_module.retry_blocked_argv(frozenset(retry_ids)))
         if notify_on:
             command.append("--notify")
         if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
@@ -575,6 +580,13 @@ class Feeder:
     def run(self):
         self.log("feeder start, dry_run=%s, manifest=%s, runner=%s"
                  % (self.dry_run, self.paths.manifest, runner_entry()))
+        try:
+            # Read again now that the lock is held. Under `--restart` the state was first read
+            # while the old feeder still ran, and its last cycle's halts, marks, and queued
+            # retries would be overwritten by that copy at the first save below.
+            self.state = self._load_state()
+        except ConfigError as exc:
+            return self.stop(EXIT_CONFIG, "stopping: %s" % exc)
         if not self.once:
             # The "in a row" counts belong to one feeder's life. A stop, a restart, or an
             # interrupt would otherwise hand a partial count to the next feeder. `--once` keeps
@@ -641,7 +653,7 @@ class Feeder:
         excluded = manifestedit.excluded_ids(text)
         records = self._records(manifest)
         if self.requested:
-            code = self.take_requests(listed, records)
+            code = self.take_requests(listed, excluded, records)
             if code is not None:
                 return code
         retry_ids = self.pending_retries(listed, excluded, records)
@@ -748,7 +760,13 @@ class Feeder:
             self.report_once("skipped:" + task["id"], "%s was skipped by the runner and will not "
                              "be built until the card is fixed: %s"
                              % (task["id"], task.get("skip_reason") or "no reason recorded"))
-        self.prune_retries(after)
+        unlaunched = self.prune_retries(after)
+        if unlaunched:
+            # A queued retry the runner refused before launching still carries the blocked
+            # attempt's wall time. Read as that, it would be a quick death again every cycle,
+            # so it is what it is: a halt with no process behind it.
+            halted = [dict(task, wall_seconds=None) if task["id"] in unlaunched else task
+                      for task in halted]
         blocked = by_status[STATUS_BLOCKED]
         limited = self.limit_blocked(blocked)
         limited_ids = {task["id"] for task in limited}
@@ -776,16 +794,21 @@ class Feeder:
         if looks_like_usage_limit(halted, landed, config) and len(halted_moves) < len(halted):
             # Some quick death has no fallback to take, so the whole cycle rule decides. When
             # every one has, the moves below replace the wait. A blocked limit death waits with
-            # the halts and then relaunches where it was, as they do.
+            # the halts and then relaunches where it was, as they do, unless the waits have run
+            # out and the feeder is declaring these deaths not a usage limit after all.
+            if self.strike("limit_waits", config.limit_waits_max):
+                for task in limited:
+                    self.report_blocked(task)
+                self.save_state()
+                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
+                                              "usage limit. Read the summary."
+                                              % config.limit_waits_max)
             for task in limited:
                 self.queue_retry(task)
             if limited:
                 self.log("%s blocked on a usage limit and will be retried after the wait with "
                          "--retry-blocked" % sorted(limited_ids))
-            if self.strike("limit_waits", config.limit_waits_max):
-                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
-                                              "usage limit. Read the summary."
-                                              % config.limit_waits_max)
+            self.save_state()
             self.log("every halted task died inside %ds, reading that as a usage limit, waiting "
                      "%ds; these halts are not counted" % (config.quick_death_seconds,
                                                            config.limit_wait_seconds))
@@ -922,16 +945,25 @@ class Feeder:
 
     def queue_retry(self, task):
         self.state["retry_blocked"][task["id"]] = task.get("started_at")
+        # A retry that blocks again is news, even when its sentence is the one sent last time.
+        self.state["reported"].pop("blocked:" + task["id"], None)
 
     def prune_retries(self, after):
-        """Drop each queued retry the run carried out: the record moved off blocked, or it was
-        launched again and so carries a new `started_at`. One the run never reached, because it
-        halted first, keeps its place for the next run."""
+        """Drop each queued retry the run dealt with, and return the ids it refused before
+        launching. A record that was launched again carries a new `started_at`; one that moved
+        off blocked with the old stamp was refused first, at pre flight or over a stranded
+        branch. One the run never reached, because it halted first, keeps its place."""
+        unlaunched = set()
         for task_id, stamp in list(self.state["retry_blocked"].items()):
             record = after.get(task_id)
-            if (record is None or record.get("status") != STATUS_BLOCKED
-                    or record.get("started_at") != stamp):
+            if record is None:
                 del self.state["retry_blocked"][task_id]
+            elif record.get("started_at") != stamp:
+                del self.state["retry_blocked"][task_id]
+            elif record.get("status") != STATUS_BLOCKED:
+                del self.state["retry_blocked"][task_id]
+                unlaunched.add(task_id)
+        return unlaunched
 
     def pending_retries(self, listed, excluded, records):
         """The ids the next run is to pass as `--retry-blocked`, sorted. A queued id that is no
@@ -946,10 +978,10 @@ class Feeder:
             self.save_state()
         return sorted(keep, key=natural_key)
 
-    def take_requests(self, listed, records):
+    def take_requests(self, listed, excluded, records):
         """`feed --retry-blocked ID`: queue those blocked tasks and no others. An id the
         manifest does not list stops the feeder, since a typo would otherwise retry nothing and
-        say nothing; one that is listed but not blocked is logged and passed over."""
+        say nothing; one that is excluded or not blocked is logged and passed over."""
         requested, self.requested = self.requested, ()
         unknown = [task_id for task_id in requested if task_id not in listed]
         if unknown:
@@ -957,6 +989,10 @@ class Feeder:
                                           "the manifest" % ", ".join(unknown))
         for task_id in requested:
             record = records.get(task_id, {})
+            if task_id in excluded:
+                self.log("%s is excluded in the manifest; nothing to retry until that line goes"
+                         % task_id)
+                continue
             if record.get("status") != STATUS_BLOCKED:
                 self.log("%s reads %s, not blocked; nothing to retry"
                          % (task_id, record.get("status") or "no record"))

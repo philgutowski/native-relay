@@ -348,12 +348,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     this function.
     """
     command = [sys.executable, "-u", entry, verb, manifest_path]
-    if isinstance(retry_blocked, (set, frozenset, tuple, list)):
-        # Issue #39: named ids stay named, so the child retries only those.
-        for task_id in sorted(retry_blocked):
-            command += ["--retry-blocked", task_id]
-    elif retry_blocked:
-        command.append("--retry-blocked")
+    command += run_module.retry_blocked_argv(retry_blocked)
     if notify_on:
         command.append("--notify")
     if wait_minutes:
@@ -759,8 +754,7 @@ def _detach_feeder(args, paths, config, env, out):
     command = [sys.executable, "-u", entry, "feed", paths.manifest]
     command += [flag for flag, on in (("--once", args.once), ("--restart", args.restart),
                                       ("--notify", args.notify)) if on]
-    for task_id in args.retry_blocked:
-        command += ["--retry-blocked", task_id]
+    command += run_module.retry_blocked_argv(frozenset(args.retry_blocked))
     if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
         command = ["caffeinate", "-i"] + command
     with open(paths.out, "ab") as log:

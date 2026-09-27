@@ -419,9 +419,9 @@ failure. Pass `--retry-blocked` only when the operator asks for it. Give it a ta
 `--retry-blocked T-4`, to retry that one task and leave every other blocked record alone; the
 bare flag retries them all. Put the manifest first: an id written before it would take the
 manifest's path as the id, and the command refuses for want of a manifest. Expect either form to
-refuse when a
-stranded Task branch still carries commits; that work is theirs to keep, discard, or tag and
-delete, which keeps every commit and frees the card (see the `unclean_exit` row above).
+refuse when a stranded Task branch still carries commits; that work is theirs to keep, discard,
+or tag and delete, which keeps every commit and frees the card (see the `unclean_exit` row
+above).
 
 ### A Task branch left by an earlier run
 

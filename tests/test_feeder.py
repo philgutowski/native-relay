@@ -503,10 +503,70 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.state()["retry_blocked"], {})
         self.assertIn("1 blocked; a later run will not retry it", self.log_text())
 
+    def test_a_retry_refused_before_launch_is_a_counted_halt_not_another_quick_death(self):
+        # The retry's pre flight refused it: the record reads halted but keeps the blocked
+        # attempt's four seconds and its stamp, since no process was launched to restamp them.
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+
+        def refuse_at_preflight():
+            if len(self.runs) == 1:
+                self.records["1"] = dict(self.records["1"], status="halted",
+                                         **{"class": "unclean_exit"})
+        self.before_run = refuse_at_preflight
+        self.plans = [{"1": self.blocked(4)}, {"1": UNREACHED}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.retries, [[], ["1"]])
+        self.assertEqual(self.state()["halts"], {"1": 1})
+        marks = [note for note in self.notes if "usage limit" in note]
+        self.assertEqual(len(marks), 1, self.notes)
+
+    def test_a_retry_that_blocks_again_is_reported_again(self):
+        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "7"\nmodel = "opus"\n'
+                                                   'effort = "high"\n')
+        self.adapter.ready_cards = []
+        self.records["7"] = {"id": "7", "status": "blocked", "started_at": "old"}
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), reported={
+            "blocked:7": "7 blocked; a later run will not retry it without --retry-blocked 7"})))
+        self.plans = [{"7": {"status": "blocked", "wall_seconds": 900,
+                             "class": "blocked_envelope"}}]
+        self.out = io.StringIO()
+        feeder.Feeder(self.paths, feeder.Config(), self.deps(), self.base_env(), self.out,
+                      once=True, retry_blocked=("7",)).run()
+        self.assertEqual(self.retries, [["7"]])
+        self.assertIn("7 blocked; a later run will not retry it", self.log_text())
+
+    def test_an_excluded_id_asked_for_by_hand_is_named_and_not_queued(self):
+        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "7"\nmodel = "opus"\n'
+                                                   'effort = "high"\nexcluded = true\n'
+                                                   'reason = "held back by hand"\n')
+        self.adapter.ready_cards = []
+        self.records["7"] = {"id": "7", "status": "blocked", "started_at": "old"}
+        self.out = io.StringIO()
+        feeder.Feeder(self.paths, feeder.Config(), self.deps(), self.base_env(), self.out,
+                      once=True, retry_blocked=("7",)).run()
+        self.assertIn("7 is excluded in the manifest; nothing to retry", self.log_text())
+        self.assertNotIn("queued", self.log_text())
+
+    def test_a_whole_cycle_wait_that_runs_out_queues_no_retry(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 sonnet\n2 fable\n")
+        self.plans = [{"1": halted(8), "2": self.blocked(4)}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}, limit_waits_max=0))
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("2 blocked; a later run will not retry it", self.log_text())
+        self.assertIn("Not a usage limit", self.log_text())
+
     def test_the_result_line_is_found_under_a_torn_first_line(self):
         tail = LIMIT_LOG[7:]
         self.assertEqual(feeder.result_event(tail)["api_error_status"], 429)
         self.assertIsNone(feeder.result_event('{"type": "assistant"}\nnot json\n'))
+        # The log holds every attempt; an earlier attempt's result is not this one's.
+        earlier = json.dumps({"type": "result", "subtype": "success"}) + "\n"
+        init = json.dumps({"type": "system", "subtype": "init"}) + "\n"
+        self.assertIsNone(feeder.result_event(earlier + init + '{"type": "assistant"}\n'))
+        self.assertEqual(feeder.result_event(earlier + init + LIMIT_LOG)["api_error_status"],
+                         429)
         config = feeder.Config()
         task = {"class": "no_envelope", "wall_seconds": 4}
         self.assertTrue(feeder.blocked_by_usage_limit(task, config, LIMIT_LOG))
@@ -530,8 +590,9 @@ class BlockedLimit(FeederCase):
             deps.run_cycle("/m.toml", [])
         finally:
             feeder.subprocess.run = real
-        self.assertEqual(seen[0][-5:], ["/m.toml", "--retry-blocked", "7", "--retry-blocked",
-                                        "12"])
+        tail = seen[0][seen[0].index("/m.toml") + 1:]
+        self.assertEqual(tail[0::2], ["--retry-blocked", "--retry-blocked"])
+        self.assertEqual(sorted(tail[1::2]), ["12", "7"])
         self.assertNotIn("--retry-blocked", seen[1])
 
 
