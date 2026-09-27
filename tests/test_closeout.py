@@ -491,6 +491,8 @@ class RunLoopPassesTheTasksBackend(CloseoutCase):
             repo=self.repo,
             env=environment,
             findings=[],
+            # A serial run's context, which releases from its interrupt handler (issue #79).
+            release_on_interrupt=True,
         )
 
     def test_each_tasks_backend_reaches_the_closeout_boundary(self):
