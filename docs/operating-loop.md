@@ -71,6 +71,8 @@ What stays manual under a feeder:
    tracker derives them ready, and the runner merges one at a time.
 2. **Deciding what ready means.** Labels, a JQL query, or a ready command. If the board derives
    its ready labels, name the command that recomputes them as the sidecar's `pre_cycle` hook.
+   Work that follows a landing, the full gate on the merged main or a push on a cadence, is
+   the `post_cycle` hook, not a second session tailing the log.
 3. **The deny list.** Cards that are never a session's to take go in `[deny]`, whatever the
    board says about them.
 4. **Routing.** Decide which cards deserve the stronger model before the run, in the routing

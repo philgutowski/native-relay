@@ -51,3 +51,10 @@ labels = ["attended"]   # a card carrying any of these is never appended
 # Run in the target repo before each cycle's read, for a board whose ready labels are
 # derived. An argument list. A failure is logged and the cycle continues.
 #   pre_cycle = ["python3", "scripts/board.py", "sync"]
+# Run in the target repo after each settled `relay run`, with the cycle in its environment:
+# RELAY_LANDED, RELAY_HALTED, RELAY_BLOCKED, RELAY_SKIPPED, RELAY_CYCLE, RELAY_MERGE_RANGE, and
+# the rest in docs/manifest-authoring.md. Blocking by default, waited on and logged; with
+# post_cycle_hold a nonzero exit stops the feeder. Detached is started and not waited on.
+#   post_cycle = ["python3", "scripts/after_cycle.py"]
+#   post_cycle_mode = "blocking"
+#   post_cycle_hold = true

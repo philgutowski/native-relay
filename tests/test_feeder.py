@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -136,7 +137,21 @@ class FeederCase(RunCase):
             build_adapter=lambda manifest: self.adapter,
             run_command=lambda args, cwd, timeout: subprocess.run(
                 list(args), cwd=cwd, capture_output=True, text=True, check=False),
-            notifier=self.notes.append)
+            notifier=self.notes.append, run_hook=self._run_hook, start_hook=self._start_hook)
+
+    def _run_hook(self, args, cwd, extra_env, output_path, timeout):
+        """The blocking post cycle hook, run for real so its exit code and output are real."""
+        self.hooks = getattr(self, "hooks", []) + [("blocking", list(args), cwd, dict(extra_env))]
+        with open(output_path, "ab") as output:
+            return subprocess.run(list(args), cwd=cwd, env=dict(self.base_env(), **extra_env),
+                                  stdin=subprocess.DEVNULL, stdout=output,
+                                  stderr=subprocess.STDOUT, timeout=timeout,
+                                  check=False).returncode
+
+    def _start_hook(self, args, cwd, extra_env, output_path):
+        """The detached hook, recorded and never started: nothing here may outlive a case."""
+        self.hooks = getattr(self, "hooks", []) + [("detached", list(args), cwd, dict(extra_env))]
+        return SimpleNamespace(pid=4242)
 
     def feed(self, config=None, **kwargs):
         self.out = io.StringIO()
@@ -1338,6 +1353,236 @@ class Watch(FeederCase):
         self.assertIn("recorded no leaving", last["detail"])
 
 
+class PostCycle(FeederCase):
+    """Issue #37: a hook that runs after each settled `relay run` and knows what landed."""
+
+    HOOK = ("python3", "-c", "import sys; sys.exit(0)")
+
+    def exits(self, code):
+        return ("python3", "-c", "import sys; print('hook said no'); sys.exit(%d)" % code)
+
+    def events(self):
+        with open(self.paths.events, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
+    def branch_head(self):
+        return _repo.git(self.repo, "rev-parse", "refs/heads/main").stdout.strip()
+
+    def merge_during_run(self):
+        """What a landing does to the default branch, done by the fake runner: one commit."""
+        _repo.git(self.repo, "commit", "-q", "--allow-empty", "-m", "a landing")
+
+    def test_the_sidecar_declares_the_hook_and_its_mode(self):
+        default = feeder.Config()
+        self.assertEqual((default.post_cycle_command, default.post_cycle_mode,
+                          default.post_cycle_hold, default.post_cycle_timeout_seconds),
+                         ((), "blocking", False, 3600))
+        self.write(self.paths.config, '[hooks]\npost_cycle = ["scripts/after.sh"]\n'
+                                      'post_cycle_mode = "detached"\n')
+        config = feeder.load_config(self.paths.config)
+        self.assertEqual((config.post_cycle_command, config.post_cycle_mode),
+                         (("scripts/after.sh",), "detached"))
+        self.write(self.paths.config, '[hooks]\npost_cycle = ["make", "gate"]\n'
+                                      'post_cycle_hold = true\npost_cycle_timeout_seconds = 900\n')
+        config = feeder.load_config(self.paths.config)
+        self.assertEqual((config.post_cycle_hold, config.post_cycle_timeout_seconds), (True, 900))
+
+    def test_a_wrong_hook_setting_is_refused(self):
+        for body, said in (('post_cycle = "make gate"',
+                            "post_cycle_command must be an array of strings (an argument list"),
+                           ('post_cycle_mode = "sometimes"',
+                            'hooks.post_cycle_mode must be "blocking" or "detached"'),
+                           ('post_cycle_mode = "detached"\npost_cycle_hold = true',
+                            'hooks.post_cycle_hold needs post_cycle_mode = "blocking"'),
+                           ("post_cycle_timeout_seconds = 0",
+                            "post_cycle_timeout_seconds must be a positive integer"),
+                           ('post_cycle_hold = "yes"', "post_cycle_hold must be true or false")):
+            self.write(self.paths.config, "[hooks]\n%s\n" % body)
+            with self.assertRaises(feeder.ConfigError, msg=body) as caught:
+                feeder.load_config(self.paths.config)
+            self.assertIn(said, str(caught.exception))
+
+    def test_a_blocking_hook_is_given_the_cycle_and_the_merge_range_and_logged(self):
+        base = self.branch_head()
+        self.before_run = self.merge_during_run
+        self.plans = [{"2": halted(5000), "3": "blocked"}]
+        self.assertEqual(self.feed(feeder.Config(post_cycle_command=self.HOOK)), 0)
+        head = self.branch_head()
+        self.assertNotEqual(base, head)
+        [(mode, args, cwd, extra)] = self.hooks
+        self.assertEqual((mode, args, cwd), ("blocking", list(self.HOOK), self.repo))
+        self.assertEqual({key: extra[key] for key in (
+            "RELAY_CYCLE", "RELAY_RUN_EXIT", "RELAY_LANDED", "RELAY_HALTED", "RELAY_BLOCKED",
+            "RELAY_SKIPPED", "RELAY_DEFAULT_BRANCH", "RELAY_MERGE_BASE", "RELAY_MERGE_HEAD",
+            "RELAY_MERGE_RANGE", "RELAY_MERGE_MOVED", "RELAY_MANIFEST", "RELAY_REPO")},
+            {"RELAY_CYCLE": "1", "RELAY_RUN_EXIT": "2", "RELAY_LANDED": "1",
+             "RELAY_HALTED": "2", "RELAY_BLOCKED": "3", "RELAY_SKIPPED": "",
+             "RELAY_DEFAULT_BRANCH": "main", "RELAY_MERGE_BASE": base,
+             "RELAY_MERGE_HEAD": head, "RELAY_MERGE_RANGE": "%s..%s" % (base, head),
+             "RELAY_MERGE_MOVED": "true", "RELAY_MANIFEST": self.paths.manifest,
+             "RELAY_REPO": self.repo})
+        whole = json.loads(extra["RELAY_CYCLE_JSON"])
+        self.assertEqual((whole["landed"], whole["cycle"], whole["run_exit"],
+                          whole["merge_moved"]), (["1"], 1, 2, True))
+        self.assertIn("the post cycle hook exited 0, merge range %s..%s, output in %s"
+                      % (base, head, self.paths.hook_out), self.log_text())
+        [event] = [event for event in self.events() if event["event"] == "post_cycle"]
+        self.assertEqual({key: event[key] for key in ("mode", "exit_code", "error", "held",
+                                                      "merge_range", "cycle")},
+                         {"mode": "blocking", "exit_code": 0, "error": None, "held": False,
+                          "merge_range": "%s..%s" % (base, head), "cycle": 1})
+        with open(self.paths.hook_out, encoding="utf-8") as handle:
+            self.assertIn("cycle 1 post_cycle blocking: python3 -c", handle.read())
+
+    def test_an_unmoved_default_branch_gives_an_empty_range(self):
+        self.plans = [{"1": halted(5000), "2": halted(5000), "3": halted(5000)}]
+        self.feed(feeder.Config(post_cycle_command=self.HOOK))
+        [(_, _, _, extra)] = self.hooks
+        self.assertEqual((extra["RELAY_MERGE_BASE"], extra["RELAY_MERGE_RANGE"],
+                          extra["RELAY_MERGE_MOVED"], extra["RELAY_LANDED"]),
+                         (self.branch_head(), "", "false", ""))
+        self.assertIn("the post cycle hook exited 0, merge range empty", self.log_text())
+
+    def test_an_unreadable_end_is_unknown_never_an_empty_range(self):
+        """A hook told "nothing merged" when the base read failed would skip a real landing's
+        gate, so unknown is its own value."""
+        self.before_run = self.merge_during_run
+        self.plans = [{}]
+        real = feeder.gitread.rev_parse
+        answers = [None]
+        with mock.patch.object(feeder.gitread, "rev_parse",
+                               side_effect=lambda repo, ref: answers.pop(0) if answers
+                               else real(repo, ref)):
+            self.feed(feeder.Config(post_cycle_command=self.HOOK))
+        [(_, _, _, extra)] = self.hooks
+        self.assertEqual((extra["RELAY_MERGE_BASE"], extra["RELAY_MERGE_HEAD"],
+                          extra["RELAY_MERGE_MOVED"], extra["RELAY_MERGE_RANGE"]),
+                         ("", self.branch_head(), "", ""))
+        self.assertIn("the post cycle hook exited 0, merge range unknown", self.log_text())
+
+    def test_a_git_that_hangs_is_logged_and_the_cycle_goes_on(self):
+        self.plans = [{}]
+        with mock.patch.object(feeder.gitread, "rev_parse",
+                               side_effect=subprocess.TimeoutExpired(["git"], 30)):
+            self.assertEqual(self.feed(feeder.Config(post_cycle_command=self.HOOK)), 0)
+        self.assertEqual(len(self.runs), 1)
+        self.assertIn("the default branch could not be read for the post cycle hook",
+                      self.log_text())
+        self.assertIn("merge range unknown", self.log_text())
+
+    def test_the_rules_are_saved_before_the_hook_runs(self):
+        """A feeder killed during an hour long hook must not lose the cycle's halt count."""
+        self.plans = [{"2": halted(5000)}]
+        hook = ("python3", "-c", "import json; print('halts', json.load(open(%r))['halts'])"
+                % self.paths.state)
+        self.feed(feeder.Config(post_cycle_command=hook))
+        with open(self.paths.hook_out, encoding="utf-8") as handle:
+            self.assertIn("halts {'2': 1}", handle.read())
+
+    def test_a_failed_hook_without_hold_is_logged_and_the_feeder_goes_on(self):
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed(feeder.Config(post_cycle_command=self.exits(3))), 0)
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual(self.log_text().count("the post cycle hook exited 3, merge range"), 2)
+        with open(self.paths.hook_out, encoding="utf-8") as handle:
+            self.assertEqual(handle.read().splitlines().count("hook said no"), 2)
+
+    def test_a_failed_hook_with_hold_stops_the_feeder_after_the_bookkeeping(self):
+        self.plans = [{"2": halted(5000)}, {}]
+        config = feeder.Config(post_cycle_command=self.exits(3), post_cycle_hold=True)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(len(self.runs), 1)
+        self.assertIn("the post cycle hook exited 3, holding the feeder", self.log_text())
+        self.assertIn("stopping: the post cycle hook exited 3 and post_cycle_hold is on",
+                      self.log_text())
+        state = feeder.read_state(self.paths)
+        # The halt still counted: a hold that skipped rule 2 would lose it.
+        self.assertEqual(state["halts"], {"2": 1})
+        self.assertEqual((state["process"]["left_reason"], state["process"]["exit_code"]),
+                         ("post_cycle_held", 2))
+        self.assertEqual(self.events()[-1]["reason"], "post_cycle_held")
+        self.assertTrue(any("post_cycle_hold is on" in note for note in self.notes))
+
+    def test_a_hold_replaces_a_usage_limit_wait(self):
+        self.plans = [{"1": halted(30), "2": halted(30), "3": halted(30)}, {}]
+        config = feeder.Config(post_cycle_command=self.exits(1), post_cycle_hold=True)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(feeder.read_state(self.paths)["limit_waits"], 1)
+        self.assertNotIn("waiting", [event["event"] for event in self.events()])
+
+    def test_a_passing_hook_with_hold_does_not_stop(self):
+        self.plans = [{}, {}]
+        config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_hold=True)
+        self.assertEqual(self.feed(config), 0)
+        self.assertEqual(len(self.runs), 2)
+
+    def test_a_hook_that_times_out_or_cannot_run_is_a_failure(self):
+        self.plans = [{}]
+        config = feeder.Config(post_cycle_command=("python3", "-c", "import time; time.sleep(30)"),
+                               post_cycle_hold=True, post_cycle_timeout_seconds=1)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertIn("the post cycle hook timed out after 1s, holding the feeder", self.log_text())
+        os.unlink(self.paths.stop)
+        self.plans = [{}]
+        missing = os.path.join(self.tmp.name, "no-such-hook")
+        self.assertEqual(self.feed(feeder.Config(post_cycle_command=(missing,))), 0)
+        self.assertIn("the post cycle hook could not run: ", self.log_text())
+
+    def test_a_detached_hook_is_started_and_not_waited_on(self):
+        self.before_run = self.merge_during_run
+        self.plans = [{}]
+        config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_mode="detached")
+        self.assertEqual(self.feed(config), 0)
+        [(mode, _, cwd, extra)] = self.hooks
+        self.assertEqual((mode, cwd, extra["RELAY_LANDED"]), ("detached", self.repo, "1 2 3"))
+        self.assertIn("the post cycle hook started detached, pid 4242, merge range %s"
+                      % extra["RELAY_MERGE_RANGE"], self.log_text())
+        [event] = [event for event in self.events() if event["event"] == "post_cycle"]
+        # `pid` is the feeder's own on every event, so the hook's is `hook_pid`.
+        self.assertEqual((event["mode"], event["hook_pid"], event["error"], event["pid"]),
+                         ("detached", 4242, None, os.getpid()))
+        report = feeder.status_report(self.paths)
+        report["last_event"] = event
+        self.assertIn("last event: post_cycle at %s detached, hook pid 4242" % event["at"],
+                      feeder.status_lines(report))
+
+    def test_no_hook_runs_for_a_run_that_was_refused_before_it_ran(self):
+        self.plans = [feeder.EXIT_LEASE, {}]
+        self.feed(feeder.Config(post_cycle_command=self.HOOK))
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual([extra["RELAY_CYCLE"] for _, _, _, extra in self.hooks], ["2"])
+
+    def test_the_real_hooks_pass_the_environment_and_append_their_output(self):
+        env = dict(self.base_env(), FROM_THE_FEEDER="kept")
+        deps = feeder.build_deps(feeder.Config(), env)
+        script = ("import os; print(os.environ['FROM_THE_FEEDER'], os.environ['RELAY_LANDED'], "
+                  "os.getcwd())")
+        code = deps.run_hook(("python3", "-c", script), self.repo, {"RELAY_LANDED": "1 2"},
+                             self.paths.hook_out, 30)
+        self.assertEqual(code, 0)
+        proc = deps.start_hook(("python3", "-c", script), self.repo, {"RELAY_LANDED": "3"},
+                               self.paths.hook_out)
+        self.assertEqual(proc.wait(timeout=30), 0)
+        with open(self.paths.hook_out, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual([line.split()[:2] for line in lines], [["kept", "1"], ["kept", "3"]])
+        self.assertEqual(os.path.realpath(lines[0].split()[-1]), os.path.realpath(self.repo))
+
+    def test_a_timeout_kills_what_the_hook_started_too(self):
+        deps = feeder.build_deps(feeder.Config(), self.base_env())
+        marker = os.path.join(self.tmp.name, "grandchild-lived")
+        grandchild = "import time; time.sleep(2); open(%r, 'w').write('x')" % marker
+        script = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); "
+                  "time.sleep(30)" % grandchild)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            deps.run_hook(("python3", "-c", script), self.repo, {}, self.paths.hook_out, 0.5)
+        # Past the grandchild's own sleep: had only the direct child been killed, it would
+        # have written by now.
+        time.sleep(3)
+        self.assertFalse(os.path.exists(marker))
+
+
 class RealRunner(FeederCase):
     def test_one_cycle_through_the_real_runner_over_the_stub(self):
         """The seam the fakes cannot prove: the feeder launches `relay_cli.py run` from its own
@@ -1348,8 +1593,13 @@ class RealRunner(FeederCase):
         self.task_success("T-2")
         self.closeout_landed("T-2")
         env = self.base_env()
+        # Issue #37: the post cycle hook, through the real runner's landings.
+        hook = ("python3", "-c", "import json, os; print(json.dumps({key: os.environ[key] for "
+                                 "key in ('RELAY_LANDED', 'RELAY_MERGE_BASE', "
+                                 "'RELAY_MERGE_HEAD', 'RELAY_MERGE_RANGE')}))")
+        base = _repo.git(self.repo, "rev-parse", "refs/heads/main").stdout.strip()
         config = feeder.Config(batch=2, caffeinate=False, default_model="sonnet",
-                               default_effort="low")
+                               default_effort="low", post_cycle_command=hook)
         deps = feeder.build_deps(config, env, sleep=self.sleeps.append,
                                  child_stdout=subprocess.DEVNULL)
         self.assertTrue(feeder.runner_entry().startswith(_paths.SCRIPTS_DIR))
@@ -1361,6 +1611,14 @@ class RealRunner(FeederCase):
         self.assertIn("cycle result: landed ['T-1', 'T-2'], halted []", out.getvalue())
         self.assertIn("- [x] T-1", self.tracker_at_remote())
         self.assertEqual(self.sleeps, [])
+        head = _repo.git(self.repo, "rev-parse", "refs/heads/main").stdout.strip()
+        with open(self.paths.hook_out, encoding="utf-8") as handle:
+            said = json.loads(handle.read().splitlines()[-1])
+        self.assertEqual(said, {"RELAY_LANDED": "T-1 T-2", "RELAY_MERGE_BASE": base,
+                                "RELAY_MERGE_HEAD": head,
+                                "RELAY_MERGE_RANGE": "%s..%s" % (base, head)})
+        self.assertNotEqual(base, head)
+        self.assertIn("the post cycle hook exited 0", out.getvalue())
 
 
 if __name__ == "__main__":
