@@ -1084,6 +1084,34 @@ class Verb(FeederCase):
         self.assertIn("--retry-blocked names 99, not a task in the manifest", text)
         self.assertEqual(self.runs, [])
 
+    def test_retry_blocked_refuses_a_mistyped_id_before_a_restart_touches_the_live_feeder(self):
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--restart", "--retry-blocked", "99", "--once")
+            self.assertEqual(code, 1)
+            self.assertIn("--retry-blocked names 99, not a task in the manifest", text)
+            # No stop file was written, so the live feeder was never asked to leave, and its
+            # lock is still exclusive: a fresh attempt still fails while `held` is open.
+            self.assertFalse(os.path.exists(self.paths.stop))
+            self.assertIsNone(feeder.acquire_lock(self.paths))
+            self.assertEqual(self.runs, [])
+        finally:
+            held.close()
+
+    def test_retry_blocked_refuses_a_mistyped_id_before_detaching(self):
+        with mock.patch.object(cli, "_detach_feeder") as detach:
+            code, text = self.call("--detach", "--retry-blocked", "99")
+        self.assertEqual(code, 1)
+        self.assertIn("--retry-blocked names 99, not a task in the manifest", text)
+        detach.assert_not_called()
+
+    def test_retry_blocked_against_a_manifest_that_will_not_parse_stops_cleanly(self):
+        self.write(self.manifest_path, "[[tasks\nid = 1\n")
+        code, text = self.call("--retry-blocked", "99", "--once")
+        self.assertEqual(code, 1)
+        self.assertIn("manifest is not valid TOML", text)
+        self.assertEqual(self.runs, [])
+
     def test_a_bad_sidecar_is_exit_1_before_anything_runs(self):
         self.write(self.paths.config, "[feeder]\nbatch = -1\n")
         code, text = self.call("--once")

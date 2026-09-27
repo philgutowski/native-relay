@@ -775,7 +775,11 @@ def cmd_feed(args, env, out, deps=None):
         # Before detaching and before a restart asks a live feeder to leave (issue #46): the id
         # was checked only inside `cycle()`, which runs after both of those, so a typo took down
         # a running feeder and left none in its place.
-        unknown = sorted(set(args.retry_blocked) - set(feeder_module.listed_ids(paths)))
+        try:
+            unknown = sorted(set(args.retry_blocked) - set(feeder_module.listed_ids(paths)))
+        except manifest_module.ManifestError as exc:
+            out.write("%s\n" % exc)
+            return EXIT_CONFIG
         if unknown:
             out.write("--retry-blocked names %s, not a task in the manifest\n"
                       % ", ".join(unknown))
