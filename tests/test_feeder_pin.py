@@ -1,8 +1,10 @@
-"""The feeder's checkout warning and `feed --pin` (issue 35).
+"""The feeder's checkout warning and `feed --pin` (issues 35 and 48).
 
 A feeder launches the runner from its own tree at every cycle, so started from a git checkout it
 runs whatever that checkout holds. These cases build a throwaway repo standing in for that
-checkout, point `runner_tree` at it, and never touch the real one.
+checkout, point `runner_tree` at it, and never touch the real one. The manifest names that same
+repo, which is the self hosted shape: while a task is in flight the checkout sits on the task
+branch, and `--pin` must extract the default branch's commit, never HEAD.
 """
 import io
 import os
@@ -12,11 +14,13 @@ from unittest import mock
 
 import _paths
 import _repo
-from relay import cli, feeder, gitread
+from relay import cli, feeder, gitread, manifest as mf
+from test_run import MANIFEST
 
 ENTRY = "skills/relay/scripts/relay_cli.py"
 # Stands in for the runner in the extract: it says which argv it got and exits 7.
 FAKE_ENTRY = "import sys\nprint('extract ran', ' '.join(sys.argv[1:]))\nsys.exit(7)\n"
+MANIFEST_HEAD = MANIFEST.split("[[tasks]]")[0]
 
 
 class Case(unittest.TestCase):
@@ -27,9 +31,36 @@ class Case(unittest.TestCase):
         self.home = os.path.join(self.base, "home")
         os.makedirs(self.home)
         self.checkout = _repo.make_repo(self.base, files={ENTRY: FAKE_ENTRY})
+        self.manifest_path = os.path.join(self.base, "m.toml")
+        self.write_manifest()
+
+    def write_manifest(self, repo=None, default_branch="main"):
+        text = MANIFEST_HEAD.replace("__REPO__", repo or self.checkout)
+        text = text.replace('default_branch = "main"\n',
+                            'default_branch = "%s"\n' % default_branch if default_branch else "")
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text)
 
     def env(self):
         return dict(os.environ, HOME=self.home)
+
+    def plan(self):
+        return feeder.pin_plan(self.checkout, self.home, mf.load(self.manifest_path,
+                                                                 allow_no_tasks=True))
+
+    def extracts(self):
+        return os.path.join(self.home, ".relay", "extracts")
+
+    def on_task_branch(self):
+        """Put the checkout on `relay/9` with one commit main does not have, as a self hosted
+        run's task process leaves it mid task. Returns main's sha."""
+        main = gitread.rev_parse(self.checkout, "main")
+        _repo.git(self.checkout, "checkout", "-q", "-b", "relay/9")
+        with open(os.path.join(self.checkout, "unmerged.txt"), "w") as handle:
+            handle.write("not gated, not reviewed\n")
+        _repo.git(self.checkout, "add", "-A")
+        _repo.git(self.checkout, "commit", "-q", "-m", "work in flight")
+        return main
 
 
 class Detection(Case):
@@ -54,71 +85,158 @@ class Detection(Case):
 
 
 class Extract(Case):
-    def test_the_extract_holds_head_and_no_git_metadata(self):
-        destination, dirty = feeder.pin_extract(self.checkout, self.home)
-        sha = gitread.rev_parse(self.checkout, "HEAD")[:12]
-        self.assertEqual(destination, os.path.join(self.home, ".relay", "extracts",
-                                                   "native-relay-" + sha))
+    def test_the_extract_holds_the_default_branch_and_no_git_metadata(self):
+        pin = self.plan()
+        destination = feeder.pin_extract(self.checkout, pin)
+        sha = gitread.rev_parse(self.checkout, "main")
+        self.assertEqual(destination, os.path.join(self.extracts(), "native-relay-" + sha[:12]))
+        self.assertEqual(pin.short, sha[:feeder.PIN_SHA_LENGTH])
         self.assertTrue(os.path.isfile(os.path.join(destination, ENTRY)))
         self.assertFalse(os.path.exists(os.path.join(destination, ".git")))
-        self.assertIsNone(dirty)
+        self.assertIsNone(pin.uncommitted)
         self.assertIsNone(feeder.checkout_warning(destination))
 
+    def test_the_name_is_the_one_git_prints_for_short_twelve(self):
+        short = _repo.git(self.checkout, "rev-parse", "--short=12", "main").stdout.strip()
+        self.assertEqual(os.path.basename(self.plan().destination), "native-relay-" + short)
+
+    def test_a_checkout_on_a_task_branch_pins_the_default_branch_not_head(self):
+        main = self.on_task_branch()
+        pin = self.plan()
+        self.assertEqual((pin.branch, pin.sha, pin.head_branch), ("main", main, "relay/9"))
+        destination = feeder.pin_extract(self.checkout, pin)
+        self.assertFalse(os.path.exists(os.path.join(destination, "unmerged.txt")))
+
     def test_an_existing_extract_is_reused_untouched(self):
-        destination, _ = feeder.pin_extract(self.checkout, self.home)
+        destination = feeder.pin_extract(self.checkout, self.plan())
         marker = os.path.join(destination, "marker")
         with open(marker, "w") as handle:
             handle.write("a running feeder may be reading here")
-        again, _ = feeder.pin_extract(self.checkout, self.home)
-        self.assertEqual(again, destination)
+        again = self.plan()
+        self.assertTrue(again.exists)
+        self.assertEqual(feeder.pin_extract(self.checkout, again), destination)
         self.assertTrue(os.path.exists(marker))
 
     def test_uncommitted_work_is_reported_and_left_out(self):
         with open(os.path.join(self.checkout, "wip.txt"), "w") as handle:
             handle.write("half finished\n")
-        destination, dirty = feeder.pin_extract(self.checkout, self.home)
-        self.assertIn("wip.txt", dirty)
+        pin = self.plan()
+        destination = feeder.pin_extract(self.checkout, pin)
+        self.assertIn("wip.txt", pin.uncommitted)
         self.assertFalse(os.path.exists(os.path.join(destination, "wip.txt")))
 
     def test_no_partial_directory_is_left_behind(self):
-        feeder.pin_extract(self.checkout, self.home)
-        names = os.listdir(os.path.join(self.home, ".relay", "extracts"))
-        self.assertEqual(len(names), 1, names)
+        feeder.pin_extract(self.checkout, self.plan())
+        self.assertEqual(len(os.listdir(self.extracts())), 1)
+
+    def test_the_plan_writes_nothing(self):
+        self.plan()
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".relay")))
+
+    def test_a_manifest_aimed_at_another_repo_pins_this_trees_own_default_branch(self):
+        other = _repo.make_repo(self.base, name="target")
+        self.write_manifest(repo=other, default_branch="trunk")
+        self.on_task_branch()
+        self.assertEqual(self.plan().branch, "main")
 
 
 class Unresolvable(Case):
-    def test_a_repo_with_no_commit_is_reported_not_raised(self):
-        empty = os.path.join(self.base, "empty")
-        os.makedirs(empty)
-        _repo.git(empty, "init", "-q", "-b", "main")
-        with self.assertRaises(OSError):
-            feeder.pin_extract(empty, self.home)
+    def test_no_default_branch_anywhere_is_refused_with_a_sentence(self):
+        self.write_manifest(default_branch=None)
+        _repo.git(self.checkout, "remote", "set-head", "origin", "-d")
+        with self.assertRaisesRegex(OSError, "no default branch to pin"):
+            self.plan()
+
+    def test_another_repo_and_no_origin_head_is_refused_with_the_fix(self):
+        self.write_manifest(repo=_repo.make_repo(self.base, name="target"))
+        _repo.git(self.checkout, "remote", "set-head", "origin", "-d")
+        with self.assertRaisesRegex(OSError, "not this checkout.*remote set-head origin"):
+            self.plan()
+
+    def test_a_default_branch_with_no_local_ref_is_refused(self):
+        self.write_manifest(default_branch="trunk")
+        with self.assertRaisesRegex(OSError, "trunk has no local branch"):
+            self.plan()
+
+    def test_the_manifest_default_is_used_before_origin_head(self):
+        _repo.git(self.checkout, "branch", "release")
+        self.write_manifest(default_branch="release")
+        self.assertEqual(self.plan().branch, "release")
 
 
 class Verb(Case):
-    def call(self, *flags):
-        manifest = os.path.join(self.base, "m.toml")
-        with open(manifest, "w") as handle:
-            handle.write("")
-        args = cli.build_parser().parse_args(["feed", manifest] + list(flags))
+    def call(self, *flags, tree=None):
+        args = cli.build_parser().parse_args(["feed", self.manifest_path] + list(flags))
         out = io.StringIO()
-        with mock.patch.object(feeder, "runner_tree", return_value=self.checkout):
+        with mock.patch.object(feeder, "runner_tree", return_value=tree or self.checkout):
             code = cli.cmd_feed(args, self.env(), out)
         return code, out.getvalue()
 
     def test_pin_relaunches_from_the_extract_with_restart_and_passes_the_exit_code(self):
         code, text = self.call("--pin", "--notify")
         self.assertEqual(code, 7, text)
-        self.assertIn("pinned extract: %s" % os.path.join(self.home, ".relay", "extracts"), text)
+        self.assertIn("pinned extract: %s" % self.extracts(), text)
         self.assertIn("extract ran feed", text)
         self.assertIn("--restart", text)
         self.assertIn("--notify", text)
         self.assertNotIn("--pin", text.split("extract ran", 1)[1])
 
-    def test_pin_with_dry_run_does_not_ask_a_running_feeder_to_leave(self):
-        code, text = self.call("--pin", "--dry-run")
-        self.assertIn("--dry-run", text)
-        self.assertNotIn("--restart", text)
+    def test_pin_on_a_task_branch_names_the_default_branch_and_the_branch_left_out(self):
+        main = self.on_task_branch()
+        code, text = self.call("--pin")
+        self.assertEqual(code, 7, text)
+        self.assertIn("(main at %s)" % main[:12], text)
+        self.assertIn("the checkout sits on relay/9 at ", text)
+        self.assertIn(", not main;", text)
+        extract = os.path.join(self.extracts(), "native-relay-" + main[:12])
+        self.assertFalse(os.path.exists(os.path.join(extract, "unmerged.txt")))
+
+    def test_pin_with_dry_run_creates_nothing_and_says_what_it_would_extract(self):
+        main = gitread.rev_parse(self.checkout, "main")
+        with mock.patch.object(feeder, "Feeder") as loop:
+            loop.return_value.run.return_value = 0
+            code, text = self.call("--pin", "--dry-run")
+        self.assertEqual(code, 0, text)
+        self.assertIn("would pin: %s (main at %s)" % (
+            os.path.join(self.extracts(), "native-relay-" + main[:12]), main[:12]), text)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".relay")))
+        self.assertNotIn("extract ran", text)
+        self.assertTrue(loop.call_args.kwargs["dry_run"])
+
+    def test_a_detached_head_at_the_default_branch_gets_no_branch_note(self):
+        _repo.git(self.checkout, "checkout", "-q", "--detach", "main")
+        _, text = self.call("--pin")
+        self.assertNotIn("the checkout sits", text)
+
+    def test_a_local_default_branch_behind_origin_is_named(self):
+        _repo.git(self.checkout, "commit", "-q", "--allow-empty", "-m", "landed elsewhere")
+        _repo.git(self.checkout, "push", "-q", "origin", "main")
+        _repo.git(self.checkout, "reset", "-q", "--hard", "HEAD~1")
+        _, text = self.call("--pin")
+        self.assertIn("origin/main has commits the local main does not", text)
+
+    def test_pin_refuses_when_the_default_branch_cannot_be_resolved(self):
+        self.write_manifest(default_branch=None)
+        _repo.git(self.checkout, "remote", "set-head", "origin", "-d")
+        code, text = self.call("--pin")
+        self.assertEqual(code, cli.EXIT_CONFIG, text)
+        self.assertIn("could not pin an extract", text)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".relay")))
+
+    def test_pin_from_an_extract_takes_over_with_restart_and_extracts_nothing(self):
+        extract = feeder.pin_extract(self.checkout, self.plan())
+        before = sorted(os.listdir(self.extracts()))
+        with mock.patch.object(feeder, "Feeder") as loop, \
+                mock.patch.object(feeder, "wait_for_lock") as wait, \
+                mock.patch.object(feeder, "acquire_lock") as acquire:
+            loop.return_value.run.return_value = 0
+            code, text = self.call("--pin", "--once", tree=extract)
+        self.assertEqual(code, 0, text)
+        wait.assert_called_once()
+        acquire.assert_not_called()
+        self.assertNotIn("warning:", text)
+        self.assertNotIn("pinned extract", text)
+        self.assertEqual(sorted(os.listdir(self.extracts())), before)
 
     def test_pin_says_what_the_extract_leaves_out(self):
         with open(os.path.join(self.checkout, "wip.txt"), "w") as handle:
@@ -127,7 +245,9 @@ class Verb(Case):
         self.assertIn("uncommitted changes", text)
 
     def test_starting_from_a_checkout_without_pin_warns_the_operator(self):
-        code, text = self.call("--dry-run")
+        with mock.patch.object(feeder, "Feeder") as loop:
+            loop.return_value.run.return_value = 0
+            code, text = self.call("--dry-run")
         self.assertIn("warning: this feeder launches the runner from %s" % self.checkout, text)
 
 

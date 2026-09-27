@@ -614,25 +614,83 @@ def checkout_warning(tree=None):
             "extract with `feed <manifest> --pin`" % (tree, top))
 
 
-def pin_extract(tree, home, run=subprocess.run):
-    """Extract the committed HEAD of the work tree at `tree` under `~/.relay/extracts` and
-    return `(extract_dir, uncommitted)`. The directory is named for the sha, so it is the same
-    directory every time HEAD is the same, and an existing one that holds the runner is reused
-    untouched, since a feeder may be running from it. `uncommitted` is the first changed path
-    the extract does not hold, or None."""
-    head = gitread.rev_parse(tree, "HEAD")
-    if not head:
-        raise OSError("HEAD does not resolve in %s, so there is no commit to extract" % tree)
-    sha = head[:12]
+# An extract is `~/.relay/extracts/native-relay-<sha>` with the first 12 characters of the commit
+# sha, the same length `git rev-parse --short=12` prints, so one made by hand is reused too.
+PIN_SHA_LENGTH = 12
+
+
+@dataclass(frozen=True)
+class Pin:
+    """What `feed --pin` extracts, worked out without writing anything (issue #48)."""
+    branch: str          # the default branch whose commit is pinned
+    sha: str             # that commit, in full
+    destination: str     # the extract directory
+    exists: bool         # the destination already holds a runner and will be reused untouched
+    head_branch: str     # the branch the checkout sits on, `HEAD` when detached
+    head_sha: object     # the commit HEAD is at, or None
+    uncommitted: object  # the first changed path the extract does not hold, or None
+    behind_origin: bool  # origin/<branch> has commits the local branch lacks
+
+    @property
+    def short(self):
+        return self.sha[:PIN_SHA_LENGTH]
+
+
+def _extract_entry(destination):
+    return os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
+
+
+def _same_repository(one, other):
+    try:
+        return gitread.repo_identity(one) == gitread.repo_identity(other)
+    except (gitread.GitError, OSError, subprocess.SubprocessError):
+        return False
+
+
+def pin_plan(tree, home, manifest):
+    """The `Pin` for the work tree at `tree`, reading only. It pins the default branch's commit,
+    never HEAD: on a self hosted checkout HEAD is the task branch being built while `--pin` is
+    run, and an extract of it would run unmerged, ungated work at every later cycle. The branch
+    is the manifest's `project.default_branch` when the manifest's repo is this repository, else
+    `origin/HEAD` of this tree. An unresolvable branch raises OSError with a plain sentence."""
+    if _same_repository(tree, manifest.project.repo):
+        branch = manifest.project.default_branch or gitread.default_branch(tree)
+        where = "project.default_branch is unset in the manifest and"
+    else:
+        branch = gitread.default_branch(tree)
+        where = "the manifest's repo is not this checkout, and"
+    if not branch:
+        raise OSError("%s refs/remotes/origin/HEAD is not set in %s, so there is no default "
+                      "branch to pin; name it once with `git -C %s remote set-head origin "
+                      "<branch>`" % (where, tree, tree))
+    sha = gitread.rev_parse(tree, "refs/heads/" + branch)
+    if not sha:
+        raise OSError("the default branch %s has no local branch in %s, so there is no commit "
+                      "to extract" % (branch, tree))
+    remote = gitread.rev_parse(tree, "refs/remotes/origin/" + branch)
+    destination = os.path.join(home, ".relay", "extracts",
+                               "native-relay-" + sha[:PIN_SHA_LENGTH])
     dirty = gitread.status_porcelain(tree).strip()
-    destination = os.path.join(home, ".relay", "extracts", "native-relay-" + sha)
-    entry = os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
-    if not os.path.isfile(entry):
+    return Pin(branch=branch, sha=sha, destination=destination,
+               exists=os.path.isfile(_extract_entry(destination)),
+               head_branch=gitread.current_branch(tree),
+               head_sha=gitread.rev_parse(tree, "HEAD"),
+               uncommitted=dirty.splitlines()[0].strip() if dirty else None,
+               behind_origin=bool(remote) and not gitread.is_ancestor(tree, remote, sha))
+
+
+def pin_extract(tree, pin, run=subprocess.run):
+    """Extract `pin.sha` from the repository at `tree` into `pin.destination` and return the
+    directory. The directory is named for the sha, so it is the same directory every time the
+    default branch is at the same commit, and an existing one that holds the runner is reused
+    untouched, since a feeder may be running from it."""
+    destination = pin.destination
+    if not os.path.isfile(_extract_entry(destination)):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         partial = "%s.partial-%d" % (destination, os.getpid())
         os.makedirs(partial)
         try:
-            archive = subprocess.Popen(["git", "-C", tree, "archive", "HEAD"],
+            archive = subprocess.Popen(["git", "-C", tree, "archive", pin.sha],
                                        stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
             untar = run(["tar", "-x", "-C", partial], stdin=archive.stdout)
             archive.stdout.close()
@@ -643,7 +701,7 @@ def pin_extract(tree, home, run=subprocess.run):
             os.rename(partial, destination)
         finally:
             shutil.rmtree(partial, ignore_errors=True)
-    return destination, (dirty.splitlines()[0].strip() if dirty else None)
+    return destination
 
 
 def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_stdout=None):

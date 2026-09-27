@@ -167,9 +167,11 @@ def build_parser():
                            help="ask the running feeder to leave, wait for it, then take its "
                                 "place; nothing is killed")
     feed_verb.add_argument("--pin", action="store_true",
-                           help="extract the current HEAD under ~/.relay/extracts and start the "
-                                "feeder from that extract with --restart semantics, so later "
-                                "edits to this checkout never reach a cycle; nothing is killed")
+                           help="extract the default branch's commit, never HEAD, under "
+                                "~/.relay/extracts and start the feeder from that extract with "
+                                "--restart semantics, so later edits to this checkout never "
+                                "reach a cycle; nothing is killed. With --dry-run it says what "
+                                "it would extract and writes nothing")
     feed_verb.add_argument("--detach", action="store_true",
                            help="start the feeder in its own session, logging beside the "
                                 "manifest, and return at once")
@@ -788,8 +790,17 @@ def cmd_feed(args, env, out, deps=None):
         return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
     warning = feeder_module.checkout_warning()
     if warning and args.pin:
-        return _pin_feeder(args, env, out)
-    if warning:
+        pin = _pin_plan(paths, env, out)
+        if pin is None:
+            return EXIT_CONFIG
+        if not args.dry_run:
+            return _pin_feeder(args, pin, out, env)
+        # A dry run writes nothing (issue #48), so there is no extract to run it from: it says
+        # what would be extracted, then reads the next cycle with this checkout's own code.
+        out.write("would pin: %s\n" % _pin_line(pin))
+        out.write("note: the dry run below reads the next cycle with this checkout's code, not "
+                  "the pinned commit's\n")
+    elif warning:
         out.write("warning: %s\n" % warning)
     elif args.pin and not args.dry_run:
         # Already running from an extract: `--pin` still means "take over from the running
@@ -858,26 +869,54 @@ def _watch_feeder(args, paths, out, sleep):
     return EXIT_OK
 
 
-def _pin_feeder(args, env, out):
-    """`feed --pin`: cut an extract of this checkout's HEAD and run the same `feed` from it,
-    with `--restart` so a feeder already running for this manifest hands over after its current
-    cycle. The extract has no `.git`, so it starts without the checkout warning. Its output is
-    passed through line by line, and its exit code is ours."""
+def _pin_plan(paths, env, out):
+    """The `feeder.Pin` for this checkout, or None after saying why there is none. Reads only."""
     home = env.get("HOME") or os.path.expanduser("~")
     try:
-        extract, dirty = feeder_module.pin_extract(feeder_module.runner_tree(), home)
+        manifest = manifest_module.load(paths.manifest, allow_no_tasks=True)
+        return feeder_module.pin_plan(feeder_module.runner_tree(), home, manifest)
+    except (manifest_module.ManifestError, gitread.GitError, OSError,
+            subprocess.SubprocessError) as exc:
+        out.write("could not pin an extract: %s\n" % exc)
+    return None
+
+
+def _pin_line(pin):
+    """`<extract> (<branch> at <sha>)`, and the notes on what the extract does not hold."""
+    line = "%s (%s at %s)" % (pin.destination, pin.branch, pin.short)
+    if pin.exists:
+        line += ", already extracted and reused untouched"
+    if pin.head_sha != pin.sha:
+        where = "detached" if pin.head_branch == "HEAD" else "on " + pin.head_branch
+        line += ("\nnote: the checkout sits %s at %s, not %s; the extract holds %s and none "
+                 "of the checkout's own commits" % (
+                     where, (pin.head_sha or "no commit")[:feeder_module.PIN_SHA_LENGTH],
+                     pin.branch, pin.branch))
+    if pin.behind_origin:
+        line += ("\nnote: origin/%s has commits the local %s does not, and the extract holds "
+                 "the local one" % (pin.branch, pin.branch))
+    if pin.uncommitted:
+        line += ("\nnote: the checkout has uncommitted changes, the extract does not hold them "
+                 "(%s)" % pin.uncommitted)
+    return line
+
+
+def _pin_feeder(args, pin, out, env):
+    """`feed --pin`: extract the default branch's commit and run the same `feed` from it, with
+    `--restart` so a feeder already running for this manifest hands over after its current
+    cycle. The extract has no `.git`, so it starts without the checkout warning. Its output is
+    passed through line by line, and its exit code is ours."""
+    try:
+        extract = feeder_module.pin_extract(feeder_module.runner_tree(), pin)
     except (gitread.GitError, OSError, subprocess.SubprocessError) as exc:
         out.write("could not pin an extract: %s\n" % exc)
         return EXIT_CONFIG
-    out.write("pinned extract: %s\n" % extract)
-    if dirty:
-        out.write("note: the checkout has uncommitted changes, the extract does not hold them "
-                  "(%s)\n" % dirty)
+    out.write("pinned extract: %s\n" % _pin_line(pin))
     command = [sys.executable, "-u", os.path.join(extract, "skills", "relay", "scripts",
-                                                  "relay_cli.py"), "feed", args.manifest]
-    command += [flag for flag, on in (("--once", args.once), ("--dry-run", args.dry_run),
-                                      ("--restart", not args.dry_run),
-                                      ("--detach", args.detach), ("--notify", args.notify))
+                                                  "relay_cli.py"), "feed", args.manifest,
+               "--restart"]
+    command += [flag for flag, on in (("--once", args.once), ("--detach", args.detach),
+                                      ("--notify", args.notify))
                 if on]
     command += run_module.retry_blocked_argv(frozenset(args.retry_blocked))
     proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
