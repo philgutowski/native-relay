@@ -743,6 +743,38 @@ def pin_extract(tree, pin, run=subprocess.run):
     return destination
 
 
+# How long a command's process group gets to leave on SIGTERM before SIGKILL. Long enough for a
+# `git fetch` under a wrapper to remove its own lock files, which a live Task process in the same
+# repository would otherwise trip over; short beside the minute `status --queue` gives the read.
+END_GROUP_GRACE_SECONDS = 5
+END_GROUP_POLL_SECONDS = 0.05
+
+
+def end_group(proc, grace_seconds=END_GROUP_GRACE_SECONDS):
+    """End the process group `proc` leads, started with `start_new_session`, and reap `proc`.
+    SIGTERM first, then SIGKILL for whatever is left once the whole group has had
+    `grace_seconds` to go, not just the leader: a shell leader dies at once, and a `git` under it
+    needs its moment too. The group id is `proc.pid`, which stays valid after the leader is
+    reaped while any member lives."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        proc.poll()       # reap the leader, so a zombie does not keep the group alive
+        try:
+            os.killpg(proc.pid, 0)
+        except OSError:
+            break
+        time.sleep(END_GROUP_POLL_SECONDS)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    proc.wait()
+
+
 def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_stdout=None):
     """The real effects. `child_stdout` is where each run's output goes; None inherits the
     feeder's own, which under `--detach` is the output file beside the manifest."""
@@ -769,7 +801,7 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
         return bool(store) and store.status_word() == "running"
 
     def run_command(args, cwd, timeout):
-        # Its own process group, killed whole at the bound, for the reason `run_hook` gives
+        # Its own process group, ended whole at the bound, for the reason `run_hook` gives
         # below (issue #63). A ready command that is a shell wrapper otherwise leaves its
         # children running in the repository, and one that holds the output pipe open keeps
         # the read waiting past the bound.
@@ -779,17 +811,13 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except BaseException:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.wait()
+                end_group(proc)
                 raise
         return subprocess.CompletedProcess(list(args), proc.returncode, stdout, stderr)
 
     def run_hook(args, cwd, extra_env, output_path, timeout):
-        # Its own process group, and the whole group is killed on a timeout or an interrupt:
-        # a gate under `make` or a shell script is a grandchild, and killing only the direct
+        # Its own process group, and the whole group is ended on a timeout or an interrupt:
+        # a gate under `make` or a shell script is a grandchild, and ending only the direct
         # child would leave it running in the checkout the next cycle merges into.
         with open(output_path, "ab") as output:
             proc = subprocess.Popen(list(args), cwd=cwd, env=dict(env, **extra_env),
@@ -798,11 +826,7 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
             try:
                 return proc.wait(timeout=timeout)
             except BaseException:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                proc.wait()
+                end_group(proc)
                 raise
 
     def start_hook(args, cwd, extra_env, output_path):

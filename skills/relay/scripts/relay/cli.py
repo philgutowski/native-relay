@@ -438,10 +438,9 @@ def cmd_status(args, env, out):
     feeder_line = _feeder_line(args.manifest)
     if raw is None:
         out.write("no state for %s yet\n" % args.manifest)
-        if queue:
-            out.write(progress.queue_line(reason="no run has written state for this manifest "
-                                                 "yet, so there is no cycle to price behind")
-                      + "\n")
+        line = _queue_status_line(manifest, None, env, queue)
+        if line:
+            out.write(line + "\n")
         if feeder_line:
             out.write(feeder_line + "\n")
         return EXIT_OK
@@ -456,14 +455,9 @@ def cmd_status(args, env, out):
     out.write("cursor: %d of %d task(s)\n" % (cursor, len(manifest.tasks)))
     for line in progress.lines(view):
         out.write(line + "\n")
-    if view["scope"] != progress.SCOPE_CYCLE:
-        if queue:
-            out.write(progress.queue_line(reason="no feeder sidecar sits beside this manifest, "
-                                                 "so there is no ready queue behind it") + "\n")
-    elif queue:
-        out.write(_queue_line(manifest, view, env) + "\n")
-    else:
-        out.write(progress.QUEUE_ASK + "\n")
+    line = _queue_status_line(manifest, view, env, queue)
+    if line:
+        out.write(line + "\n")
     # The state directory is keyed on the manifest's real path, so editing the manifest in place
     # keeps the directory and everything the previous run left in it. Say so rather than clamping
     # the number: the cursor and the terminal record are true facts, about a run this manifest no
@@ -503,6 +497,23 @@ def cmd_status(args, env, out):
         out.write(feeder_line + "\n")
     out.write("state: %s\n" % store.dir)
     return EXIT_OK
+
+
+def _queue_status_line(manifest, view, env, queue):
+    """The `queue:` line `status` prints, or None. Plain `status` under a feeder names the flag
+    and reads nothing; `--queue` prices the queue, or says in a sentence why it cannot. `view` is
+    None when no run has written state yet."""
+    if not os.path.isfile(feeder_module.paths_for(manifest.path).config):
+        if not queue:
+            return None
+        return progress.queue_line(reason="no feeder sidecar sits beside this manifest, so "
+                                          "there is no ready queue behind it")
+    if not queue:
+        return progress.QUEUE_ASK
+    if view is None:
+        return progress.queue_line(reason="no run has written state for this manifest yet, so "
+                                          "there is no cycle to price behind")
+    return _queue_line(manifest, view, env)
 
 
 def _queue_line(manifest, view, env):

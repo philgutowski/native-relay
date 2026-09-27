@@ -318,9 +318,9 @@ that line and never fails `status`.
 The flag is what makes that read happen, because it is not read only. It runs the sidecar's ready
 command in the target repository, or reads the tracker, at that moment and beside whatever Task
 process is building there, so a command that fetches or writes a cache file does so beside the live
-run. The command gets a minute, and its whole process group ends at that bound. Plain `status`
-under a feeder prints `queue: not read` and names the flag instead, and the pre cycle hook runs
-from neither form.
+run. The command gets a minute, and at that bound its whole process group is sent SIGTERM, then
+SIGKILL for whatever is left five seconds later. Plain `status` under a feeder prints `queue: not
+read` and names the flag instead, and the pre cycle hook runs from neither form.
 
 A board stays honest across a run. The task process moves a card to the in review status at its
 first step, and a Closeout for a blocked or halted task returns it to the status it read before

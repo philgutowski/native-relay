@@ -994,7 +994,8 @@ class StatusQueue(CliCase):
         started = time.monotonic()
         with mock.patch.object(cli.feeder_module, "STATUS_READY_TIMEOUT_SECONDS", 1):
             code, out = self.call("status", self.manifest_path, "--queue")
-        self.assertLess(time.monotonic() - started, 3, "the read waited past its bound")
+        # The grandchild sleeps thirty seconds holding the pipe; ten is slack for a loaded host.
+        self.assertLess(time.monotonic() - started, 10, "the read waited past its bound")
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("queue: no estimate, the ready source could not be read:", out)
         # Past the grandchild's own sleep: had only the direct child been killed, it would have
@@ -1009,12 +1010,19 @@ class StatusQueue(CliCase):
         _, out = self.call("status", self.manifest_path, "--queue")
         self.assertIn("queue: no estimate, no feeder sidecar sits beside this manifest", out)
 
-    def test_the_flag_before_any_state_says_so(self):
-        self.write_sidecar(self.printing())
+    def test_before_any_state_each_form_says_the_same_as_after(self):
+        _, out = self.call("status", self.manifest_path, "--queue")
+        self.assertIn("no state for", out)
+        self.assertIn("queue: no estimate, no feeder sidecar sits beside this manifest", out)
+        marker = os.path.join(self.tmp.name, "ready-command-ran")
+        self.write_sidecar(self.marking(marker))
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn(progress.QUEUE_ASK, out)
         code, out = self.call("status", self.manifest_path, "--queue")
         self.assertEqual(code, cli.EXIT_OK, out)
-        self.assertIn("no state for", out)
         self.assertIn("queue: no estimate, no run has written state for this manifest yet", out)
+        self.assertFalse(os.path.exists(marker))
 
     def test_status_takes_no_lease_and_writes_nothing(self):
         self.complete_run()

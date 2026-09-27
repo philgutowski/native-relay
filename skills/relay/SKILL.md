@@ -104,10 +104,11 @@ else: it runs no command and reads no tracker, so it is safe to poll beside a li
 feeder it prints `queue: not read` and names the flag. `status --queue` adds the ready queue behind
 the cycle, which runs the feeder sidecar's ready command in the target repository, or reads the
 tracker, at that moment and beside whatever is building there. Whatever that command fetches or
-writes lands beside the live Task process, and a dirty tree changes how its exit is classified,
-so ask for it deliberately. The command gets a minute, and its whole process group ends at that
-bound. A read that fails in any way is a sentence on the `queue:` line and never fails `status`.
-The pre cycle hook never runs from either form.
+writes lands beside the live Task process, and a dirty tree changes how its exit is classified, so
+ask for it deliberately. The command gets a minute, and at that bound its whole process group is
+sent SIGTERM, then SIGKILL for whatever is left five seconds later. A read that fails in any way is
+a sentence on the `queue:` line and never fails `status`. The pre cycle hook never runs from either
+form.
 
 Every launched task's record also carries `host_at_start` and `host_at_end`, the host's one minute
 load average, free and inactive memory, memory held by the macOS compressor, and cumulative swap
