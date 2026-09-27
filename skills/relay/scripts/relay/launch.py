@@ -241,29 +241,6 @@ class _Heartbeat:
             self._timer.cancel()
 
 
-def kill_pgid(pgid, grace_seconds):
-    """SIGTERM then SIGKILL a process group by id. Used when the coordinator only has the
-    group, not the Popen object, which is the abort path for a sibling build."""
-    if pgid is None:
-        return False
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-    deadline = time.monotonic() + grace_seconds
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError, OSError):
-            return True
-        time.sleep(0.05)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        return True
-    return True
-
-
 def _kill_group(proc, grace_seconds, pgid=None):
     """SIGTERM the whole group, then SIGKILL what is left. The pipe usually stays open until the
     SIGKILL because grandchildren inherited it, so nothing here waits on stdout.

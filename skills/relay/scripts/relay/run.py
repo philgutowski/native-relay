@@ -26,6 +26,7 @@ The runner never writes to the tracker (R19). Every tracker write in this file h
 closeout process the runner launched; the runner reads the result back and decides from it.
 """
 import os
+import signal
 import sys
 import threading
 import time
@@ -41,6 +42,10 @@ EXIT_OK = 0
 EXIT_CONFIG = 1
 EXIT_HALTED = 2
 EXIT_LEASE = 3
+
+# Issue #71. How long past the SIGKILL a dispatch waits for a flight's thread to finish and its
+# process group to empty before it names the flight as a survivor and leaves anyway.
+FLIGHT_EXIT_SECONDS = 10
 
 
 @dataclass
@@ -68,6 +73,9 @@ class _Run:
     # Dispatch-only frozen, read-only scheduling evidence.  The loop treats every edge as a
     # full-settlement dependency, not merely a build-order hint.
     schedule: object = None
+    # Dispatch only (issue #71). Flights still alive when the coordinator gave up waiting for
+    # them, as `{task, process_group}`. Named in the terminal record, never marked crashed.
+    surviving_flights: list = field(default_factory=list)
 
 
 @dataclass
@@ -837,17 +845,20 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
         store.release()
 
 
-def _mark_in_flight_crashed(store):
+def _mark_in_flight_crashed(store, spare=()):
     """Issue #64: a Runner leaving without a terminal record, an interrupt from the keyboard most
     often, drives nothing it launched any more. Its records in flight are marked the way a
     reclaim marks them, so none is left reading running with no process behind it. Called from a
     `finally`, where the exception on its way out names the cause. Best effort, like the terminal
-    write before it: that exception is the one to keep."""
+    write before it: that exception is the one to keep.
+
+    `spare` is the task ids whose process is still alive (issue #71), which are left reading
+    running because something still drives them."""
     leaving = sys.exc_info()[1]
     cause = (state.CRASH_INTERRUPTED if isinstance(leaving, KeyboardInterrupt)
              else state.CRASH_EXITED)
     try:
-        store.mark_in_flight_crashed(cause)
+        store.mark_in_flight_crashed(cause, spare=spare)
     except Exception:
         pass
 
@@ -1111,7 +1122,8 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
                      _git_error_fields(exc))
         _audit_cards(config)
         _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
-                        config.used_backends, announce=announce)
+                        config.used_backends, announce=announce,
+                        surviving_flights=config.surviving_flights)
         wrote_terminal = True
         return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
                           store, store.records())
@@ -1122,7 +1134,8 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
                      {"error_type": type(exc).__name__, "error": str(exc)[:500]})
         _audit_cards(config)
         _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
-                        config.used_backends, announce=announce)
+                        config.used_backends, announce=announce,
+                        surviving_flights=config.surviving_flights)
         wrote_terminal = True
         return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
                           store, store.records())
@@ -1130,10 +1143,12 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
         if not wrote_terminal:
             try:
                 _write_terminal(store, env, contracts.RUN_CRASHED,
-                                used_backends=config.used_backends, announce=announce)
+                                used_backends=config.used_backends, announce=announce,
+                                surviving_flights=config.surviving_flights)
             except Exception:
                 pass
-            _mark_in_flight_crashed(store)
+            _mark_in_flight_crashed(store, spare={entry["task"]
+                                                  for entry in config.surviving_flights})
         store.release()
 
 
@@ -1144,17 +1159,20 @@ def _git_error_fields(exc):
 
 
 def _write_terminal(store, env, run_status, halt_task=None, halt_class=None, used_backends=(),
-                    announce=None):
+                    announce=None, surviving_flights=()):
     """Write terminal version evidence for only the CLIs this invocation actually launched.
 
     The run's last phase event goes out from here rather than from each of the three call sites,
     so a fourth ending added later cannot forget to announce itself. The counts are read after the
     record is written, so they describe the run the record just closed.
+
+    `surviving_flights` names the dispatch builds still alive when the run left (issue #71).
     """
     used = sorted(used_backends)
     pinned = {name: backends.build(name).CAPABILITY.version_tested for name in used}
     observed = {name: launch.cli_version(env, backend=name) for name in used}
-    record = store.write_terminal(run_status, halt_task, halt_class, pinned, observed)
+    record = store.write_terminal(run_status, halt_task, halt_class, pinned, observed,
+                                  surviving_flights=surviving_flights)
     if announce is not None:
         line = _counts_line(store, run_status)
         if halt_task:
@@ -1346,6 +1364,9 @@ class _Flight:
     thread: object
     pgid: list
     box: list
+    # Issue #71. Set once the coordinator has begun ending this build, so a process whose launch
+    # reaches Popen only afterwards is killed as it starts rather than left running untracked.
+    stopping: object = field(default_factory=threading.Event)
 
 
 def retries_blocked(retry_blocked, task_id):
@@ -1625,9 +1646,14 @@ def _snapshot_and_remove(cfg, dest):
 def _spawn_flight(cfg, begun, dest):
     pgid_box = []
     result_box = []
+    stopping = threading.Event()
 
     def on_started(_pid, group_id):
+        # The group first and the check second, the reverse of `_stop_flights`, so one of the
+        # two always sees the other and a late start is never missed.
         pgid_box.append(group_id)
+        if stopping.is_set() and group_id:
+            _signal_group(group_id, signal.SIGKILL)
 
     def worker():
         try:
@@ -1643,7 +1669,8 @@ def _spawn_flight(cfg, begun, dest):
 
     thread = threading.Thread(target=worker, name="relay-build-%s" % begun.task.id, daemon=True)
     thread.start()
-    return _Flight(begun=begun, worktree=dest, thread=thread, pgid=pgid_box, box=result_box)
+    return _Flight(begun=begun, worktree=dest, thread=thread, pgid=pgid_box, box=result_box,
+                   stopping=stopping)
 
 
 def _wait_any_flight(slots, timeout=0.1):
@@ -1672,21 +1699,98 @@ def _abandon_build(cfg, task_id, branch, dest=None):
                      envelope_verdict=None, host_at_start=None, host_at_end=None)
 
 
+def _signal_group(pgid, signum):
+    try:
+        os.killpg(pgid, signum)
+    except OSError:
+        pass
+
+
+def _flight_exited(flight):
+    """No process is left in the flight's group. A flight with no group yet has exited only once
+    its thread has returned without starting one. The thread is not waited on once the group is
+    empty: a descendant that left the group can hold the pipe open and keep the launch's reader
+    waiting long past the bound, and nothing of this build is running in the meantime."""
+    if not flight.pgid:
+        return not flight.thread.is_alive()
+    try:
+        os.killpg(flight.pgid[0], 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _stop_flights(cfg, flights):
+    """Issue #71. End every flight's process group and wait for each to exit, the way the triple
+    route waits in `_triple_workers_stopped`. The build threads run `launch.launch` off the main
+    thread, where it cannot install its signal handlers, and each Task process sits in its own
+    session, so nothing else passes a stop on to them. Every group gets SIGTERM together, then
+    SIGKILL once the grace has passed, and a flight whose process starts during the wait is
+    signalled when its group appears. Returns the flights still alive at the bound."""
+    for flight in flights:
+        flight.stopping.set()
+    grace = cfg.launch_kwargs.get("sigkill_grace_seconds", launch.SIGKILL_GRACE_SECONDS)
+    if flights and cfg.stream is not None:
+        # Said before the wait, which can run the whole grace, so a silent pause does not draw a
+        # second interrupt that would leave the stop half done.
+        cfg.stream("stopping %d build(s): %s; up to %ds"
+                   % (len(flights), ", ".join(f.begun.task.id for f in flights),
+                      round(grace + FLIGHT_EXIT_SECONDS)))
+    kill_at = time.monotonic() + grace
+    give_up_at = kill_at + FLIGHT_EXIT_SECONDS
+    sent = {}
+    while True:
+        alive = [flight for flight in flights if not _flight_exited(flight)]
+        now = time.monotonic()
+        if not alive or now >= give_up_at:
+            return alive
+        signum = signal.SIGTERM if now < kill_at else signal.SIGKILL
+        for flight in alive:
+            if flight.pgid and sent.get(id(flight)) != signum:
+                _signal_group(flight.pgid[0], signum)
+                sent[id(flight)] = signum
+        time.sleep(0.05)
+
+
 def _abort_siblings(cfg, slots, waiting, keep_id):
-    """On a halt that does not continue past: drop every other in flight or waiting build."""
-    for backend, flight in list(slots.items()):
-        if flight.begun.task.id == keep_id:
+    """On a halt that does not continue past: drop every other in flight or waiting build.
+
+    A flight still alive after `_stop_flights` keeps its worktree, branch, and running record,
+    because a process is still using them, and is named on `cfg.surviving_flights` for the
+    terminal record. Every flight is named there until the stop has said otherwise, so a raise
+    partway through leaves none unnamed. `keep_id` of None drops every build, which is an
+    interrupted dispatch."""
+    flights = [flight for flight in slots.values() if flight.begun.task.id != keep_id]
+    # A survivor an earlier abort named has already left `slots`, so it is carried rather than
+    # lost when a halt's abort is followed by the interrupt's.
+    earlier = [entry for entry in cfg.surviving_flights
+               if entry["task"] not in {flight.begun.task.id for flight in flights}]
+    cfg.surviving_flights = earlier + _named_flights(flights)
+    survivors = _stop_flights(cfg, flights)
+    cfg.surviving_flights = earlier + _named_flights(survivors)
+    surviving_ids = {flight.begun.task.id for flight in survivors}
+    for task_id, flight in list(slots.items()):
+        if task_id == keep_id:
             continue
-        if flight.pgid:
-            launch.kill_pgid(flight.pgid[0], cfg.launch_kwargs.get("sigkill_grace_seconds", 15))
-        flight.thread.join(timeout=5)
-        _abandon_build(cfg, flight.begun.task.id, flight.begun.branch, flight.worktree)
-        del slots[backend]
+        del slots[task_id]
+        if task_id not in surviving_ids:
+            _abandon_build(cfg, task_id, flight.begun.branch, flight.worktree)
     for task_id, (begun, _launched) in list(waiting.items()):
         if task_id == keep_id:
             continue
         _abandon_build(cfg, task_id, begun.branch)
         del waiting[task_id]
+    if cfg.stream is not None:
+        for entry in _named_flights(survivors):
+            cfg.stream("%s: its Task process group %s was still alive after the stop; left "
+                       "running with its worktree" % (entry["task"], entry["process_group"]))
+
+
+def _named_flights(flights):
+    return [{"task": flight.begun.task.id,
+             "process_group": flight.pgid[0] if flight.pgid else None} for flight in flights]
 
 
 def _record_halt(cfg, halt, task):
@@ -1706,12 +1810,33 @@ def _record_halt(cfg, halt, task):
 
 
 def _concurrent_loop(cfg, announce):
-    """Launch ready schedule waves, then merge strictly in manifest order."""
+    """Launch ready schedule waves, then merge strictly in manifest order.
+
+    Issue #71. Anything leaving the loop by an exception, an interrupt from the keyboard most
+    often, ends every build in flight first and abandons it the way a halt that does not continue
+    past does, so dispatch's own handlers mark records and release the lease only once no Task
+    process is left behind them. A build that would not die is kept on `cfg.surviving_flights`
+    for the terminal record. A build already finished and waiting its merge is left alone: its
+    process has exited, and its branch is completed work the next pre flight will name, not a
+    half built one to discard."""
+    slots = {}
+    waiting = {}
+    try:
+        return _concurrent_drive(cfg, announce, slots, waiting)
+    except BaseException:
+        try:
+            _abort_siblings(cfg, slots, {}, None)
+        except Exception:
+            # Best effort, like every write on the way out: the exception already leaving is
+            # the one to keep.
+            pass
+        raise
+
+
+def _concurrent_drive(cfg, announce, slots, waiting):
     tasks = list(cfg.manifest.tasks)
     n = len(tasks)
     by_id = {task.id: task for task in tasks}
-    slots = {}
-    waiting = {}
     settled = set()
     next_merge = 0
     predecessors = {task.id: set() for task in tasks}
@@ -1775,7 +1900,8 @@ def _concurrent_loop(cfg, announce):
         _abort_siblings(cfg, slots, waiting, halt.task_id)
         _audit_cards(cfg)
         _write_terminal(cfg.store, cfg.env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
-                        cfg.used_backends, announce=announce)
+                        cfg.used_backends, announce=announce,
+                        surviving_flights=cfg.surviving_flights)
         return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
                           cfg.store, cfg.store.records())
 
