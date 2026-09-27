@@ -44,6 +44,7 @@ python3 <runner> dispatch <manifest>             # choose serial (default) or co
 python3 <runner> dispatch <manifest> --policy parallel # explicit conservative parallel policy
 python3 <runner> dispatch <manifest> --policy serial # explicit serial policy
 python3 <runner> run <manifest> --retry-blocked # the same, retrying records that read blocked
+python3 <runner> run <manifest> --retry-blocked T-4  # the same, retrying that one blocked task only; repeatable
 python3 <runner> run <manifest> --detach        # the same, in its own session, logged to the state dir
 python3 <runner> run <manifest> --detach --notify  # the same, notifying the desktop with nobody attached
 python3 <runner> run <manifest> --detach --wait-for-lease  # queue behind a live runner on this manifest or repo, then run
@@ -65,6 +66,7 @@ python3 <runner> feed <manifest> --once         # one cycle: append a batch, run
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
 python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
+python3 <runner> feed <manifest> --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle
 ```
 
 `run --follow` and `tail` share four options: `--phases` prints phase events without the decoded
@@ -413,9 +415,13 @@ decision at launch: the card could not be read, the card was already terminal, o
 run the same command, and the task launches.
 
 Blocked tasks are skipped by default, because blocked is a deliberate outcome rather than a
-failure. Pass `--retry-blocked` only when the operator asks for it, and expect it to refuse when a
-stranded Task branch still carries commits; that work is theirs to keep, discard, or tag and
-delete, which keeps every commit and frees the card (see the `unclean_exit` row above).
+failure. Pass `--retry-blocked` only when the operator asks for it. Give it a task id,
+`--retry-blocked T-4`, to retry that one task and leave every other blocked record alone; the
+bare flag retries them all. Put the manifest first: an id written before it would take the
+manifest's path as the id, and the command refuses for want of a manifest. Expect either form to
+refuse when a stranded Task branch still carries commits; that work is theirs to keep, discard,
+or tag and delete, which keeps every commit and frees the card (see the `unclean_exit` row
+above).
 
 ### A Task branch left by an earlier run
 
@@ -511,6 +517,17 @@ marked exhausted for `fallback_hours` (5 by default), the task is moved to opus 
 and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
 mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
 where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
+
+A limit death is sometimes recorded `blocked` with class `no_envelope` rather than halted: the
+process printed only the CLI's limit message and exited in seconds. The fallback covers that too.
+The feeder reads the task's stdout log, where a `result` line with `api_error_status` 429 confirms
+the limit and a `result` line with any other outcome, a 404 for a model the account cannot reach
+for one, rules it out; with no `result` line the time rule decides alone. A blocked task it moves
+is relaunched by passing `--retry-blocked <id>` for it alone to the next run, so no older blocked
+task is revived with it. In a cycle the whole cycle wait takes, it waits with the halts and then
+relaunches on its own model. To relaunch one blocked task by hand, `feed <manifest> --restart
+--detach --retry-blocked <id>` queues it for the next cycle, never `run` beside a live feeder. An
+id the manifest does not list stops the feeder with exit 1.
 
 Start a feeder from a pinned extract of a commit when the operator has one, never from a
 checkout somebody is editing. It launches the runner from its own tree at every cycle.

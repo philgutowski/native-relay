@@ -322,6 +322,27 @@ class RunVerb(CliCase):
         self.assertIn(contracts.HALT_UNCLEAN_EXIT, out)
         self.assertIn("left no commits", out)
 
+    def test_retry_blocked_takes_no_id_one_id_or_several(self):
+        """Issue #39. Bare retries every blocked record; ids retry only those."""
+        def value(*flags):
+            args = cli.build_parser().parse_args(["run", "m.toml"] + list(flags))
+            return cli.retry_blocked_value(args.retry_blocked)
+        self.assertIs(value(), False)
+        self.assertIs(value("--retry-blocked"), True)
+        self.assertEqual(value("--retry-blocked", "39"), frozenset({"39"}))
+        self.assertEqual(value("--retry-blocked", "39", "--retry-blocked", "T-4"),
+                         frozenset({"39", "T-4"}))
+        # A bare flag beside an id still means every one; a following option is not an id.
+        self.assertIs(value("--retry-blocked", "39", "--retry-blocked"), True)
+        self.assertIs(value("--retry-blocked", "--notify"), True)
+        self.assertIs(cli.retry_blocked_value(True), True)
+
+    def test_retry_blocked_refuses_an_id_the_manifest_does_not_list(self):
+        code, out = self.call("run", self.manifest_path, "--retry-blocked", "T-9")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("--retry-blocked names T-9, not a task in this manifest", out)
+        self.assertIsNone(self.store().read())
+
 
 class DetachedRun(CliCase):
     def test_detach_returns_at_once_and_the_run_completes_in_its_own_session(self):
@@ -365,6 +386,10 @@ class DetachCommand(CliCase):
     def test_retry_blocked_is_carried_through_only_when_asked(self):
         self.assertIn("--retry-blocked", cli.detach_command("/e", "/m", True))
         self.assertNotIn("--retry-blocked", cli.detach_command("/e", "/m", False))
+
+    def test_named_retry_ids_stay_named_in_the_child(self):
+        argv = cli.detach_command("/e", "/m", frozenset({"T-4", "T-2"}))
+        self.assertEqual(argv[5:], ["--retry-blocked", "T-2", "--retry-blocked", "T-4"])
 
     def test_notify_is_carried_through_only_when_asked(self):
         """Issue #44: this argv is the whole channel by which a detached runner learns the
