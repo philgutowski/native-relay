@@ -1011,6 +1011,13 @@ class Feeder:
             # them, since a feeder driven a cycle at a time by cron has no other life.
             for key in STREAKS:
                 self.state[key] = 0
+        # A scanned out card is named at every process start, not only the first one for the
+        # life of the state file (issue #58): `reported` otherwise carries `scan_skip:<id>`
+        # forward for ever, and an operator who missed the first line never sees another. Unlike
+        # STREAKS this is not guarded by `not self.once`: a `--once` cron start is as much a
+        # start as a long lived process is, and the mechanism paragraph names it explicitly.
+        for key in [key for key in self.state["reported"] if key.startswith("scan_skip:")]:
+            del self.state["reported"][key]
         # Written while the lock is held, so the pid here is the lock holder's (issue #36).
         self.state["process"] = {
             "pid": self.pid, "hostname": socket.gethostname(),
@@ -1171,10 +1178,15 @@ class Feeder:
             return EXIT_OK
 
         for card in fresh:
+            key = "scan_skip:" + card["id"]
             reason = scanned.get(card["id"])
             if reason:
-                self.report_once("scan_skip:" + card["id"], "%s would be skipped at launch and "
+                self.report_once(key, "%s would be skipped at launch and "
                                  "is left out of the batch: %s" % (card["id"], reason))
+            else:
+                # A card that scans clean and later trips the scan again is news again
+                # (issue #58), the same rule `queue_retry` applies to a retry that blocks again.
+                self.state["reported"].pop(key, None)
 
         appended = self.append(text, entries)
         if appended:
@@ -1190,7 +1202,8 @@ class Feeder:
             # A card the scan refuses never reached model routing, so it is not evidence of a
             # routing problem (issue #41); only a card that got that far belongs in this check.
             return self.idle(readable, [card["id"] for card in fresh
-                                        if card["id"] not in scanned and card["id"] not in held])
+                                        if card["id"] not in scanned and card["id"] not in held],
+                             [card["id"] for card in fresh if card["id"] in scanned])
 
         self.state["cycles"] += 1
         self.state.get("process", {})["cycle"] = self.state["cycles"]
@@ -1219,9 +1232,9 @@ class Feeder:
             status: sorted((task["id"] for task in by_status.get(status, ())), key=natural_key)
             for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED)})
 
-    def idle(self, readable, fresh_ids):
+    def idle(self, readable, fresh_ids, scanned_ids=()):
         """Nothing was appended and no listed task is left to run, while no runner holds the
-        lease. Three things look like that and only one is an empty queue.
+        lease. Four things look like that and only one is a true empty queue.
 
         A ready source that could not be read is not an empty queue: the feeder waits and asks
         again, and after `UNREADABLE_WAITS_MAX` waits in a row it stops for a person, because a
@@ -1229,9 +1242,16 @@ class Feeder:
         were all refused by validate are not an empty queue either: the board has work, and
         only a person changing the routing can release it, so the feeder stops and names them.
 
-        What is left is an empty queue. By default the feeder leaves at once rather than keep a
-        process alive to poll an empty board. `idle_waits_max` above zero waits that many times
-        first, for a board where a person releases cards through the day."""
+        Ready cards the launch scan refuses (`scanned_ids`) wait like an empty queue, since a
+        card wanting a reword is not the same urgency as a routing mismatch (issue #41), but the
+        `leaving` event must not call that a true empty queue either (issue #58): a watcher
+        reading `empty_queue` off the last event would conclude nothing was ever ready, when the
+        board in fact held work the scan alone was holding back. `empty_queue_scanned` says so
+        and names the cards.
+
+        What is left is a true empty queue. By default the feeder leaves at once rather than
+        keep a process alive to poll an empty board. `idle_waits_max` above zero waits that many
+        times first, for a board where a person releases cards through the day."""
         config = self.config
         if not readable:
             if self.strike("unreadable_waits", UNREADABLE_WAITS_MAX):
@@ -1248,6 +1268,12 @@ class Feeder:
                                           "Change the routing and start the feeder again."
                                           % ", ".join(fresh_ids), "all_refused")
         if self.strike("idle_waits", config.idle_waits_max):
+            if scanned_ids:
+                return self.stop(EXIT_OK, "the queue is empty except for cards the launch scan "
+                                          "refuses, leaving: %s. Nothing else is ready, nothing "
+                                          "is left to run, and no runner holds the lease. Reword "
+                                          "the named cards to release them."
+                                          % ", ".join(scanned_ids), "empty_queue_scanned")
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
