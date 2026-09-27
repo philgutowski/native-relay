@@ -88,7 +88,9 @@ What stays manual under a feeder:
 Start a feeder from a pinned extract of a commit, never from a checkout you are editing: it
 launches the runner from its own tree at every cycle, so a file you change there becomes the code
 driving the run ninety minutes later. `feed <manifest> --pin` does the extract and the restart in
-one flag, and a feeder started from a checkout without it warns at start.
+one flag, and a feeder started from a checkout without it warns at start. It extracts the default
+branch's commit, never HEAD, so running it from a self hosted checkout mid task still pins merged
+work, and it names the extract `native-relay-` plus 12 characters of the sha.
 
 ## After the run
 

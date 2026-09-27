@@ -202,9 +202,16 @@ It launches the runner from the same tree it was started from. Start it from a p
 a commit and it drives that extract, whatever happens in your checkout meanwhile. Started from a
 git checkout it says so, on the terminal and in its log, because every cycle would then run
 whatever that checkout holds. `feed <manifest> --pin` is the one flag that fixes it: it extracts
-the checkout's HEAD under `~/.relay/extracts/native-relay-<sha>` and starts the feeder from
-there with `--restart`, so a running feeder finishes its task and hands over. Uncommitted edits
-are not in the extract, and the flag says when there are some. For the same
+the default branch's commit, never HEAD, under `~/.relay/extracts/native-relay-<sha>` and starts
+the feeder from there with `--restart`, so a running feeder finishes its task and hands over.
+The default branch is the manifest's `project.default_branch` when the manifest's repo is this
+checkout, else the checkout's `origin/HEAD`; when neither resolves the flag refuses. A checkout
+that is also the run's target sits on a task branch while that task is built, and pinning HEAD
+there would run unmerged, ungated work at every later cycle. `<sha>` is always the first 12
+characters, what `git rev-parse --short=12 main` prints, so an extract made by hand under that
+name is reused. The flag prints the branch beside the sha, and says when the checkout sits on
+another branch or holds uncommitted edits, neither of which is in the extract. With `--dry-run`
+it says what it would extract and writes nothing. For the same
 reason, editing the sidecar's settings or cutting a new runner does nothing to a feeder already
 running; `--restart` asks the old one to leave, waits for it, and takes its place, and nothing is
 killed, so the task in flight finishes and merges normally. The order and routing files are the

@@ -568,6 +568,9 @@ terminal with exit 1, and the running feeder is left untouched.
 
 Start a feeder from a pinned extract of a commit when the operator has one, never from a
 checkout somebody is editing. It launches the runner from its own tree at every cycle.
+`feed <manifest> --pin` extracts the default branch's commit, never HEAD, to
+`~/.relay/extracts/native-relay-<first 12 sha characters>` and restarts the feeder from it;
+`--pin --dry-run` says what it would extract and writes nothing.
 
 ## What this skill never does
 
