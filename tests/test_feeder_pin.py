@@ -86,6 +86,15 @@ class Extract(Case):
         self.assertEqual(len(names), 1, names)
 
 
+class Unresolvable(Case):
+    def test_a_repo_with_no_commit_is_reported_not_raised(self):
+        empty = os.path.join(self.base, "empty")
+        os.makedirs(empty)
+        _repo.git(empty, "init", "-q", "-b", "main")
+        with self.assertRaises(OSError):
+            feeder.pin_extract(empty, self.home)
+
+
 class Verb(Case):
     def call(self, *flags):
         manifest = os.path.join(self.base, "m.toml")

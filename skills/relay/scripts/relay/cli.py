@@ -727,6 +727,10 @@ def cmd_feed(args, env, out, deps=None):
         return _pin_feeder(args, env, out)
     if warning:
         out.write("warning: %s\n" % warning)
+    elif args.pin and not args.dry_run:
+        # Already running from an extract: `--pin` still means "take over from the running
+        # feeder", so it keeps the restart semantics it has from a checkout.
+        args.restart = True
     try:
         config = feeder_module.load_config(paths.config)
         if args.detach:
@@ -764,7 +768,7 @@ def _pin_feeder(args, env, out):
     home = env.get("HOME") or os.path.expanduser("~")
     try:
         extract, dirty = feeder_module.pin_extract(feeder_module.runner_tree(), home)
-    except (gitread.GitError, OSError) as exc:
+    except (gitread.GitError, OSError, subprocess.SubprocessError) as exc:
         out.write("could not pin an extract: %s\n" % exc)
         return EXIT_CONFIG
     out.write("pinned extract: %s\n" % extract)

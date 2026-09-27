@@ -506,7 +506,10 @@ def pin_extract(tree, home, run=subprocess.run):
     directory every time HEAD is the same, and an existing one that holds the runner is reused
     untouched, since a feeder may be running from it. `uncommitted` is the first changed path
     the extract does not hold, or None."""
-    sha = gitread.rev_parse(tree, "HEAD")[:12]
+    head = gitread.rev_parse(tree, "HEAD")
+    if not head:
+        raise OSError("HEAD does not resolve in %s, so there is no commit to extract" % tree)
+    sha = head[:12]
     dirty = gitread.status_porcelain(tree).strip()
     destination = os.path.join(home, ".relay", "extracts", "native-relay-" + sha)
     entry = os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
