@@ -142,6 +142,8 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  # relaunch one blocked task next cycle
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle; --json for data
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --follow    # new events as JSON lines until it leaves
 ```
 
 Three rules carry it. **Only ready cards are appended.** Ready is the tracker's own account that
@@ -158,7 +160,8 @@ those halts. That last one is a heuristic, not a detection: Relay has no usage l
 Every project fact is data in a sidecar file beside the manifest and named from its stem. For
 `queue.toml` the feeder reads `queue.feeder.toml` (settings, all optional), `queue.order`
 (priority, one id per line), and `queue.models` (model routing, one `id model` per line, read
-fresh each cycle), and writes `queue.feeder.state.json` and `queue.feeder.log`.
+fresh each cycle), and writes `queue.feeder.state.json`, `queue.feeder.log`, and
+`queue.feeder.events.jsonl`.
 `docs/examples/feeder/` has one of each. A card's model is the routing file's line, else a
 `**Model:** name` line in the card's body, else the sidecar's default, and a name outside the
 sidecar's allowed set is ignored and logged.
@@ -179,6 +182,20 @@ cannot be read is not an empty queue: with nothing left to run the feeder waits 
 and stops with exit 1 after three failed reads in a row. Ready cards that validate refused are
 not an empty queue either; the feeder stops with exit 1 and names them, since only a routing
 change releases them.
+
+**It answers for itself.** `feed <manifest> --status` says whether that manifest's feeder is
+running and what its last cycle did: what it appended, what landed, halted, blocked, or was
+skipped, and what it is doing now, waiting on a usage limit until a given time for example, or
+why it left. The answer comes from the pid the feeder recorded in its state file, checked
+against the manifest's own lock file, so another manifest's feeder or a recycled pid can never
+read as this one alive; a process listing cannot tell two boards apart. `status <manifest>`
+adds the same answer as one `feeder:` line. For a watcher, the feeder writes one JSON line per
+moment to `queue.feeder.events.jsonl`: `started`, `cycle_started` (the ids appended),
+`cycle_result` (the run's exit code and the ids by outcome), `waiting` (a reason and when it
+ends), and `leaving` (the exit code and a reason word such as `stop_file` or `empty_queue`).
+Every line names its manifest and its pid. `feed <manifest> --follow` prints new lines as they
+come and ends when the feeder leaves, or with a `not_running` line of its own when the feeder
+is gone without saying so; `--events` prints the lines so far.
 
 It launches the runner from the same tree it was started from. Start it from a pinned extract of
 a commit and it drives that extract, whatever happens in your checkout meanwhile. Started from a

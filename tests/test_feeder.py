@@ -1045,6 +1045,224 @@ class Verb(FeederCase):
         self.assertEqual(self.runs, [])
 
 
+class Watch(FeederCase):
+    """Issue #36: whether this manifest's feeder is running, and what its last cycle did, from
+    the files beside the manifest, never from a process listing."""
+
+    def events(self, paths=None):
+        with open((paths or self.paths).events, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
+    def state(self, paths=None):
+        with open((paths or self.paths).state, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def call(self, *flags, deps=None):
+        args = cli.build_parser().parse_args(["feed", self.manifest_path] + list(flags))
+        out = io.StringIO()
+        code = cli.cmd_feed(args, self.base_env(), out, deps=deps or self.deps())
+        return code, out.getvalue()
+
+    def dead_pid(self):
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def record(self, paths, **process):
+        body = dict({"pid": os.getpid(), "hostname": feeder.socket.gethostname(),
+                     "started_at": "2026-09-19T08:50:00", "cycle": 4}, **process)
+        self.write(paths.state, json.dumps(dict(feeder.new_state(), process=body)))
+
+    def test_a_run_records_its_process_and_every_event_names_its_manifest_and_pid(self):
+        self.plans = [{"2": halted(1500)}]
+        self.assertEqual(self.feed(), 0)
+        events = self.events()
+        self.assertEqual([event["event"] for event in events],
+                         ["started", "cycle_started", "cycle_result", "leaving"])
+        for event in events:
+            self.assertEqual((event["manifest"], event["pid"]),
+                             (self.paths.manifest, os.getpid()))
+        self.assertEqual(events[1]["appended"], ["1", "2", "3"])
+        self.assertEqual(events[1]["cycle"], 1)
+        self.assertEqual((events[2]["run_exit"], events[2]["landed"], events[2]["halted"]),
+                         (2, ["1", "3"], ["2"]))
+        self.assertEqual((events[3]["reason"], events[3]["exit_code"]), ("stop_file", 0))
+        process = self.state()["process"]
+        self.assertEqual((process["pid"], process["cycle"], process["left_reason"],
+                          process["exit_code"], process["runner_tree"]),
+                         (os.getpid(), 1, "stop_file", 0, feeder.runner_tree()))
+        self.assertEqual(self.state()["last_cycle"]["result"], events[2])
+
+    def test_a_wait_is_an_event_with_its_reason_and_when_it_ends(self):
+        self.plans = [3, {}]
+        self.feed()
+        waits = [event for event in self.events() if event["event"] == "waiting"]
+        self.assertEqual([(event["reason"], event["seconds"], event["until"]) for event in waits],
+                         [("lease_held", 600, "2026-09-19T09:00:00")])
+        results = [event for event in self.events() if event["event"] == "cycle_result"]
+        self.assertEqual([event["run_exit"] for event in results], [3, 0])
+
+    def test_a_usage_limit_wait_says_so(self):
+        self.plans = [{"1": halted(20), "2": halted(20), "3": halted(20)}, {}]
+        self.feed()
+        self.assertIn(("waiting", "usage_limit"),
+                      [(event["event"], event.get("reason")) for event in self.events()])
+
+    def test_each_way_of_leaving_carries_its_own_reason(self):
+        self.adapter.ready_cards = []
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.events()[-1]["reason"], "empty_queue")
+        self.adapter.ready_cards = [card(1)]
+        self.plans = [1]
+        self.assertEqual(self.feed(), 1)
+        self.assertEqual((self.events()[-1]["reason"], self.events()[-1]["exit_code"]),
+                         ("run_refused", 1))
+        os.unlink(self.paths.stop)
+        self.adapter.ready_cards = [card(2)]
+        self.plans = [{}]
+        self.assertEqual(self.feed(once=True), 0)
+        self.assertEqual(self.events()[-1]["reason"], "once")
+        self.assertEqual(self.state()["process"]["left_reason"], "once")
+
+    def test_a_crash_is_recorded_before_it_raises(self):
+        def boom(manifest_path, retry_ids=()):
+            raise RuntimeError("the disk went away")
+        original = self.deps
+        self.deps = lambda: SimpleNamespace(**dict(vars(original()), run_cycle=boom))
+        with self.assertRaises(RuntimeError):
+            self.feed()
+        self.assertEqual((self.events()[-1]["reason"], self.events()[-1]["exit_code"]),
+                         ("crashed", None))
+        self.assertIn("the disk went away", self.state()["process"]["left_message"])
+
+    def test_liveness_is_the_recorded_pid_holding_this_manifests_lock(self):
+        self.assertFalse(feeder.liveness(self.paths, {})["running"])
+        self.record(self.paths)
+        held = feeder.acquire_lock(self.paths)
+        try:
+            answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        finally:
+            held.close()
+        self.assertEqual((answer["running"], answer["pid"]), (True, os.getpid()))
+        # The same live pid without the lock is some other process, never this feeder.
+        answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        self.assertFalse(answer["running"])
+        self.assertIn("does not hold", answer["detail"])
+
+    def test_a_dead_pid_or_a_recorded_leave_is_not_running(self):
+        self.record(self.paths, pid=self.dead_pid())
+        answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        self.assertFalse(answer["running"])
+        self.assertIn("recorded no leaving", answer["detail"])
+        self.record(self.paths, left_at="2026-09-19T09:10:00", exit_code=0,
+                    left_reason="stop_file", left_message="stop file present, leaving")
+        answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        self.assertFalse(answer["running"])
+        self.assertIn("left at 2026-09-19T09:10:00 with exit 0 (stop_file)", answer["detail"])
+
+    def test_a_lock_held_with_no_record_is_running_and_another_host_is_unknown(self):
+        held = feeder.acquire_lock(self.paths)
+        try:
+            answer = feeder.liveness(self.paths, {})
+        finally:
+            held.close()
+        self.assertEqual((answer["running"], answer["pid"]), (True, None))
+        self.record(self.paths, hostname="elsewhere.local")
+        answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        self.assertIsNone(answer["running"])
+        self.assertIn("elsewhere.local", answer["detail"])
+
+    def test_a_second_boards_live_feeder_never_answers_for_this_one(self):
+        """The incident: a process match found the other board's feeder alive while this board's
+        had left on its stop file, and this board sat idle for hours."""
+        other = feeder.paths_for(os.path.join(self.tmp.name, "other-board.toml"))
+        self.record(other)
+        self.record(self.paths, left_at="2026-09-19T09:10:00", exit_code=0,
+                    left_reason="stop_file", left_message="stop file present, leaving")
+        held = feeder.acquire_lock(other)
+        try:
+            mine = feeder.liveness(self.paths, feeder.read_state(self.paths))
+            theirs = feeder.liveness(other, feeder.read_state(other))
+        finally:
+            held.close()
+        self.assertFalse(mine["running"])
+        self.assertTrue(theirs["running"])
+
+    def test_status_prints_liveness_and_the_last_cycle(self):
+        self.plans = [{"2": halted(1500)}]
+        self.feed()
+        code, text = self.call("--status")
+        self.assertEqual(code, 0, text)
+        self.assertIn("feeder: not running, pid %d left at" % os.getpid(), text)
+        self.assertIn("(stop_file)", text)
+        self.assertIn("last cycle: 1 started 2026-09-19T08:50:00, appended [1, 2, 3]", text)
+        self.assertIn("relay run exited 2 at 2026-09-19T08:50:00: landed [1, 3], halted [2]",
+                      text)
+        self.assertIn("last event: leaving at 2026-09-19T08:50:00 exit 0 (stop_file)", text)
+        code, text = self.call("--status", "--json")
+        report = json.loads(text)
+        self.assertEqual((report["running"], report["manifest"], report["cycles"]),
+                         (False, self.paths.manifest, 1))
+        self.assertEqual(report["last_event"]["event"], "leaving")
+
+    def test_status_before_any_feeder_and_over_a_broken_state_file(self):
+        code, text = self.call("--status")
+        self.assertEqual(code, 0)
+        self.assertIn("feeder: not running, no feeder has recorded itself", text)
+        self.assertIn("last cycle: none recorded", text)
+        self.write(self.paths.state, "{not json")
+        code, text = self.call("--status")
+        self.assertEqual(code, 1)
+        self.assertIn("could not be read", text)
+
+    def test_events_prints_every_line_and_status_verb_adds_the_feeder_line(self):
+        self.plans = [{}]
+        self.feed()
+        code, text = self.call("--events")
+        self.assertEqual(code, 0)
+        self.assertEqual([json.loads(line)["event"] for line in text.splitlines()],
+                         ["started", "cycle_started", "cycle_result", "leaving"])
+        args = cli.build_parser().parse_args(["status", self.manifest_path])
+        out = io.StringIO()
+        self.assertEqual(cli.cmd_status(args, self.base_env(), out), 0)
+        self.assertIn("feeder: not running, pid %d left at" % os.getpid(), out.getvalue())
+
+    def test_follow_prints_only_new_events_and_ends_on_leaving(self):
+        self.plans = [{}]
+        self.feed()                                         # four old events, not reprinted
+        leaving = {"event": "leaving", "manifest": self.paths.manifest, "reason": "stop_file"}
+        polls = []
+
+        def sleep(seconds):
+            polls.append(seconds)
+            with open(self.paths.events, "a", encoding="utf-8") as handle:
+                if len(polls) == 1:
+                    handle.write('{"event": "waiting", "reason": "idle"}\n{"event": "lea')
+                else:
+                    handle.write(json.dumps(leaving)[len('{"event": "lea'):] + "\n")
+        held = feeder.acquire_lock(self.paths)
+        try:
+            deps = self.deps()
+            deps.sleep = sleep
+            code, text = self.call("--follow", deps=deps)
+        finally:
+            held.close()
+        self.assertEqual(code, 0)
+        self.assertEqual([json.loads(line)["event"] for line in text.splitlines()],
+                         ["waiting", "leaving"])
+        self.assertEqual(polls, [feeder.FOLLOW_POLL_SECONDS] * 2)
+
+    def test_follow_ends_with_its_own_line_when_no_feeder_is_running(self):
+        self.record(self.paths, pid=self.dead_pid())
+        lines, polls = [], []
+        feeder.follow_events(self.paths, lines.append, polls.append,
+                             now=lambda: self.clock)
+        self.assertEqual(len(polls), feeder.FOLLOW_GRACE_POLLS - 1)
+        last = json.loads(lines[-1])
+        self.assertEqual((last["event"], last["manifest"]), ("not_running", self.paths.manifest))
+        self.assertIn("recorded no leaving", last["detail"])
+
+
 class RealRunner(FeederCase):
     def test_one_cycle_through_the_real_runner_over_the_stub(self):
         """The seam the fakes cannot prove: the feeder launches `relay_cli.py run` from its own
