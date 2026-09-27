@@ -279,23 +279,24 @@ class StartStepAgreesWithCloseout(AdapterCase):
                                return_to=return_to, **extra)
 
     def manifests(self):
-        yield "jira", self.jira_manifest()
-        yield "github", self.github_manifest()
-        yield "markdown", self.manifest()
-
-    def adapter_for(self, name):
-        # Borrowed rather than inherited, so this class does not run the shared contract again.
-        return dict(SharedContract.each(self))[name]
+        """Each adapter beside the manifest it was built from. Only the instruction methods
+        are called, so no transport is ever reached."""
+        jira = self.jira_manifest()
+        yield "jira", jira, jira_adapter.JiraAdapter(
+            jira, opener=FakeOpener({}), env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
+        github = self.github_manifest()
+        yield "github", github, gh_adapter.GitHubAdapter(github, run=DispatchRun())
+        markdown = self.manifest()
+        yield "markdown", markdown, md_adapter.MarkdownAdapter(markdown)
 
     def test_a_card_the_task_moved_is_moved_back_by_the_blocked_and_halted_closeout(self):
         moved = 0
-        for name, manifest in self.manifests():
+        for name, manifest, adapter in self.manifests():
             after = self.card_after_task(manifest)
             if after is None:
                 continue
             moved += 1
             self.assertEqual(after, manifest.tracker.in_review_status, name)
-            adapter = self.adapter_for(name)
             for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
                 with self.subTest(adapter=name, outcome=outcome):
                     text = self.closeout_text(manifest, adapter, outcome, self.BASELINE)
@@ -309,10 +310,9 @@ class StartStepAgreesWithCloseout(AdapterCase):
         self.assertEqual(moved, 2, "github and jira both move the card at the start step")
 
     def test_a_card_the_task_never_moved_is_not_moved_by_the_closeout(self):
-        for name, manifest in self.manifests():
+        for name, manifest, adapter in self.manifests():
             if self.card_after_task(manifest) is not None:
                 continue
-            adapter = self.adapter_for(name)
             for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
                 with self.subTest(adapter=name, outcome=outcome):
                     text = self.closeout_text(manifest, adapter, outcome, self.BASELINE)
@@ -322,11 +322,10 @@ class StartStepAgreesWithCloseout(AdapterCase):
     def test_a_card_the_operator_staged_in_review_stays_there(self):
         """The one refusal where the start step and "keeps its current status" agree: the card
         read in review before the run, so the Task's move changed nothing to undo."""
-        for name, manifest in self.manifests():
+        for name, manifest, adapter in self.manifests():
             after = self.card_after_task(manifest)
             if after is None:
                 continue
-            adapter = self.adapter_for(name)
             for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
                 with self.subTest(adapter=name, outcome=outcome):
                     text = self.closeout_text(manifest, adapter, outcome, after)

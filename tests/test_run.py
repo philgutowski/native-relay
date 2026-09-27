@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import _paths
 from _fakes import FakeAdapter
 import _repo
+from test_adapters import STAY_PUT
 from relay import (summary as summary_module, adapters, audit, backends, classify, closeout, contracts, gitread,
                    gitwrite, launch, manifest as mf, run as runner, state, verify)
 from relay.adapters import github as github_adapter, jira as jira_adapter
@@ -2450,10 +2451,19 @@ class BoardReads:
     def __init__(self, manifest, root, **transport):
         super().__init__(manifest, **transport)
         self._root = root
+        self._leaks = []
+        # Terminal the way each real adapter reads it: GitHub by its board's status_field
+        # option alone, Jira by done_statuses.
         tracker = manifest.tracker
-        self._done = {str(name).lower() for name in
-                      tuple(tracker.done_statuses) + ((tracker.status_field,)
-                                                      if tracker.status_field else ())}
+        done = (tracker.status_field,) if tracker.adapter == "github" else tracker.done_statuses
+        self._done = {str(name).lower() for name in done}
+
+    def _leak(self, what):
+        """A read that got past the board to the real transport. Recorded rather than only
+        raised, because the run loop and the audit swallow an exception from a read, and the
+        case's tearDown fails on anything recorded here."""
+        self._leaks.append(what)
+        raise AssertionError("the file board should answer every read; reached %s" % what)
 
     def _file(self, task_id, kind):
         return os.path.join(self._root, "%s.%s" % (task_id, kind))
@@ -2495,7 +2505,9 @@ class BoardReads:
         entries = self._comments(task_id)
         if baseline_comment_id is None:
             return entries
-        return [entry for entry in entries if int(entry["id"]) > int(baseline_comment_id)]
+        ids = [entry["id"] for entry in entries]
+        baseline = str(baseline_comment_id)
+        return entries[ids.index(baseline) + 1:] if baseline in ids else []
 
     def closing_reference(self, task_id, ref):
         for entry in self._comments(task_id):
@@ -2504,23 +2516,23 @@ class BoardReads:
         return None
 
 
-def _no_gh(args, timeout=None):
-    raise AssertionError("the file board answered every read; nothing should reach gh: %s" % args)
+class _LeakOpener:
+    def __init__(self, board):
+        self.board = board
 
-
-class _NoOpener:
     def open(self, request, timeout=None):
-        raise AssertionError("the file board answered every read; nothing should reach Jira")
+        return self.board._leak("Jira at %s" % request.get_full_url())
 
 
 class GitHubBoard(BoardReads, github_adapter.GitHubAdapter):
     def __init__(self, manifest, root):
-        super().__init__(manifest, root, run=_no_gh)
+        super().__init__(manifest, root,
+                         run=lambda args, timeout=None: self._leak(" ".join(args)))
 
 
 class JiraBoard(BoardReads, jira_adapter.JiraAdapter):
     def __init__(self, manifest, root):
-        super().__init__(manifest, root, opener=_NoOpener(),
+        super().__init__(manifest, root, opener=_LeakOpener(self),
                          env={"JIRA_API_TOKEN": "t", "JIRA_EMAIL": "e@x.invalid"})
 
 
@@ -2560,6 +2572,12 @@ class _BoardRoutes:
         os.makedirs(self.board_dir)
         self.set_card("T-1", self.BASELINE)
         self.write_board_manifest()
+        self.lines = []
+
+    def tearDown(self):
+        leaks = self.adapter._leaks
+        super().tearDown()
+        self.assertEqual(leaks, [], "a read reached the real transport past the file board")
 
     def write_board_manifest(self, continue_past=False, gate=None):
         text = MANIFEST.replace("__REPO__", self.repo).replace(BOARD_TRACKER, self.TRACKER)
@@ -2599,7 +2617,7 @@ class _BoardRoutes:
 
     def go_board(self, expect=runner.EXIT_OK):
         seen = []
-        outcome = self.go(adapter=self.adapter, notifier=seen.append)
+        outcome = self.go(adapter=self.adapter, notifier=seen.append, stream=self.lines.append)
         self.assertEqual(outcome.exit_code, expect, outcome.message)
         return seen
 
@@ -2614,8 +2632,7 @@ class _BoardRoutes:
     def assert_told_to_return(self, text):
         self.assertIn("`%s`" % self.BASELINE, text)
         self.assertIn("before this run", text)
-        for phrase in ("do not transition the card", "do not move its project item",
-                       "keeps its current status"):
+        for phrase in STAY_PUT:
             self.assertNotIn(phrase, text.lower())
 
     def test_the_task_moves_the_card_and_the_blocked_closeout_is_told_to_move_it_back(self):
@@ -2662,6 +2679,34 @@ class _BoardRoutes:
         self.assertIn("`%s`" % self.BASELINE, card_audit["findings"][0]["text"])
         self.assertIn("1 stale card(s)", seen[-1])
 
+    def test_a_blocked_card_left_in_review_is_a_finding_and_a_stale_card(self):
+        self.task_moves_card("blocked.jsonl")
+        self.closeout("blocked on the design question")
+        self.go_board()
+        mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual([(f["card_status"], f["return_to"]) for f in mine],
+                         [(self.IN_REVIEW, self.BASELINE)])
+        self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
+                         [contracts.AUDIT_STALE_IN_REVIEW])
+
+    def test_a_halt_after_a_landing_never_sends_the_card_back(self):
+        """The landing refusal of `return_to_for`: the landed Closeout commented the landing but
+        never closed the card, so verify halts the task with a landing reference on its record.
+        Moving that card back to its baseline would undo a landing."""
+        self.task_moves_card("success.jsonl")
+        self.queue_entry("closeout_skipped.jsonl",
+                         CLOSEOUT_COMMENTS_SH % ("Landed at $(git rev-parse origin/main)", "T-1"))
+        self.closeout("halted after the landing")
+        self.go_board(expect=runner.EXIT_HALTED)
+        record = self.store().get("T-1")
+        self.assertEqual(record["halt_class"], contracts.HALT_PARTIAL_LANDING)
+        self.assertTrue(record["landing_ref"])
+        halted = self.brief(".closeout")
+        self.assertIn("Landed at %s, but the run then halted." % record["landing_ref"], halted)
+        self.assertNotIn("`%s`" % self.BASELINE, halted)
+        self.assertNotIn("back to", halted.lower())
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
     def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):
         self.task_moves_card("blocked.jsonl")
         self.closeout("blocked on the design question", move_to=self.BASELINE, unreadable=True)
@@ -2693,6 +2738,18 @@ class _BoardRoutes:
         self.go_board()
         self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
         self.assertEqual(self.card(), self.DONE)
+        self.assertTrue(any("routed on commits plus the card in %s" % self.IN_REVIEW in line
+                            for line in self.lines), self.lines)
+
+    def test_no_envelope_with_commits_and_the_card_never_moved_is_blocked(self):
+        self.queue_entry("no_envelope.jsonl", task_branch_sh("T-1"))
+        self.closeout("blocked with no envelope")
+        self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(record["halt_class"], contracts.HALT_NO_ENVELOPE)
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertIn("relay/T-1", self.relay_branches())
 
 
 class GitHubBoardRoutes(_BoardRoutes, RunCase):
