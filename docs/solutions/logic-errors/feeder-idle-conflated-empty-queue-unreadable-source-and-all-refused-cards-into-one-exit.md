@@ -15,7 +15,8 @@ symptoms:
   - "idle_waits_max defaulting to 0 meant an unattended feeder now exited on the very first cycle that looked empty, ending the run permanently on what could be a misread or an all-refused cycle rather than a true empty queue"
   - "the idle_waits, limit_waits, and unreadable_waits in-a-row counters persisted in <manifest-stem>.feeder.state.json across process restarts, so a feeder that left via the stop file, --restart, a KeyboardInterrupt, or a halt stop handed the next feeder process a partial streak count from a run it was never part of"
   - "the three streak counters were each hand rolled and disagreed on > versus >= and on which exit paths reset them, so the same in-a-row rule was enforced three slightly different ways"
-tags: [feeder, idle-loop, empty-queue, ready-source, refused-cards, streak-counters, exit-code, code-review-catch]
+  - "a fourth cause was added later (issue #41, the R41 path scan run at append time): the first pass at it passed every fresh card, scan-refused ones included, into idle()'s fresh_ids, so a card the scan refused and that never reached model routing at all was reported with the all-refused message telling the operator to change the routing"
+tags: [feeder, idle-loop, empty-queue, ready-source, refused-cards, streak-counters, exit-code, code-review-catch, scan-refused-cards]
 ---
 
 # The feeder's idle check conflated an empty queue, an unreadable ready source, and all-refused cards into one exit
@@ -202,6 +203,39 @@ branched on had already thrown that distinction away by the time `idle()` saw it
    `test_once_keeps_the_streak_counts_between_cycles`,
    `test_an_empty_queue_ends_the_feeder_at_once_by_default`, and
    `test_idle_waits_max_keeps_an_idle_feeder_waiting_that_many_times`.
+
+## Update (2026-09-27, issue #41): a fourth cause joined the union
+
+The feeder never ran the R41 path scan (`brief.scan`, the check that refuses a card whose text
+names a path under `.claude/` because an unattended edit there is refused whatever the allowlist
+says) over ready cards before appending them, so a card the runner would skip at launch still
+held a batch slot and read as offered in `feed --dry-run`. The fix runs the same scan at append
+time (`scanned_ids()`, `skills/relay/scripts/relay/feeder.py`) and keeps a scan-refused card out
+of the batch.
+
+The first pass at that fix reintroduced exactly this file's own root cause. `idle()`'s
+`fresh_ids` argument was still built from the unfiltered `fresh` list, so a cycle where the only
+ready, unlisted card was scan-refused (never routed to a model, never given to `validate()` at
+all) still hit the `if fresh_ids:` branch and stopped with "every ready card was refused with the
+model it is routed to... Change the routing and start the feeder again." That message is
+accurate only for the pre-existing cause it was written for; a card the scan refuses needs a
+reworded card, not a routing change, and the message pointed the operator at the wrong repair.
+`/code-review` caught it before merge, the same way it caught the original three-way conflation.
+
+The fix follows this file's own prevention rule: `idle()` now receives only the fresh ids the
+scan did not refuse (`[card["id"] for card in fresh if card["id"] not in scanned]`), so a
+scan-refused card falls through to the ordinary empty-queue path instead of the all-refused one,
+and the two causes stay distinguishable at the point where `idle()` chooses its response. Two new
+tests guard it: `test_a_card_the_path_scan_refuses_holds_no_room_and_is_logged` and
+`test_a_scan_refused_card_alone_reads_as_an_empty_queue_not_all_refused`
+(`tests/test_feeder.py`).
+
+The lesson holds beyond this one case: adding a new branch to a discriminated union that
+`idle()` reconstructs from a single list argument is easy to get wrong by construction, because
+the list's origin (`fresh`, all ready-unlisted cards) does not itself carry which sub-cause each
+id belongs to. The next addition to this decision point should build its filtered id list from
+the same per-card verdict dict the other branches already use (`scanned` here), not re-derive it
+inline at the call site.
 
 ## Related Issues
 
