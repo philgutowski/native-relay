@@ -90,7 +90,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 
-from . import (adapters, contracts, gitread, manifest as manifest_module, manifestedit,
+from . import (adapters, brief, contracts, gitread, manifest as manifest_module, manifestedit,
                run as run_module, state as state_module, summary as summary_module)
 
 EXIT_OK = 0
@@ -412,16 +412,28 @@ def normalize_cards(payload):
     return cards
 
 
+def scan_reason(card):
+    """None when `card` is clean, else the sentence the R41 scan (`brief.scan`) gives for it.
+    Read at append time, this sees only the title and description the ready source returned;
+    a card's comments and its rendered brief are read at launch, where the runner's own scan
+    (`run.py`'s `_one_task`) stays the backstop for both (issue #41)."""
+    hits = brief.scan(card, "")
+    return brief.exclusion_reason(hits) if hits else None
+
+
 def select(cards, listed, config, rank, unsettled_count):
     """(fresh, batch). Fresh is every ready card a session may take that the manifest does not
-    list yet, in order file order and then by id. The batch is the head of it, as long as the
-    room left: the batch size minus the tasks the next run will already launch."""
+    list yet, in order file order and then by id, including one the R41 scan would refuse. The
+    batch is the head of the ones the scan leaves clean, as long as the room left: the batch
+    size minus the tasks the next run will already launch. A card the scan refuses holds no
+    room, so the next clean card in order fills its slot instead."""
     fresh = [card for card in cards
              if card["id"] not in listed and card["id"] not in config.denied_ids
              and not any(label in config.denied_labels for label in card.get("labels") or ())]
     fresh.sort(key=lambda card: (rank.get(card["id"], UNRANKED), natural_key(card["id"])))
     room = max(0, config.batch - unsettled_count)
-    return fresh, fresh[:room]
+    eligible = [card for card in fresh if scan_reason(card) is None]
+    return fresh, eligible[:room]
 
 
 def died_quickly(task, config):
@@ -906,9 +918,19 @@ class Feeder:
                     [(entry["id"], entry["model"]) for entry in entries]))
         if self.dry_run:
             for card in fresh[:DRY_RUN_LINES]:
-                self.out.write("   would offer %s on %s: %s\n" % (
-                    card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
+                reason = scan_reason(card)
+                if reason:
+                    self.out.write("   would skip %s: %s\n" % (card["id"], reason))
+                else:
+                    self.out.write("   would offer %s on %s: %s\n" % (
+                        card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
             return EXIT_OK
+
+        for card in fresh:
+            reason = scan_reason(card)
+            if reason:
+                self.report_once("scan_skip:" + card["id"], "%s would be skipped at launch and "
+                                 "is left out of the batch: %s" % (card["id"], reason))
 
         appended = self.append(text, entries)
         if appended:
