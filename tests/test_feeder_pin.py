@@ -147,6 +147,12 @@ class Unresolvable(Case):
         with self.assertRaisesRegex(OSError, "no default branch to pin"):
             self.plan()
 
+    def test_another_repo_and_no_origin_head_is_refused_with_the_fix(self):
+        self.write_manifest(repo=_repo.make_repo(self.base, name="target"))
+        _repo.git(self.checkout, "remote", "set-head", "origin", "-d")
+        with self.assertRaisesRegex(OSError, "not this checkout.*remote set-head origin"):
+            self.plan()
+
     def test_a_default_branch_with_no_local_ref_is_refused(self):
         self.write_manifest(default_branch="trunk")
         with self.assertRaisesRegex(OSError, "trunk has no local branch"):
@@ -180,7 +186,8 @@ class Verb(Case):
         code, text = self.call("--pin")
         self.assertEqual(code, 7, text)
         self.assertIn("(main at %s)" % main[:12], text)
-        self.assertIn("the checkout sits on relay/9, not main", text)
+        self.assertIn("the checkout sits on relay/9 at ", text)
+        self.assertIn(", not main;", text)
         extract = os.path.join(self.extracts(), "native-relay-" + main[:12])
         self.assertFalse(os.path.exists(os.path.join(extract, "unmerged.txt")))
 
@@ -195,6 +202,18 @@ class Verb(Case):
         self.assertFalse(os.path.exists(os.path.join(self.home, ".relay")))
         self.assertNotIn("extract ran", text)
         self.assertTrue(loop.call_args.kwargs["dry_run"])
+
+    def test_a_detached_head_at_the_default_branch_gets_no_branch_note(self):
+        _repo.git(self.checkout, "checkout", "-q", "--detach", "main")
+        _, text = self.call("--pin")
+        self.assertNotIn("the checkout sits", text)
+
+    def test_a_local_default_branch_behind_origin_is_named(self):
+        _repo.git(self.checkout, "commit", "-q", "--allow-empty", "-m", "landed elsewhere")
+        _repo.git(self.checkout, "push", "-q", "origin", "main")
+        _repo.git(self.checkout, "reset", "-q", "--hard", "HEAD~1")
+        _, text = self.call("--pin")
+        self.assertIn("origin/main has commits the local main does not", text)
 
     def test_pin_refuses_when_the_default_branch_cannot_be_resolved(self):
         self.write_manifest(default_branch=None)

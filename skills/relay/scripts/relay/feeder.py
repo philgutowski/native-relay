@@ -627,11 +627,17 @@ class Pin:
     destination: str     # the extract directory
     exists: bool         # the destination already holds a runner and will be reused untouched
     head_branch: str     # the branch the checkout sits on, `HEAD` when detached
+    head_sha: object     # the commit HEAD is at, or None
     uncommitted: object  # the first changed path the extract does not hold, or None
+    behind_origin: bool  # origin/<branch> has commits the local branch lacks
 
     @property
     def short(self):
         return self.sha[:PIN_SHA_LENGTH]
+
+
+def _extract_entry(destination):
+    return os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
 
 
 def _same_repository(one, other):
@@ -655,18 +661,22 @@ def pin_plan(tree, home, manifest):
         where = "the manifest's repo is not this checkout, and"
     if not branch:
         raise OSError("%s refs/remotes/origin/HEAD is not set in %s, so there is no default "
-                      "branch to pin" % (where, tree))
+                      "branch to pin; name it once with `git -C %s remote set-head origin "
+                      "<branch>`" % (where, tree, tree))
     sha = gitread.rev_parse(tree, "refs/heads/" + branch)
     if not sha:
         raise OSError("the default branch %s has no local branch in %s, so there is no commit "
                       "to extract" % (branch, tree))
+    remote = gitread.rev_parse(tree, "refs/remotes/origin/" + branch)
     destination = os.path.join(home, ".relay", "extracts",
                                "native-relay-" + sha[:PIN_SHA_LENGTH])
-    entry = os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
     dirty = gitread.status_porcelain(tree).strip()
-    return Pin(branch=branch, sha=sha, destination=destination, exists=os.path.isfile(entry),
+    return Pin(branch=branch, sha=sha, destination=destination,
+               exists=os.path.isfile(_extract_entry(destination)),
                head_branch=gitread.current_branch(tree),
-               uncommitted=dirty.splitlines()[0].strip() if dirty else None)
+               head_sha=gitread.rev_parse(tree, "HEAD"),
+               uncommitted=dirty.splitlines()[0].strip() if dirty else None,
+               behind_origin=bool(remote) and not gitread.is_ancestor(tree, remote, sha))
 
 
 def pin_extract(tree, pin, run=subprocess.run):
@@ -675,8 +685,7 @@ def pin_extract(tree, pin, run=subprocess.run):
     default branch is at the same commit, and an existing one that holds the runner is reused
     untouched, since a feeder may be running from it."""
     destination = pin.destination
-    entry = os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
-    if not os.path.isfile(entry):
+    if not os.path.isfile(_extract_entry(destination)):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         partial = "%s.partial-%d" % (destination, os.getpid())
         os.makedirs(partial)

@@ -795,9 +795,11 @@ def cmd_feed(args, env, out, deps=None):
             return EXIT_CONFIG
         if not args.dry_run:
             return _pin_feeder(args, pin, out, env)
-        # A dry run writes nothing (issue #48): it says what would be extracted, then reads the
-        # next cycle from here, the same read the extract would make.
+        # A dry run writes nothing (issue #48), so there is no extract to run it from: it says
+        # what would be extracted, then reads the next cycle with this checkout's own code.
         out.write("would pin: %s\n" % _pin_line(pin))
+        out.write("note: the dry run below reads the next cycle with this checkout's code, not "
+                  "the pinned commit's\n")
     elif warning:
         out.write("warning: %s\n" % warning)
     elif args.pin and not args.dry_run:
@@ -884,10 +886,15 @@ def _pin_line(pin):
     line = "%s (%s at %s)" % (pin.destination, pin.branch, pin.short)
     if pin.exists:
         line += ", already extracted and reused untouched"
-    if pin.head_branch != pin.branch:
-        line += ("\nnote: the checkout sits on %s, not %s; the extract holds %s and none of "
-                 "%s's own commits" % (pin.head_branch, pin.branch, pin.branch,
-                                       pin.head_branch))
+    if pin.head_sha != pin.sha:
+        where = "detached" if pin.head_branch == "HEAD" else "on " + pin.head_branch
+        line += ("\nnote: the checkout sits %s at %s, not %s; the extract holds %s and none "
+                 "of the checkout's own commits" % (
+                     where, (pin.head_sha or "no commit")[:feeder_module.PIN_SHA_LENGTH],
+                     pin.branch, pin.branch))
+    if pin.behind_origin:
+        line += ("\nnote: origin/%s has commits the local %s does not, and the extract holds "
+                 "the local one" % (pin.branch, pin.branch))
     if pin.uncommitted:
         line += ("\nnote: the checkout has uncommitted changes, the extract does not hold them "
                  "(%s)" % pin.uncommitted)

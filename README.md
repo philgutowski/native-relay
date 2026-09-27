@@ -205,7 +205,9 @@ whatever that checkout holds. `feed <manifest> --pin` is the one flag that fixes
 the default branch's commit, never HEAD, under `~/.relay/extracts/native-relay-<sha>` and starts
 the feeder from there with `--restart`, so a running feeder finishes its task and hands over.
 The default branch is the manifest's `project.default_branch` when the manifest's repo is this
-checkout, else the checkout's `origin/HEAD`; when neither resolves the flag refuses. A checkout
+checkout, else the checkout's `origin/HEAD`; when neither resolves the flag refuses and names
+the `git remote set-head` command that sets it, which a checkout made without `git clone` needs
+once. It also says when `origin` holds commits the local default branch lacks. A checkout
 that is also the run's target sits on a task branch while that task is built, and pinning HEAD
 there would run unmerged, ungated work at every later cycle. `<sha>` is always the first 12
 characters, what `git rev-parse --short=12 main` prints, so an extract made by hand under that
