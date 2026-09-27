@@ -346,7 +346,9 @@ taking over a live one with restart semantics; from an existing extract or a plu
 `--pin` is a plain restart and extracts nothing. From a git work tree, `--pin --dry-run` says what
 would be extracted, then also runs the ordinary dry run of the next cycle with this checkout's
 code, noted, and writes nothing itself; from an existing extract or a plugin install copy, `--pin`
-combined with `--dry-run` says nothing about pinning and is silently a no-op. A feeder started
+combined with `--dry-run` says nothing about pinning and is silently a no-op. Adding `--detach` to
+`--dry-run`, alone or paired with `--pin`, is refused: a dry run never detaches, so nothing runs
+and nothing is written. A feeder started
 from a checkout instead prints the checkout
 warning, naming the tree it runs from, at launch and in its log: relaunch it with `--pin` before
 trusting the next cycle.

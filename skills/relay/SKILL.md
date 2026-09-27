@@ -606,7 +606,9 @@ With `[models] fallback = { fable = "opus" }` in the sidecar, a fable task that 
 marked exhausted for `fallback_hours` (5 by default), the task is moved to opus in the manifest
 and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
 mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
-where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
+where nothing landed, leaves the whole cycle wait in charge. Moving a task to another model is off
+unless the sidecar configures `[models] fallback`; the model hold described below is not, and
+applies whether or not one is configured, once the death is confirmed.
 A cycle whose quick deaths all moved, with nothing landed, leaves the count of waits where it
 was; every other cycle that does not wait resets it. So two models that fall back to each other still reach exit 2 when a task
 keeps dying quickly on both, rather than moving it back and forth every time a mark expires.
