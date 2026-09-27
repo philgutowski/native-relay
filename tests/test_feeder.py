@@ -1160,17 +1160,58 @@ class Watch(FeederCase):
         self.assertFalse(answer["running"])
         self.assertIn("left at 2026-09-19T09:10:00 with exit 0 (stop_file)", answer["detail"])
 
-    def test_a_lock_held_with_no_record_is_running_and_another_host_is_unknown(self):
+    def test_a_lock_held_with_no_record_is_running(self):
         held = feeder.acquire_lock(self.paths)
         try:
             answer = feeder.liveness(self.paths, {})
         finally:
             held.close()
         self.assertEqual((answer["running"], answer["pid"]), (True, None))
-        self.record(self.paths, hostname="elsewhere.local")
+
+    def test_a_hostname_that_changed_since_the_record_does_not_blind_the_answer(self):
+        """A laptop's hostname follows its network. The lock is on this disk either way."""
+        self.record(self.paths, pid=self.dead_pid(), hostname="elsewhere.local")
+        held = feeder.acquire_lock(self.paths)
+        try:
+            answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
+        finally:
+            held.close()
+        self.assertTrue(answer["running"])
+        self.assertIn("recorded on host elsewhere.local", answer["detail"])
         answer = feeder.liveness(self.paths, feeder.read_state(self.paths))
-        self.assertIsNone(answer["running"])
-        self.assertIn("elsewhere.local", answer["detail"])
+        self.assertFalse(answer["running"])
+        self.assertIn("holds no lock and recorded no leaving", answer["detail"])
+
+    def test_a_lock_probe_in_flight_does_not_turn_a_starting_feeder_away(self):
+        probe = open(self.paths.lock, "a+")
+        feeder.fcntl.flock(probe, feeder.fcntl.LOCK_SH | feeder.fcntl.LOCK_NB)
+        waits = []
+
+        def sleep(seconds):
+            waits.append(seconds)
+            probe.close()                        # the watcher's probe lets go
+        handle = feeder.acquire_lock(self.paths, sleep=sleep)
+        self.assertIsNotNone(handle)
+        handle.close()
+        self.assertEqual(waits, [feeder.LOCK_RETRY_SECONDS])
+
+    def test_a_restart_handover_leaves_with_its_own_reason(self):
+        feeder.request_stop(self.paths, feeder.RESTART_WORD)
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.events()[-1]["reason"], "restart")
+        os.unlink(self.paths.stop)
+        feeder.request_stop(self.paths)
+        self.feed()
+        self.assertEqual(self.events()[-1]["reason"], "stop_file")
+
+    def test_an_events_file_that_cannot_be_written_never_stops_the_feeder(self):
+        os.mkdir(self.paths.events)
+        self.plans = [{}]
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(len(self.runs), 1)
+        self.assertIn("the events file could not be written, cycle_started lost",
+                      self.log_text())
+        self.assertEqual(self.state()["process"]["left_reason"], "stop_file")
 
     def test_a_second_boards_live_feeder_never_answers_for_this_one(self):
         """The incident: a process match found the other board's feeder alive while this board's
@@ -1251,6 +1292,40 @@ class Watch(FeederCase):
         self.assertEqual([json.loads(line)["event"] for line in text.splitlines()],
                          ["waiting", "leaving"])
         self.assertEqual(polls, [feeder.FOLLOW_POLL_SECONDS] * 2)
+
+    def test_follow_goes_on_through_a_restart_to_the_new_feeders_lines(self):
+        # No feeder holds the lock while the new one waits out its restart poll: longer than
+        # the grace a follow gives a feeder that is starting, and inside the restart allowance.
+        gap = feeder.FOLLOW_GRACE_POLLS + 2
+        script = ([[{"event": "leaving", "reason": "restart"}]] + [[]] * gap
+                  + [[{"event": "started"}], [{"event": "leaving", "reason": "empty_queue"}]])
+        lines, polls = [], []
+
+        def sleep(seconds):
+            polls.append(seconds)
+            with open(self.paths.events, "a", encoding="utf-8") as handle:
+                for event in script.pop(0):
+                    handle.write(json.dumps(event) + "\n")
+        feeder.follow_events(self.paths, lines.append, sleep)
+        self.assertEqual([(json.loads(line)["event"], json.loads(line).get("reason"))
+                          for line in lines],
+                         [("leaving", "restart"), ("started", None), ("leaving", "empty_queue")])
+
+    def test_watch_flags_only_read_and_refuse_what_they_would_drop(self):
+        for flags, said in ((("--status", "--restart"), "drop --restart"),
+                            (("--follow", "--once", "--retry-blocked", "7"),
+                             "drop --once, --retry-blocked"),
+                            (("--events", "--json"), "--json goes with --status only"),
+                            (("--json",), "--json goes with --status only")):
+            code, text = self.call(*flags)
+            self.assertEqual(code, 1, flags)
+            self.assertIn(said, text)
+        self.assertEqual(self.runs, [])
+        self.assertFalse(os.path.exists(self.paths.stop))
+        args = cli.build_parser().parse_args(["feed", self.manifest_path + ".typo", "--status"])
+        out = io.StringIO()
+        self.assertEqual(cli.cmd_feed(args, self.base_env(), out, deps=self.deps()), 1)
+        self.assertIn("manifest not found", out.getvalue())
 
     def test_follow_ends_with_its_own_line_when_no_feeder_is_running(self):
         self.record(self.paths, pid=self.dead_pid())

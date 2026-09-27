@@ -195,7 +195,8 @@ moment to `queue.feeder.events.jsonl`: `started`, `cycle_started` (the ids appen
 ends), and `leaving` (the exit code and a reason word such as `stop_file` or `empty_queue`).
 Every line names its manifest and its pid. `feed <manifest> --follow` prints new lines as they
 come and ends when the feeder leaves, or with a `not_running` line of its own when the feeder
-is gone without saying so; `--events` prints the lines so far.
+is gone without saying so; `--events` prints the lines so far. A feeder handing over to
+`--restart` leaves with the reason `restart`, and a follow goes on to the new feeder's lines.
 
 It launches the runner from the same tree it was started from. Start it from a pinned extract of
 a commit and it drives that extract, whatever happens in your checkout meanwhile. Started from a

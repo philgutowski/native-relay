@@ -180,6 +180,7 @@ def build_parser():
                            dest="retry_blocked",
                            help="relaunch this one blocked task on the next cycle, leaving every "
                                 "other blocked record alone; repeat the flag for more than one")
+    # Read only, one at a time; `cmd_feed` refuses one beside a flag that acts on a feeder.
     watch = feed_verb.add_mutually_exclusive_group()
     watch.add_argument("--status", action="store_true", dest="feed_status",
                        help="say whether this manifest's feeder is running, checked against "
@@ -746,15 +747,31 @@ def cmd_feed(args, env, out, deps=None):
     `deps` is the suite's way in; an operator never passes it.
     """
     paths = feeder_module.paths_for(args.manifest)
+    watching = args.feed_status or args.events or args.follow
+    if args.as_json and not args.feed_status:
+        out.write("--json goes with --status only\n")
+        return EXIT_CONFIG
+    if watching:
+        # A watcher's flags read only. Beside a flag that starts, stops, or changes a feeder,
+        # one of the two would be silently dropped, so the pair is refused instead.
+        clash = [flag for flag, on in (
+            ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
+            ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
+            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked)) if on]
+        if clash:
+            out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(clash))
+            return EXIT_CONFIG
     if args.stop:
         feeder_module.request_stop(paths)
         out.write("stop requested: %s\nthe feeder leaves after its current cycle\n" % paths.stop)
         return EXIT_OK
-    if args.feed_status or args.events or args.follow:
-        return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
     if not os.path.isfile(paths.manifest):
+        # Before a watcher's answer too: a mistyped path would otherwise read as a manifest
+        # whose feeder is not running.
         out.write("manifest not found: %s\n" % paths.manifest)
         return EXIT_CONFIG
+    if watching:
+        return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
     warning = feeder_module.checkout_warning()
     if warning and args.pin:
         return _pin_feeder(args, env, out)
