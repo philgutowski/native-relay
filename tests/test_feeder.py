@@ -482,6 +482,78 @@ class BlockedLimit(FeederCase):
         self.assertIn("['2'] blocked on a usage limit and will be retried after the wait",
                       self.log_text())
 
+    def test_blocked_limit_deaths_whose_fallback_is_exhausted_are_waited_out(self):
+        # Issue #45. opus is marked, so fable's deaths have no free fallback. Before the fix
+        # nothing halted, no wait ran, every task was reported blocked, fable stayed unmarked,
+        # and the next cycle appended 4 and 5 on fable to die the same way.
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     exhausted={"opus": "2026-09-19T08:00:00"})))
+        self.write(self.paths.routing, "1 fable\n2 fable\n3 fable\n4 fable\n5 fable\n")
+        self.plans = [{"1": self.blocked(4), "2": self.blocked(5), "3": self.blocked(6)}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.ran_on[0], {"1": "fable", "2": "fable", "3": "fable"})
+        self.assertEqual(self.sleeps, [1800])
+        self.assertIn("reading that as a usage limit, waiting", self.log_text())
+        self.assertIn("['1', '2', '3'] blocked on a usage limit and will be retried after the "
+                      "wait", self.log_text())
+        # After the wait the three are retried where they were, and they hold the whole batch,
+        # so no new card is appended on fable.
+        self.assertEqual(self.retries, [[], ["1", "2", "3"]])
+        self.assertEqual(self.runs[1], ["1", "2", "3"])
+        self.assertEqual(self.models(), {"1": "fable", "2": "fable", "3": "fable"})
+        self.assertEqual([self.records[n]["status"] for n in "123"], ["landed"] * 3)
+        self.assertEqual(self.state()["exhausted"], {"opus": "2026-09-19T08:00:00"})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertEqual(self.state()["halts"], {})
+        self.assertNotIn("blocked; a later run will not retry it", self.log_text())
+
+    def test_two_models_that_fall_back_to_each_other_and_both_block_are_waited_out(self):
+        config = feeder.Config(batch=2, model_fallback={"fable": "opus", "opus": "fable"})
+        self.adapter.ready_cards = [card(1), card(2), card(3), card(4)]
+        self.write(self.paths.routing, "1 fable\n2 opus\n3 fable\n4 opus\n")
+        self.plans = [{"1": self.blocked(4), "2": self.blocked(5)}, {}]
+        self.feed(config)
+        self.assertEqual(self.ran_on[0], {"1": "fable", "2": "opus"})
+        self.assertEqual(self.sleeps, [1800])
+        # Neither is sent to the other, neither model is marked, and 3 and 4 wait their turn.
+        self.assertEqual(self.retries, [[], ["1", "2"]])
+        self.assertEqual(self.runs[1], ["1", "2"])
+        self.assertEqual(self.models(), {"1": "fable", "2": "opus"})
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["halts"], {})
+        self.assertNotIn("blocked; a later run will not retry it", self.log_text())
+
+    def test_a_blocked_death_with_no_free_fallback_holds_a_movable_halt_to_the_wait(self):
+        # 1 halted on fable, whose fallback sonnet is free; 2 blocked on opus, whose fallback
+        # haiku is marked and leads nowhere. Nothing landed and one death has nowhere to go, so
+        # the whole cycle rule decides for both, as it does for two halts: neither moves.
+        config = feeder.Config(allowed_models=("fable", "opus", "sonnet", "haiku"),
+                               model_fallback={"fable": "sonnet", "opus": "haiku"})
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     exhausted={"haiku": "2026-09-19T08:00:00"})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 fable\n2 opus\n")
+        self.plans = [{"1": halted(8), "2": self.blocked(4)}, {}]
+        self.feed(config)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.retries, [[], ["2"]])
+        self.assertEqual(self.models(), {"1": "fable", "2": "opus"})
+        self.assertEqual(self.state()["exhausted"], {"haiku": "2026-09-19T08:00:00"})
+        self.assertEqual(self.state()["halts"], {})
+
+    def test_blocked_limit_deaths_with_no_free_fallback_run_out_the_waits_and_stop(self):
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     exhausted={"opus": "2026-09-19T08:00:00"})))
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)}]
+        code = self.feed(feeder.Config(model_fallback={"fable": "opus"}, limit_waits_max=2))
+        self.assertEqual(code, 2)
+        self.assertEqual(self.sleeps, [1800, 1800])
+        self.assertEqual(self.retries, [[], ["1"], ["1"]])
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("1 blocked; a later run will not retry it", self.log_text())
+
     def test_a_retry_the_run_never_reached_keeps_its_place(self):
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")

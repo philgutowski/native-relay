@@ -79,3 +79,23 @@ reached, because it halted first, from one that ran.
 The runner's classify step could attach a usage limit finding to the record itself, so the
 summary and `run` would show it too. That changes the classify digest, a contract between
 processes that needs a live run, so it was left out of #39.
+
+## Follow up: issue #45, the whole cycle rule read halts only
+
+#39 taught the per model rule to see a blocked limit death, but `settle` still handed only the
+halted list to `looks_like_usage_limit`. A cycle whose deaths were all blocked, with the fallback
+already marked or two models that fall back to each other both dying, took no move and no wait:
+each task fell through to an ordinary blocked report, the model stayed unmarked, and the next
+cycle appended fresh cards on it. The fix passes `halted + limited` to the whole cycle rule and
+waits when any of them has no move, queuing each blocked one for a `--retry-blocked` relaunch.
+
+The lesson is the shape of the gap. A quick death has two records, halted and blocked
+`no_envelope`, and the feeder has two rules that read quick deaths. Any rule that reads one
+shape alone reopens the quota burn of #12 through the other. When a new rule reads quick
+deaths, give it `dead`, never `halted`.
+
+Two things stay as they were. A blocked limit death with no free fallback in a cycle where
+something landed is reported blocked, and one on a model with no `models.fallback` entry is not
+read as a limit at all; both are follow up work. A queued retry holds its room in the batch,
+but the dead model is never marked on the wait path, so fresh cards still fill any room the
+retries leave.

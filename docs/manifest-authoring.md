@@ -422,15 +422,19 @@ labels = []
   marks it again. A fallback is taken only when it leads to a model that is not marked and did
   not itself die quickly that cycle, following a chain one model at a time and never coming
   back to a model it has passed. When every task died quickly, nothing landed, and any of
-  those halts had no such fallback, the whole cycle is waited out as before.
+  those deaths had no such fallback, the whole cycle is waited out as before.
 - A limit death can also be recorded `blocked`, class `no_envelope`, when the process printed
   only the CLI's limit message. On a model with a fallback, the feeder reads such a record the
   same way when it died within `quick_death_seconds` and its stdout log does not say otherwise:
   a `result` line with `api_error_status` 429 confirms it, a `result` line with anything else,
   such as a 404 for a model the account cannot reach, rules it out, and a log with no `result`
   line leaves the time rule to decide. The task is moved like a halt and relaunched on the next
-  run with `--retry-blocked <id>` for that id alone; no other blocked record is retried. When the
-  whole cycle is waited out, it waits too and relaunches on its own model. `feed <manifest>
+  run with `--retry-blocked <id>` for that id alone; no other blocked record is retried. It is a
+  quick death for the whole cycle rule as well, so a cycle of blocked limit deaths with no free
+  fallback, a fallback already marked or two models that fall back to each other and both died,
+  is waited out. It waits too, holds its place in the batch ahead of fresh cards, and
+  relaunches on its own model with `--retry-blocked <id>`. In a cycle where something landed,
+  one with no free fallback stays blocked. `feed <manifest>
   --retry-blocked <id>` queues one blocked task by hand the same way.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart`. The order and routing files are read at every cycle and need no restart.
