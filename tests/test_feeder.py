@@ -1050,15 +1050,52 @@ class Exits(FeederCase):
         self.assertIn("every ready card was refused with the model it is routed to, and nothing "
                       "is left to run: 1", self.log_text())
 
-    def test_a_scan_refused_card_alone_reads_as_an_empty_queue_not_all_refused(self):
+    def test_a_scan_refused_card_alone_reads_as_empty_queue_scanned_not_all_refused(self):
         # Issue #41: a card the scan refuses never reached model routing, so it must not read
-        # as the "change the routing" case meant for a genuine model refusal.
+        # as the "change the routing" case meant for a genuine model refusal. Issue #58: nor
+        # may it read as a true empty queue, since the board in fact held this card.
         self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
         self.assertEqual(self.feed(), 0)
         self.assertEqual(self.runs, [])
-        self.assertIn("the queue is empty, leaving", self.log_text())
+        self.assertIn("the queue is empty except for cards the launch scan refuses, leaving: 1",
+                      self.log_text())
         self.assertNotIn("Change the routing", self.log_text())
         self.assertIn("1 would be skipped at launch", self.log_text())
+
+    def test_a_second_feeder_process_reports_a_scan_skip_the_first_already_reported(self):
+        # Issue #58: `reported` persisted in the state file across feeder starts, so a card
+        # still scanned out at the next start must be named again, not read as already covered
+        # because the message matches what an earlier process wrote.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        reason = feeder.scan_reason(card(1, description="edit .claude/skills/x"))
+        message = "1 would be skipped at launch and is left out of the batch: %s" % reason
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                      reported={"scan_skip:1": message})))
+        self.assertEqual(self.feed(), 0)
+        self.assertIn(message, self.log_text())
+        self.assertTrue(any(message in note for note in self.notes))
+
+    def test_a_scan_skip_key_clears_when_clean_and_reports_again_when_dirty(self):
+        # Issue #58: nothing removed the persisted key when a card stopped scanning dirty, so a
+        # card reworded clean and later naming a path again read as already reported. A halted
+        # placeholder task holds the batch's room at zero so the scanned card is never actually
+        # appended, keeping every cycle in the same "ready and unlisted" state the scan sees.
+        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "9"\nmodel = "opus"\n'
+                                                   'effort = "high"\n')
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        stages = [lambda: setattr(self.adapter, "ready_cards",
+                                  [card(1, description="clean now")]),
+                  lambda: setattr(self.adapter, "ready_cards",
+                                  [card(1, description="edit .claude/skills/x")])]
+
+        def before_run():
+            if stages:
+                stages.pop(0)()
+        self.before_run = before_run
+        self.plans = [{"9": halted(9999)}, {"9": halted(9999)}, {"9": halted(9999)}]
+        self.assertEqual(self.feed(feeder.Config(max_halts=10, batch=1)), 0)
+        hits = [note for note in self.notes if "1 would be skipped at launch" in note]
+        self.assertEqual(len(hits), 2, self.notes)
 
     def test_a_ready_source_that_is_not_configured_is_refused_before_a_cycle(self):
         github = SimpleNamespace(tracker=SimpleNamespace(adapter="github"))
@@ -1467,6 +1504,17 @@ class Watch(FeederCase):
         self.assertEqual(self.feed(once=True), 0)
         self.assertEqual(self.events()[-1]["reason"], "once")
         self.assertEqual(self.state()["process"]["left_reason"], "once")
+
+    def test_a_queue_of_only_scanned_out_cards_leaves_with_its_own_reason(self):
+        # Issue #58: a cycle whose ready cards were all scanned out must not leave with the
+        # same reason a genuinely empty board does, so a watcher reading only the last event
+        # can tell the two apart.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(), 0)
+        last = self.events()[-1]
+        self.assertEqual(last["reason"], "empty_queue_scanned")
+        self.assertIn("1", last["message"])
+        self.assertNotEqual(last["reason"], "empty_queue")
 
     def test_a_crash_is_recorded_before_it_raises(self):
         def boom(manifest_path, retry_ids=()):

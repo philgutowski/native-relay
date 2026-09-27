@@ -16,7 +16,8 @@ symptoms:
   - "the idle_waits, limit_waits, and unreadable_waits in-a-row counters persisted in <manifest-stem>.feeder.state.json across process restarts, so a feeder that left via the stop file, --restart, a KeyboardInterrupt, or a halt stop handed the next feeder process a partial streak count from a run it was never part of"
   - "the three streak counters were each hand rolled and disagreed on > versus >= and on which exit paths reset them, so the same in-a-row rule was enforced three slightly different ways"
   - "a fourth cause was added later (issue #41, the R41 path scan run at append time): the first pass at it passed every fresh card, scan-refused ones included, into idle()'s fresh_ids, so a card the scan refused and that never reached model routing at all was reported with the all-refused message telling the operator to change the routing"
-tags: [feeder, idle-loop, empty-queue, ready-source, refused-cards, streak-counters, exit-code, code-review-catch, scan-refused-cards]
+  - "issue #58: a scan-refused card that fell through to the empty-queue path still left with the plain empty_queue reason, so a watcher reading only the leaving event could not tell a genuinely empty board from one still holding a scanned out card, and report_once's persisted reported table kept the card's scan_skip key for the life of the state file, so a second feeder start, or a --once cron run, saw the same card and stayed silent about it"
+tags: [feeder, idle-loop, empty-queue, ready-source, refused-cards, streak-counters, exit-code, code-review-catch, scan-refused-cards, report-once, process-boundary]
 ---
 
 # The feeder's idle check conflated an empty queue, an unreadable ready source, and all-refused cards into one exit
@@ -227,7 +228,8 @@ scan did not refuse (`[card["id"] for card in fresh if card["id"] not in scanned
 scan-refused card falls through to the ordinary empty-queue path instead of the all-refused one,
 and the two causes stay distinguishable at the point where `idle()` chooses its response. Two new
 tests guard it: `test_a_card_the_path_scan_refuses_holds_no_room_and_is_logged` and
-`test_a_scan_refused_card_alone_reads_as_an_empty_queue_not_all_refused`
+`test_a_scan_refused_card_alone_reads_as_empty_queue_scanned_not_all_refused` (renamed by issue
+#58 below, when the case it names stopped reading as a plain empty queue)
 (`tests/test_feeder.py`).
 
 The lesson holds beyond this one case: adding a new branch to a discriminated union that
@@ -236,6 +238,61 @@ the list's origin (`fresh`, all ready-unlisted cards) does not itself carry whic
 id belongs to. The next addition to this decision point should build its filtered id list from
 the same per-card verdict dict the other branches already use (`scanned` here), not re-derive it
 inline at the call site.
+
+## Update (2026-09-27, issue #58): the same scan-refused card stayed silent across process starts
+
+The 2026-09-27 fix above (issue #41) kept a scan-refused card out of the all-refused branch and
+let it fall through to the plain empty-queue path, on purpose: a card the scan refuses needs a
+reword, not a routing change. What it left unexamined is what the *state file* did with that
+card across more than one cycle, and across more than one feeder process.
+
+`report_once` (`feeder.py`) logs and notifies a message the first time, then remembers it in
+`self.state["reported"]`, keyed `scan_skip:<id>`, so the same cycle does not renotify every
+ninety minutes for a day. That table is loaded from the state file at every feeder start and
+never cleared there, unlike the three streak counters (`STREAKS`), which are. So a card scanned
+out in one feeder's life stayed silently "already reported" for the life of the state file: a
+second feeder start, or a `--once` invocation from a cron line, read the identical message,
+found it already in `reported`, and said nothing. An operator who missed the first process's
+line, or who runs the board through a scheduled `--once` rather than a long lived process, never
+saw it again. The same table also never cleared a card's key when the card stopped scanning
+dirty, so a card reworded clean and later naming a `.claude/` path again read as already
+reported too, for the same reason.
+
+Separately, `idle()`'s empty-queue branch (the one issue #41 routed scan-refused cards into) had
+no way to say *why* the queue was empty. A watcher reading only the `leaving` event's `reason`,
+`empty_queue`, could not tell a genuinely empty board from one still holding a card the scan
+refuses, which is exactly the ambiguity this file's root cause section describes, one level
+further down the same decision point: `idle()` had regained a fourth cause with no way to
+express it in its own exit.
+
+**The fix.** Three changes, all in `feeder.py`:
+
+1. `Feeder.run()` clears every `scan_skip:` key from `self.state["reported"]` at the start of
+   every process, unconditionally, not gated by `not self.once` the way `STREAKS` is: a `--once`
+   cron start is as much a start as a long lived process is, and the mechanism this file
+   documents names that case explicitly.
+2. The per-cycle loop that calls `report_once` for a scanned card now also pops
+   `scan_skip:<id>` from `state["reported"]` the cycle a card scans clean, the same rule
+   `queue_retry` already applies to a retry that blocks again (`state["reported"].pop("blocked:"
+   + id, None)`, itself commented "a retry that blocks again is news, even when its sentence is
+   the one sent last time").
+3. `idle()` gained a `scanned_ids` parameter, threaded from the same `scanned` dict `fresh_ids`
+   is already filtered against, so it can tell the fourth cause apart from a true empty queue at
+   the point where the exit is chosen, rather than collapsing both into one flag. When the queue
+   is only held back by scanned cards, the leaving reason is `empty_queue_scanned`, naming the
+   cards, not the plain `empty_queue` a truly empty board leaves with. The exit code stays 0:
+   issue #41 already decided a scan refusal is not the same urgency as `all_refused`, and this
+   fix does not revisit that, only the reason word a watcher reads afterward.
+
+**Why this is the same lesson, not a new one.** This file's own prevention section already says
+it: "the next addition to this decision point should build its filtered id list from the same
+per-card verdict dict the other branches already use, not re-derive it inline at the call site."
+`scanned_ids` follows that rule directly, built from the same `scanned` dict `fresh_ids` already
+filters against. What issue #58 adds beyond that is that a discriminated union does not end at
+the exit code; the *reason word* a watcher reads off the `leaving` event is itself a case the
+code has to keep distinguishable, and a persisted "already told you" table is its own version of
+the same root cause: a boolean-shaped memory (`reported`) standing in for a question that
+actually has a lifetime attached to it, a process's, not a state file's.
 
 ## Related Issues
 

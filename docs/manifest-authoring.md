@@ -519,12 +519,14 @@ post_cycle_timeout_seconds = 3600
   to it, since a restart with no `--pin` keeps running from a checkout when it was never pinned.
   The order and routing files are read at every cycle and need no restart.
 
-Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, `--once`,
-`--dry-run`, `--release`), 1 the manifest, the sidecar, the ready source, or the checkout needs
-a person, including a ready source that could not be read three cycles in a row with nothing
-left to run, 2 every task died quickly for the whole usage limit allowance, or a blocking post
-cycle hook failed with `post_cycle_hold` on, or its hold is still set, 3 another feeder holds
-this manifest.
+Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, a queue held
+entirely by cards the launch scan refuses, `--once`, `--dry-run`, `--release`), 1 the manifest,
+the sidecar, the ready source, or the checkout needs a person, including a ready source that
+could not be read three cycles in a row with nothing left to run, 2 every task died quickly for
+the whole usage limit allowance, or a blocking post cycle hook failed with `post_cycle_hold` on,
+or its hold is still set, 3 another feeder holds this manifest. A queue of only scanned out
+cards leaves with its own reason, `empty_queue_scanned`, naming the cards, not the plain
+`empty_queue` a truly empty board leaves with.
 
 ## 12. Exit codes of a run
 
