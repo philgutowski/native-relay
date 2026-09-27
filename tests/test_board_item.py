@@ -154,6 +154,44 @@ class BoardLag(unittest.TestCase):
         adapters.board_lag(adapter, "13")
         self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "repo", "view"]), 1)
 
+    def test_a_shared_cache_makes_one_board_read_for_many_cards(self):
+        """Issue #61: a caller checking several landed cards in one pass, the run end audit's
+        own shape, used to make one full `gh project item-list` per card. A shared cache dict
+        makes the second call reuse the first's read."""
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "In review", "13": "Done"})
+        adapter = _adapter(run)
+        cache = {}
+        lag_12, _ = adapters.board_lag(adapter, "12", cache=cache)
+        lag_13, _ = adapters.board_lag(adapter, "13", cache=cache)
+        self.assertEqual(lag_12["card_status"], "In review")
+        self.assertIsNone(lag_13)
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+
+    def test_a_failed_read_is_not_cached_so_a_later_call_can_retry(self):
+        """Issue #61's own review of the cache fix: caching a failure the same way a success is
+        cached would let one transient gh error poison every card sharing the pass's cache,
+        turning one card's unreadable board into every card's."""
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"},
+                        board_failure="rate limited")
+        adapter = _adapter(run)
+        cache = {}
+        lag, reason = adapters.board_lag(adapter, "12", cache=cache)
+        self.assertIsNone(lag)
+        self.assertIn("rate limited", reason)
+        run.board_failure = None
+        lag, reason = adapters.board_lag(adapter, "13", cache=cache)
+        self.assertIsNone(reason)
+        self.assertIsNone(lag)
+        self.assertEqual(
+            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 2)
+
+    def test_no_cache_reads_the_board_fresh_every_call_as_before(self):
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"})
+        adapter = _adapter(run)
+        adapters.board_lag(adapter, "12")
+        adapters.board_lag(adapter, "13")
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 2)
+
     def test_an_adapter_with_one_status_per_card_has_nothing_to_check(self):
         self.assertEqual(adapters.board_lag(FakeAdapter(), "T-1"), (None, None))
 
@@ -162,6 +200,38 @@ class BoardLag(unittest.TestCase):
                   if not attr.startswith("_")
                   and callable(getattr(_adapter(TwoTruths({}, {})), attr))}
         self.assertEqual(public, set(adapters.INTERFACE))
+
+
+class ItemConfirmedTerminal(unittest.TestCase):
+    """Issue #61's own review: the narrower answer `board_lag` cannot give, since its
+    "nothing to report" covers both a confirmed item and one off the board entirely."""
+
+    def test_an_item_on_the_board_at_the_terminal_status_is_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertTrue(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_item_off_the_board_is_not_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"13": "Done"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_item_still_lagging_is_not_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "In review"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_unreadable_board_is_not_confirmed_and_carries_a_reason(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"}, board_failure="no scope")
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIn("no scope", reason)
+
+    def test_an_adapter_with_one_status_per_card_has_nothing_to_confirm(self):
+        self.assertEqual(adapters.item_confirmed_terminal(FakeAdapter(), "T-1"), (False, None))
 
 
 class ConfirmBoardTerminal(unittest.TestCase):
@@ -190,6 +260,17 @@ class ConfirmBoardTerminal(unittest.TestCase):
         self.assertEqual(finding["class"], contracts.BOARD_ITEM_NOT_TERMINAL)
         self.assertEqual(finding["card_status"], "unreadable")
         self.assertIn("gh exploded", finding["evidence"])
+
+    def test_an_unreadable_board_says_why_instead_of_telling_the_operator_to_move_it(self):
+        """Issue #61: the template for this class always said "reads {card_status}... move
+        {task} to {terminal_status} by hand", which on an unreadable read told the operator to
+        move an "unreadable" item, a status nobody confirmed it was not already at. The cause
+        sits only in the evidence, so the rendered line has to come from there instead."""
+        finding = self.confirm(TwoTruths({"12": "CLOSED"}, {}, board_failure="gh exploded"))
+        line = summary.cause_line(finding["class"], finding)
+        self.assertEqual(line, finding["evidence"])
+        self.assertIn("gh exploded", line)
+        self.assertNotIn("by hand", line)
 
     def test_a_board_read_that_raises_is_a_finding_rather_than_an_exception(self):
         class Exploding(FakeAdapter):
@@ -236,9 +317,10 @@ class Audit(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def build(self, run):
+    def build(self, run, item_seen=None):
         manifest = _manifest(repo=self.repo)
-        return audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
+        return audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run),
+                           item_seen=item_seen)
 
     def test_a_landed_record_whose_item_lags_is_reported(self):
         findings = self.build(TwoTruths({"12": "CLOSED"}, {"12": "In review"}))
@@ -263,6 +345,54 @@ class Audit(unittest.TestCase):
         self.store.upsert("12", status=contracts.STATUS_BLOCKED, landing_ref=None)
         findings = self.build(TwoTruths({"12": "CLOSED"}, {"12": "In review"}))
         self.assertNotIn(contracts.AUDIT_ITEM_NOT_TERMINAL, [f["class"] for f in findings])
+
+    def test_two_landed_records_share_one_board_read(self):
+        """Issue #61: before the fix, each landed task's check made its own full
+        `gh project item-list`, so a run end audit over many landed cards bounded its pass at
+        30 seconds times the landed count rather than once."""
+        self.store.upsert("13", status=contracts.STATUS_LANDED, landing_ref="3d79e18" + "0" * 33)
+        manifest = _manifest(repo=self.repo, task_ids=("12", "13"))
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "In review", "13": "Done"})
+        audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
+        self.assertEqual(
+            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+
+    def test_an_open_cards_status_read_shares_the_same_board_cache_as_a_landed_items_lag(self):
+        """Issue #61's own review of the fix above: `status()` itself reads the project board
+        for any open, non closed card once `status_field` is declared, and the audit's per task
+        loop calls `status()` for every task up front, landed or not. Sharing the cache with
+        `_item_lag` alone left that call making its own board read per non landed card."""
+        self.store.upsert("13", status=contracts.STATUS_BLOCKED)
+        manifest = _manifest(repo=self.repo, task_ids=("12", "13"))
+        run = TwoTruths({"12": "CLOSED", "13": "OPEN"}, {"12": "In review", "13": "Todo"})
+        audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
+        self.assertEqual(
+            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+
+    def test_item_seen_marks_a_landed_item_read_cleanly_as_terminal(self):
+        """Issue #61: this is what lets the Runner retire `confirm_board_terminal`'s own
+        record finding once a later audit confirms the item, the way #64 already retires
+        `card_in_review_by_run`."""
+        item_seen = {}
+        self.build(TwoTruths({"12": "CLOSED"}, {"12": "Done"}), item_seen=item_seen)
+        self.assertEqual(item_seen, {"12": True})
+
+    def test_item_seen_stays_empty_for_a_lagging_or_unreadable_item(self):
+        item_seen = {}
+        self.build(TwoTruths({"12": "CLOSED"}, {"12": "In review"}), item_seen=item_seen)
+        self.assertEqual(item_seen, {})
+        item_seen = {}
+        self.build(TwoTruths({"12": "CLOSED"}, {}, board_failure="no scope"), item_seen=item_seen)
+        self.assertEqual(item_seen, {})
+
+    def test_item_seen_stays_empty_when_the_item_is_off_the_board_rather_than_confirmed(self):
+        """Issue #61's own review: `board_lag`'s "nothing to report" also covers an item the
+        project no longer carries at all, which is not the same claim as reading the item at
+        the terminal status. Only the second should let a later audit retire the stale
+        `confirm_board_terminal` finding a closeout wrote while the item still lagged."""
+        item_seen = {}
+        self.build(TwoTruths({"12": "CLOSED"}, {"13": "Done"}), item_seen=item_seen)
+        self.assertEqual(item_seen, {})
 
 
 if __name__ == "__main__":

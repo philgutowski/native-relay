@@ -8,7 +8,9 @@ branch, and `--pin` must extract the default branch's commit, never HEAD.
 """
 import io
 import os
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -138,6 +140,75 @@ class Extract(Case):
         self.write_manifest(repo=other, default_branch="trunk")
         self.on_task_branch()
         self.assertEqual(self.plan().branch, "main")
+
+
+class PartialSweep(Case):
+    """Issue #61: a partial folder `pin_extract` leaves behind survives a kill or a power loss,
+    since neither leaves its own `finally` a turn to run. `sweep_partials` is the cleanup for
+    that, run at the top of every real extraction."""
+
+    def make_partial(self, pin, suffix, age_seconds=None):
+        os.makedirs(os.path.dirname(pin.destination), exist_ok=True)
+        partial = pin.destination + suffix
+        os.makedirs(partial)
+        if age_seconds is not None:
+            stamp = time.time() - age_seconds
+            os.utime(partial, (stamp, stamp))
+        return partial
+
+    def test_a_partial_left_by_an_interrupted_attempt_is_swept(self):
+        """A kill or a power loss mid extract leaves exactly this: a `.partial-<pid>` directory
+        with no process left to finish or clean it up."""
+        pin = self.plan()
+        stale = self.make_partial(pin, ".partial-999999",
+                                  age_seconds=feeder.PARTIAL_MAX_AGE_SECONDS + 3600)
+        feeder.pin_extract(self.checkout, pin)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_a_partial_still_being_written_is_left_alone(self):
+        """A fresh partial's mtime keeps moving as `tar` adds to it, so one from a `--pin`
+        running at this same moment must not be swept out from under it."""
+        pin = self.plan()
+        fresh = self.make_partial(pin, ".partial-888888")
+        feeder.pin_extract(self.checkout, pin)
+        self.assertTrue(os.path.exists(fresh))
+
+    def test_a_partial_whose_pid_is_still_alive_is_left_alone_even_if_old(self):
+        """mtime alone is not enough: a long extraction's top level directory stops getting new
+        entries, and so stops updating its own mtime, long before tar is done writing into the
+        subdirectories that top level already holds. The pid is the signal that actually answers
+        whether the extraction is still running. A pid distinct from this test's own: `pin_extract`
+        names its own partial after `os.getpid()`, so reusing this process's pid would collide
+        with the very extraction the test triggers below."""
+        pin = self.plan()
+        proc = subprocess.Popen(["sleep", "5"])
+        try:
+            alive = self.make_partial(pin, ".partial-%d" % proc.pid,
+                                      age_seconds=feeder.PARTIAL_MAX_AGE_SECONDS + 3600)
+            feeder.pin_extract(self.checkout, pin)
+            self.assertTrue(os.path.exists(alive))
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    def test_the_sweep_runs_even_when_the_destination_already_exists(self):
+        pin = feeder.pin_extract(self.checkout, self.plan())
+        pin = self.plan()
+        stale = self.make_partial(pin, ".partial-777777",
+                                  age_seconds=feeder.PARTIAL_MAX_AGE_SECONDS + 3600)
+        feeder.pin_extract(self.checkout, pin)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_a_destination_without_its_entry_file_is_replaced(self):
+        """A destination directory left over from an earlier failure, real but incomplete: the
+        entry file check, not just an existence check, decides whether to re-extract."""
+        pin = self.plan()
+        os.makedirs(pin.destination)
+        with open(os.path.join(pin.destination, "garbage"), "w") as handle:
+            handle.write("leftover from a previous failure\n")
+        destination = feeder.pin_extract(self.checkout, pin)
+        self.assertTrue(os.path.isfile(os.path.join(destination, ENTRY)))
+        self.assertFalse(os.path.exists(os.path.join(destination, "garbage")))
 
 
 class Unresolvable(Case):

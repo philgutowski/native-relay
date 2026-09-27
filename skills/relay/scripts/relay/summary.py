@@ -53,9 +53,18 @@ def cause_line(halt_class, *evidence):
     """The halt class's sentence, filled from whatever evidence the record carries."""
     if not halt_class:
         return None
+    fields = line_fields(*evidence)
+    # Issue #61: BOARD_ITEM_NOT_TERMINAL's template always reads "reads {card_status}...
+    # move {task} to {terminal_status} by hand", and `confirm_board_terminal` reuses the same
+    # finding shape when the board could not be read at all, naming that read's own card_status
+    # "unreadable". The template then tells the operator to move an "unreadable" item to a
+    # status nobody confirmed it is not already at; the real cause sits only in `evidence`, so
+    # this says that instead, the same shape the audit's own unreadable line already gives.
+    if halt_class == contracts.BOARD_ITEM_NOT_TERMINAL and fields.get("card_status") == "unreadable":
+        return fields.get("evidence") or contracts.HALT_LINES.get(halt_class, halt_class)
     template = contracts.HALT_LINES.get(halt_class, halt_class)
     try:
-        return template.format(**line_fields(*evidence))
+        return template.format(**fields)
     except (KeyError, IndexError, ValueError):
         return template
 
@@ -144,6 +153,7 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
     findings is copied in as it is: `audit.build` already wrote the sentence, and rewriting it
     here would be a second place for the words to drift."""
     checks = []
+    item_not_terminal_tasks = set()
     for entry in entries:
         task_id = entry["id"]
         if entry["status"] == contracts.STATUS_EXCLUDED:
@@ -216,7 +226,15 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
             elif finding["class"] == contracts.BOARD_ITEM_NOT_TERMINAL:
                 checks.append({"kind": "board_item_not_terminal", "task": task_id,
                                "text": "%s: %s" % (task_id, finding["line"])})
+                item_not_terminal_tasks.add(task_id)
     for finding in (card_audit or {}).get("findings") or []:
+        # Issue #61: a lagging item raises here, from the run end audit, and above, from the
+        # record's own closeout finding, so a card still lagging at run end used to print
+        # twice. The record's line already names the card; drop the audit's copy of the same
+        # disagreement rather than print it a second time.
+        if (finding.get("class") == contracts.AUDIT_ITEM_NOT_TERMINAL
+                and finding.get("task") in item_not_terminal_tasks):
+            continue
         checks.append({"kind": finding.get("class"), "task": finding.get("task"),
                        "text": finding.get("text") or ""})
     if run_status == contracts.RUN_HALTED:

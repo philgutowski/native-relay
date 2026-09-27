@@ -102,7 +102,18 @@ class GitHubAdapter:
         except ValueError as exc:
             return None, "gh returned output that is not JSON: %s" % exc
 
-    def _board(self):
+    def _board(self, cache=None):
+        """`cache`, when given, is a dict this read may reuse across a batch of calls (issue
+        #61): the run end audit checks many landed cards in one pass, and each call used to make
+        its own `gh project item-list`, bounding the pass at 30 seconds times the landed count
+        rather than once. A single-card caller passes nothing and reads fresh every time, same
+        as before.
+
+        Only a successful read is cached. One transient failure, a rate limit or a flaky
+        network, must cost the one card whose turn it was, the way it always did, not read as
+        an unreadable board for every other card sharing this pass's cache."""
+        if cache is not None and "board" in cache:
+            return cache["board"]
         payload, reason = self._gh([
             "gh", "project", "item-list", str(self._project_number),
             "--owner", str(self._owner), "--format", "json",
@@ -113,10 +124,12 @@ class GitHubAdapter:
         ])
         if payload is None:
             return None, reason
+        if cache is not None:
+            cache["board"] = (payload, None)
         return payload, None
 
-    def _items(self):
-        payload, reason = self._board()
+    def _items(self, cache=None):
+        payload, reason = self._board(cache=cache)
         if payload is None:
             return [], reason
         return payload.get("items") or [], None
@@ -124,12 +137,12 @@ class GitHubAdapter:
     def _issue(self, task_id):
         return self._gh(["gh", "issue", "view", str(task_id), "--json", ISSUE_FIELDS])
 
-    def _project_status(self, task_id):
+    def _project_status(self, task_id, cache=None):
         """Returns (status, reason). The reason is what separates a board this adapter could not
         read from a board that genuinely does not carry the item: both used to come back as
         None, and None reads as `not terminal`, so an unreadable board looked exactly like a card
         that had not moved."""
-        items, reason = self._items()
+        items, reason = self._items(cache=cache)
         if reason:
             return None, reason
         for item in items:
@@ -138,7 +151,7 @@ class GitHubAdapter:
                 return item.get("status"), None
         return None, None
 
-    def _project_item(self, task_id):
+    def _project_item(self, task_id, cache=None):
         """Returns (on_board, status, reason) for this repository's issue on the declared project.
 
         Stricter than `_project_status` in two ways, because its answer is reported rather than
@@ -150,7 +163,7 @@ class GitHubAdapter:
         repository, reason = self._repository_name()
         if reason:
             return False, None, reason
-        payload, reason = self._board()
+        payload, reason = self._board(cache=cache)
         if reason:
             return False, None, reason
         items = payload.get("items") or []
@@ -179,22 +192,40 @@ class GitHubAdapter:
             self._repository = identity["name"]
         return self._repository, None
 
-    def _board_lag(self, task_id):
+    def _board_lag(self, task_id, cache=None):
         """Issue #43. Returns (lag, reason): `lag` names the item's status and the terminal one
         when the issue's item on the declared project reads anything but `status_field`.
 
         `status()` stops at a closed issue and never reads the board, so a Closeout that closed
         the issue and skipped or failed the item edit landed with the item still in review and
         nothing reported. This is the read that notices. An issue the project does not carry has
-        no item to lag, and no `status_field` means no board column is declared terminal."""
+        no item to lag, and no `status_field` means no board column is declared terminal.
+
+        `cache` (issue #61) is passed straight through to `_project_item`; see `_board` for what
+        it saves."""
         if not self._status_field:
             return None, None
-        on_board, status, reason = self._project_item(task_id)
+        on_board, status, reason = self._project_item(task_id, cache=cache)
         if reason:
             return None, reason
         if not on_board or (status and str(status).lower() == str(self._status_field).lower()):
             return None, None
         return {"card_status": status or "no status", "terminal_status": self._status_field}, None
+
+    def _item_confirmed_terminal(self, task_id, cache=None):
+        """Issue #61's own review: `_board_lag`'s `(None, None)` covers two different states, an
+        item that reads the terminal status and one the declared project does not carry at all,
+        because neither is something the closeout's own finding should keep naming. Retiring
+        that finding is a stronger claim than "nothing to report", so it needs the narrower
+        answer: True only when the item is actually on the board and actually reads
+        `status_field`, never when it merely could not be found to disagree."""
+        if not self._status_field:
+            return False, None
+        on_board, status, reason = self._project_item(task_id, cache=cache)
+        if reason:
+            return False, reason
+        return bool(on_board and status
+                   and str(status).lower() == str(self._status_field).lower()), None
 
     def _comments(self, task_id):
         payload, reason = self._issue(task_id)
@@ -429,7 +460,12 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             "status": payload.get("state"),
         }
 
-    def status(self, task_id):
+    def status(self, task_id, cache=None):
+        """`cache` (issue #61) shares one full board read across a batch of calls, the way
+        `_board_lag` already does: an open, non closed issue with `status_field` declared reads
+        the project board here too, so a run end audit checking many cards through plain
+        `status()` made one board read per card before this. Every other adapter, and every
+        single-card caller here, passes nothing and reads fresh, same as always."""
         payload, reason = self._issue(task_id)
         if payload is None:
             return skipped(reason)
@@ -438,7 +474,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             return {"status": state, "terminal": True, "reference": None, "skipped": None}
         if not self._status_field:
             return {"status": state, "terminal": False, "reference": None, "skipped": None}
-        board, reason = self._project_status(task_id)
+        board, reason = self._project_status(task_id, cache=cache)
         if reason:
             return skipped("the project board could not be read: %s" % reason)
         terminal = bool(board) and str(board).lower() == str(self._status_field).lower()

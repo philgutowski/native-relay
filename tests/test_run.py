@@ -2571,12 +2571,17 @@ class GitHubBoard(BoardReads, github_adapter.GitHubAdapter):
         except FileNotFoundError:
             return "OPEN"
 
-    def status(self, task_id):
+    def status(self, task_id, cache=None):
+        """`cache` is accepted for the same reason `_project_item` takes it: `adapters.status`
+        passes it through. `_project_item` above reads a file directly rather than a shared
+        board payload, so there is nothing here to actually cache; `BoardReads.status`, which
+        `super()` resolves to ahead of the real `GitHubAdapter.status` in this mixin's MRO,
+        does not know the keyword either."""
         if not self._unreadable(task_id) and self._issue_state(task_id) == "CLOSED":
             return {"status": "CLOSED", "terminal": True, "reference": None, "skipped": None}
         return super().status(task_id)
 
-    def _project_item(self, task_id):
+    def _project_item(self, task_id, cache=None):
         if self._unreadable(task_id):
             return False, None, "the board refused the read"
         with open(self._file(task_id, "status")) as handle:
@@ -3063,6 +3068,13 @@ in_review_status = "In review"
         self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
                          [contracts.AUDIT_ITEM_NOT_TERMINAL])
         self.assertIn("1 stale card(s)", seen[-1])
+        # Issue #61: a lagging item raises both from the record's own closeout finding and from
+        # the run end audit, and used to print once for each. Only the record's line should
+        # survive into the checks the operator reads.
+        t1_lag_checks = [check for check in checks if check.get("task") == "T-1"
+                        and check["kind"] in ("board_item_not_terminal",
+                                              contracts.AUDIT_ITEM_NOT_TERMINAL)]
+        self.assertEqual(len(t1_lag_checks), 1, checks)
 
     def test_a_closed_issue_whose_item_reached_the_terminal_status_carries_nothing(self):
         self.task_moves_card("success.jsonl")
@@ -3080,6 +3092,20 @@ in_review_status = "In review"
         findings = audit.build(self.manifest, self.store(), self.adapter)
         self.assertEqual([f["class"] for f in findings], [contracts.AUDIT_ITEM_NOT_TERMINAL])
         self.assertIn("`Done`", findings[0]["text"])
+
+    def test_a_later_run_that_finds_the_item_moved_retires_the_record_finding(self):
+        """Issue #61, the round 2 self run: the record's own board_item_not_terminal finding is
+        written once, at the landed Closeout, and nothing cleared it once the operator moved
+        the item by hand afterward. A later run's own run end audit is what retires it, the same
+        shape #64 already gave the in review mark."""
+        self.task_moves_card("success.jsonl")
+        self.closeout_closes_issue()
+        self.go_board()
+        self.assertEqual(len(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL)), 1)
+        self.set_card("T-1", self.DONE)
+        self.go_board()
+        self.assertEqual(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL), [])
+        self.assertEqual(self.store().audit()["count"], 0)
 
 
 # Issue #43. Closes the issue and comments the landing, and leaves the project item alone.
