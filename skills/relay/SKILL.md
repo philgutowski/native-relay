@@ -67,6 +67,8 @@ python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
 python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
 python3 <runner> feed <manifest> --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle
+python3 <runner> feed <manifest> --pin          # extract the default branch's commit and start the feeder from there instead of this checkout, taking over a live one with restart semantics
+python3 <runner> feed <manifest> --pin --dry-run  # the same, but only say what it would extract; writes nothing
 python3 <runner> feed <manifest> --status       # is this manifest's feeder running, and what did its last cycle do; add --json for data
 python3 <runner> feed <manifest> --follow       # its events as JSON lines until it leaves; --events prints the ones so far
 ```
@@ -77,8 +79,10 @@ fires a macOS notification on each phase event, and `--bar` prints a progress ba
 the counts move and once a minute in between. A phase event is a task's log starting, a task's
 status moving, or the run reaching a terminal record. A status move carries the progress phrase
 after it, `T-3 is now landed; 3 of 8 settled, roughly 40m left`, on the printed line and in the
-notification alike. Settled means the run is done with the task: landed, blocked, excluded,
-skipped, or halted. The bar is not a phase event: it prints and never notifies.
+notification alike. Under a feeder the estimate covers only the unsettled tasks in the current
+cycle, so the same phrase reads `roughly 1h 2m left in this cycle`. Settled means the run is done
+with the task: landed, blocked, excluded, skipped, or halted. The bar is not a phase event: it
+prints and never notifies.
 
 `--notify` also works on `run` with no follower at all, including under a bare `--detach`, which is
 the case that matters for a launchd or cron launch. There the runner notifies on each task status
@@ -503,12 +507,14 @@ the operator, rather than guessing:
   cycle, so the operator can keep editing it while the run is going.
 - The order, highest priority first, in `<stem>.order`.
 
-Launch in three steps and read the manifest after each of the first two:
+Launch pinned to a commit, in three steps, and read the manifest after each of the first two. A
+feeder launched without `--pin` prints the checkout warning, at start and in its log, naming the
+tree every cycle will keep running from, edits and all, until it is pinned:
 
 ```bash
-python3 <runner> feed <manifest> --dry-run
-python3 <runner> feed <manifest> --once
-python3 <runner> feed <manifest> --detach --notify
+python3 <runner> feed <manifest> --pin --dry-run
+python3 <runner> feed <manifest> --pin --once
+python3 <runner> feed <manifest> --pin --detach --notify
 ```
 
 While a feeder is alive, do not `run` or `dispatch` its manifest by hand, and do not reorder the
@@ -520,9 +526,11 @@ checks the pid the feeder recorded against that manifest's own lock file. A watc
 each cycle as it happens runs `feed <manifest> --follow`, which prints JSON lines, `started`,
 `cycle_started`, `cycle_result`, `waiting`, and `leaving`, each carrying a `reason` where one
 applies, and ends when the feeder leaves. To change its settings,
-edit the sidecar and `feed --restart`: a running feeder holds the settings and the code it
-loaded at its start. Nothing is killed by `--stop` or `--restart`; the task in flight finishes
-and merges first.
+edit the sidecar and `feed <manifest> --restart`: a running feeder holds the settings and the
+code it loaded at its start, so a plain restart with no `--pin` keeps running from a checkout
+when it was never pinned. Add `--pin` to also re-extract the current default branch commit into
+a fresh pinned tree and hand the feeder over to it. Nothing is killed by `--stop`, `--restart`,
+or `--pin`; the task in flight finishes and merges first.
 
 How it ends, by exit code: 0 it left on its own terms, the stop file or an empty queue
 (nothing ready, nothing left to run, no runner holding the lease; at once by default, or
@@ -566,11 +574,15 @@ they leave. In a cycle where something landed, one with no free fallback stays b
 and before a running feeder is asked to leave; an id the manifest does not list is refused at the
 terminal with exit 1, and the running feeder is left untouched.
 
-Start a feeder from a pinned extract of a commit when the operator has one, never from a
-checkout somebody is editing. It launches the runner from its own tree at every cycle.
-`feed <manifest> --pin` extracts the default branch's commit, never HEAD, to
-`~/.relay/extracts/native-relay-<first 12 sha characters>` and restarts the feeder from it;
-`--pin --dry-run` says what it would extract and writes nothing.
+Start a feeder pinned to a commit, `feed <manifest> --pin`, rather than from a checkout somebody
+may still edit: it launches the runner from its own tree at every cycle, so an edit made there can
+reach the next task the runner launches, even one in the same batch, since the runner reads brief
+templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's commit,
+never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the feeder
+from it, taking over a live one with restart semantics; `--pin --dry-run` says what it would
+extract and writes nothing. A feeder started from a checkout instead prints the checkout warning,
+naming the tree it runs from, at launch and in its log: that is the signal to relaunch it with
+`--pin` before trusting the next cycle.
 
 ## What this skill never does
 

@@ -329,6 +329,16 @@ merges strictly in that order so a grok task that finishes first still waits its
 Skip this unless the queue is too long to list or its cards depend on each other. A manifest
 meant for `relay feed` is written exactly as above with two differences.
 
+A feeder launches the runner from its own tree at every cycle, so start it pinned to a commit,
+`feed <manifest> --pin`, rather than from a checkout you may still edit: an edit made there can
+reach the next task the runner launches, even one in the same batch, since the runner reads brief
+templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's
+commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the
+feeder from it, taking over a live one with restart semantics; `--pin --dry-run` says what it
+would extract and writes nothing. A feeder started from a checkout instead prints the checkout
+warning, naming the tree it runs from, at launch and in its log: relaunch it with `--pin` before
+trusting the next cycle.
+
 **The task list may start empty.** Leave out `[[tasks]]` entirely and the feeder appends the
 first ones. With `queue.feeder.toml` beside it, `validate` runs every other check and warns
 that the list is absent rather than refusing, and `status` and `lease` load it and answer as they
@@ -472,7 +482,10 @@ post_cycle_timeout_seconds = 3600
   one with no free fallback stays blocked. `feed <manifest>
   --retry-blocked <id>` queues one blocked task by hand the same way.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
-  --restart`. The order and routing files are read at every cycle and need no restart.
+  --restart` reloads them on whatever tree the feeder already runs from; add `--pin` to also
+  re-extract the current default branch commit into a fresh pinned tree and hand the feeder over
+  to it, since a restart with no `--pin` keeps running from a checkout when it was never pinned.
+  The order and routing files are read at every cycle and need no restart.
 
 Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, `--once`,
 `--dry-run`), 1 the manifest, the sidecar, the ready source, or the checkout needs a person,
