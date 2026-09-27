@@ -771,6 +771,19 @@ def cmd_feed(args, env, out, deps=None):
         # whose feeder is not running.
         out.write("manifest not found: %s\n" % paths.manifest)
         return EXIT_CONFIG
+    if args.retry_blocked:
+        # Before detaching and before a restart asks a live feeder to leave (issue #46): the id
+        # was checked only inside `cycle()`, which runs after both of those, so a typo took down
+        # a running feeder and left none in its place.
+        try:
+            unknown = sorted(set(args.retry_blocked) - set(feeder_module.listed_ids(paths)))
+        except manifest_module.ManifestError as exc:
+            out.write("%s\n" % exc)
+            return EXIT_CONFIG
+        if unknown:
+            out.write("--retry-blocked names %s, not a task in the manifest\n"
+                      % ", ".join(unknown))
+            return EXIT_CONFIG
     if watching:
         return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
     warning = feeder_module.checkout_warning()
