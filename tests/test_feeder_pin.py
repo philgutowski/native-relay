@@ -203,6 +203,17 @@ class Verb(Case):
         self.assertNotIn("extract ran", text)
         self.assertTrue(loop.call_args.kwargs["dry_run"])
 
+    def test_pin_with_dry_run_and_detach_refuses_the_pair_and_extracts_nothing(self):
+        # Issue #60: the dry run branch printed what it would pin, then fell through to
+        # `_detach_feeder`, which started a real feeder from the checkout, the exact tree `--pin`
+        # exists to avoid. The pair is refused before the pin plan is even read.
+        code, text = self.call("--pin", "--dry-run", "--detach")
+        self.assertEqual(code, cli.EXIT_CONFIG, text)
+        self.assertIn("--dry-run and --detach do not combine", text)
+        self.assertNotIn("would pin", text)
+        self.assertNotIn("extract ran", text)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".relay")))
+
     def test_a_detached_head_at_the_default_branch_gets_no_branch_note(self):
         _repo.git(self.checkout, "checkout", "-q", "--detach", "main")
         _, text = self.call("--pin")
