@@ -132,7 +132,7 @@ turns that into a continuous run by growing the manifest between runs:
    stop file? -> checkout clean and on its default branch? -> pre cycle command
         -> read the READY cards -> take a small batch -> pick a model per card
         -> append [[tasks]] to the manifest -> relay run -> read the summary
-        -> exclude what halted twice -> repeat
+        -> exclude what halted twice -> post cycle command -> repeat
 ```
 
 ```bash
@@ -161,11 +161,20 @@ those halts. That last one is a heuristic, not a detection: Relay has no usage l
 Every project fact is data in a sidecar file beside the manifest and named from its stem. For
 `queue.toml` the feeder reads `queue.feeder.toml` (settings, all optional), `queue.order`
 (priority, one id per line), and `queue.models` (model routing, one `id model` per line, read
-fresh each cycle), and writes `queue.feeder.state.json`, `queue.feeder.log`, and
-`queue.feeder.events.jsonl`.
+fresh each cycle), and writes `queue.feeder.state.json`, `queue.feeder.log`,
+`queue.feeder.events.jsonl`, and `queue.feeder.hook.out`.
 `docs/examples/feeder/` has one of each. A card's model is the routing file's line, else a
 `**Model:** name` line in the card's body, else the sidecar's default, and a name outside the
 sidecar's allowed set is ignored and logged.
+
+The sidecar can also name two hooks, plain commands run in the target repository. `pre_cycle`
+runs before the ready cards are read, for a board whose ready labels are derived. `post_cycle`
+runs after each `relay run` the feeder settles, learning that cycle's landed, halted, blocked, and
+skipped ids and the default branch's merge range from its environment, and its output is appended
+to `queue.feeder.hook.out`. Blocking, the default, it is waited on and logged; with
+`post_cycle_hold` set, a nonzero exit holds the feeder at exit 2 until the operator repairs the
+default branch and clears it with `feed <manifest> --release`. Detached, it is started and left to
+run, reaped at a later cycle's start.
 
 The feeder never merges, pushes, moves a card, or edits the target repository, and it holds no
 way to write to a tracker. It does write the manifest, which no other runner code does: every
@@ -192,9 +201,9 @@ against the manifest's own lock file, so another manifest's feeder or a recycled
 read as this one alive; a process listing cannot tell two boards apart. `status <manifest>`
 adds the same answer as one `feeder:` line. For a watcher, the feeder writes one JSON line per
 moment to `queue.feeder.events.jsonl`: `started`, `cycle_started` (the ids appended),
-`post_cycle_started` (a blocking post cycle hook has begun), `cycle_result` (the run's exit code
-and the ids by outcome), `waiting` (a reason and when it ends), and `leaving` (the exit code and
-a reason word such as `stop_file` or `empty_queue`).
+`cycle_result` (the run's exit code and the ids by outcome), `post_cycle_started` (a post cycle
+hook has begun) and `post_cycle` (its result, including a hold), `waiting` (a reason and when it
+ends), and `leaving` (the exit code and a reason word such as `stop_file` or `empty_queue`).
 Every line names its manifest and its pid. `feed <manifest> --follow` prints new lines as they
 come and ends when the feeder leaves, or with a `not_running` line of its own when the feeder
 is gone without saying so; `--events` prints the lines so far. A feeder handing over to
