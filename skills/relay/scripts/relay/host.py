@@ -78,7 +78,7 @@ def _read(path):
 
 
 def snapshot(platform=None, run=subprocess.run, read=_read, loadavg=os.getloadavg):
-    """The five fields for this host now. Any one that cannot be read is None."""
+    """The six fields for this host now. Any one that cannot be read is None."""
     result = empty()
     try:
         result["load_1m"] = round(loadavg()[0], 2)

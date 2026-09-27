@@ -62,7 +62,7 @@ python3 <runner> audit <manifest>               # the cards that disagree with t
 python3 <runner> verify <manifest> <task-id>    # re-run the landing verdict for one task
 python3 <runner> lease <manifest>               # who holds the lease
 python3 <runner> lease <manifest> --break       # clear it; operator's explicit call only
-python3 <runner> feed <manifest> --dry-run      # continuous run: what would the next cycle append; writes nothing
+python3 <runner> feed <manifest> --dry-run      # continuous run: would offer, would hold, or would skip each ready card; writes nothing
 python3 <runner> feed <manifest> --dry-run --detach  # refused: a dry run never detaches, so nothing runs and nothing is written
 python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
@@ -544,6 +544,18 @@ python3 <runner> feed <manifest> --pin --dry-run
 python3 <runner> feed <manifest> --pin --once
 python3 <runner> feed <manifest> --pin --detach --notify
 ```
+
+`--dry-run` prints one line per ready card: `would offer` for one the next cycle would append,
+`would hold` for one routed to a model held back by a usage limit, and `would skip` for one the
+runner's own launch time scan would refuse. It reads the ready source, not the runner's later
+scan, so a card it offers is not a guarantee: the markdown adapter's ready read always returns an
+empty description, since the grammar has no body for a task line, only a title and indented
+comments, so a `.claude/` mention sitting in a comment there is invisible to the dry run and only
+trips at launch. The launch scan is the one that decides; the dry run only previews it. Outside
+`--dry-run`, a scanned card the feeder leaves out of the batch is logged once in
+`<stem>.feeder.log`, `<id> would be skipped at launch and is left out of the batch: <reason>`,
+named again at every feeder start and again if it scans clean and later trips the scan a second
+time.
 
 While a feeder is alive, do not `run` or `dispatch` its manifest by hand, and do not reorder the
 tasks it appended. `status`, `tail`, `summary`, and `audit` stay safe, since none takes the

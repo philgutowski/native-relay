@@ -39,6 +39,14 @@ CLOSED_STATE = "CLOSED"
 WRITE_BASH_PREFIXES = ("gh issue", "gh project item-edit")
 CLOSEOUT_TOOLS = ("Bash",)
 
+# The closeout's fallback for an issue with no item on the declared project, shared between the
+# landed and the blocked/halted move sentences (issue #42, 2026-09-27): only the landed one had
+# it, so a card off the board sent the blocked or halted process at a project write that could
+# not succeed. `%s` is the verb phrase naming the write the caveat qualifies.
+PROJECT_ITEM_CAVEAT = ("%s when the issue has an item on that project. If it has none, leave the "
+                       "board alone and say so in the comment instead of trying to add the issue "
+                       "to the project")
+
 
 def _canonical(value):
     """A stable digest for persisted board evidence, independent of dict insertion order."""
@@ -491,10 +499,9 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             return (
                 close + ". Then set the board's single select Status field on its project item "
                 "to the option `%s` with `gh project item-edit`, for owner `%s` and project "
-                "number `%s`. %s Do both writes when the issue has an item on that project. If "
-                "it has none, leave the board alone and say so in the comment instead of trying "
-                "to add the issue to the project."
-                % (self._status_field, self._owner, self._project_number, ids)
+                "number `%s`. %s %s."
+                % (self._status_field, self._owner, self._project_number, ids,
+                   PROJECT_ITEM_CAVEAT % "Do both writes")
             )
         if baseline_unknown and not return_to:
             move = "Do not close the issue. " + unknown_baseline_move(self._in_review, "project item")
@@ -502,9 +509,9 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             move = ("Do not close the issue and do not move its project item" if not return_to else
                     "Do not close the issue. Move its project item back to `%s`, the status it "
                     "read before this run, for owner `%s` and project number `%s`, since no "
-                    "process is working on it now. %s Use `gh project item-edit` with the board's "
-                    "Status field"
-                    % (return_to, self._owner, self._project_number, ids))
+                    "process is working on it now. %s %s"
+                    % (return_to, self._owner, self._project_number, ids,
+                       PROJECT_ITEM_CAVEAT % "Use `gh project item-edit` with the board's Status field"))
         if outcome == OUTCOME_HALTED:
             return ("Add one comment naming the halt class and the cause line below with `gh issue "
                     "comment`. %s: a halted task is not finished." % move)

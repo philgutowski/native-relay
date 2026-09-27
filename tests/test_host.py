@@ -1,8 +1,10 @@
 """Issue #32: the host snapshot a task record carries at start and end.
 
-Nothing here reads the real host except the one test that says so; every other probe is fed text.
+Nothing here reads the real host; every probe is fed a recorded reading, including the one that
+runs through this platform's own branch of `snapshot()`.
 """
 import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -88,9 +90,24 @@ class Snapshot(unittest.TestCase):
             raise OSError("no load average here")
         self.assertEqual(host.snapshot(platform="sunos", loadavg=loadavg), host.empty())
 
-    def test_this_host_answers_with_every_field_present(self):
-        # The one real read: the probe must return the full key set on whatever runs the suite.
-        self.assertEqual(set(host.snapshot()), set(host.FIELDS))
+    def test_this_hosts_platform_branch_parses_a_recorded_reading(self):
+        # `set(host.snapshot()) == set(host.FIELDS)` passed even when every read failed, since
+        # `empty()` already carries the full key set before a single field is read. Feed the
+        # parser a recorded reading through whichever branch this platform selects and check the
+        # numbers, so a parser that stopped reading would fail here.
+        if sys.platform == "darwin":
+            snap = host.snapshot(run=ran(VM_STAT), loadavg=lambda: (2.345, 1, 1))
+            self.assertEqual(snap, {"load_1m": 2.35, "free_bytes": 60487 * 16384,
+                                    "inactive_bytes": 459988 * 16384,
+                                    "compressed_bytes": 68127 * 16384, "swapins": 12, "swapouts": 34})
+        elif sys.platform.startswith("linux"):
+            files = {"/proc/meminfo": MEMINFO, "/proc/vmstat": VMSTAT}
+            snap = host.snapshot(read=files.__getitem__, loadavg=lambda: (1.0, 1, 1))
+            self.assertEqual(snap, {"load_1m": 1.0, "free_bytes": 1024000 * 1024,
+                                    "inactive_bytes": 500000 * 1024, "compressed_bytes": None,
+                                    "swapins": 5, "swapouts": 7})
+        else:
+            self.skipTest("no recorded reading for platform %r" % sys.platform)
 
 
 class Line(unittest.TestCase):

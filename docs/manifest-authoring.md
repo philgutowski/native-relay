@@ -324,6 +324,13 @@ mechanical, bounded work, using the rubric. `run` on the mixed file still goes o
 Dispatch overlaps one claude build with one grok build, each in a worktree of the target repo, and
 merges strictly in that order so a grok task that finishes first still waits its turn.
 
+Every launched task's record also carries a snapshot of the host, its load average, free and
+inactive memory, memory held by the macOS compressor, and cumulative swap counters, read just
+before the Task process starts and just after it exits. `summary` prints them as one `host:` line
+under the timing, with swap as the difference between the two reads. When a task ran slower than
+its neighbours, read that line before blaming the card: rising load, vanishing free and inactive
+memory, or a compressor that grew by gigabytes mean the host was starved.
+
 ## 11. A manifest that grows: the feeder sidecar
 
 Skip this unless the queue is too long to list or its cards depend on each other. A manifest
@@ -344,8 +351,19 @@ first ones. With `queue.feeder.toml` beside it, `validate` runs every other chec
 that the list is absent rather than refusing, and `status` and `lease` load it and answer as they
 would for any manifest, so you can ask whether anything holds the lease before the first cycle.
 `run` still refuses an empty list, and without the sidecar so do the other three. Check the
-manifest with `feed <manifest> --dry-run`, which loads it, reads the tracker, and prints what it
-would append.
+manifest with `feed <manifest> --dry-run`, which loads it, reads the tracker, and prints one line
+per ready card: `would offer` for one the next cycle would append, `would hold` for one routed to
+a model held back by a usage limit, and `would skip` for one the runner's own launch time scan
+(the `.claude/` path scan) would refuse. A card the dry run offers is not a guarantee: the ready
+source it reads may carry less than the runner's launch scan later sees. The markdown adapter's
+ready read, for one, always returns an empty description, since the grammar has no body for a
+task line, only a title and indented comments; a `.claude/` mention sitting in a comment is
+invisible to the dry run and only trips at launch, where the runner rereads the full card and the
+rendered brief. The launch scan is the one that decides; the dry run only previews it. Outside
+`--dry-run`, a scanned card the feeder leaves out of the batch is logged once in
+`<stem>.feeder.log`, `<id> would be skipped at launch and is left out of the batch: <reason>`,
+named again at every feeder start and again if it scans clean and later trips the scan a second
+time.
 Each block the feeder appends carries a comment line with the time and the card's title, and a
 task it excludes gains `excluded = true` and a `reason` naming the halt class and cause line.
 Do not reorder or renumber what it wrote; order lives in the order file.

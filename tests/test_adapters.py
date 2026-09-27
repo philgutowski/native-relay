@@ -709,6 +709,15 @@ class GitHub(AdapterCase):
             self.assertIn("gh project item-list 4 --owner example-org --format json --limit %d"
                           % gh_adapter.PROJECT_ITEM_LIMIT, text, outcome)
 
+    def test_a_return_to_move_states_the_fallback_for_an_issue_off_the_project(self):
+        for outcome in ("blocked", "halted"):
+            text = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"),
+                                            run=self.run_for()).closeout_instructions(
+                                                outcome, return_to="Todo")
+            self.assertIn("leave the board alone", text, outcome)
+            self.assertIn("say so in the comment", text, outcome)
+            self.assertNotIn("adding it", text, "the antecedent of \"it\" is ambiguous: " + outcome)
+
     def test_candidates_carry_the_project_status_of_each_item(self):
         found = {entry["id"]: entry for entry in self.github(self.run_for()).candidates()}
         self.assertEqual(found["13"]["status"], "Done")
