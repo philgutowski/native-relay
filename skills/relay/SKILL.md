@@ -62,6 +62,7 @@ python3 <runner> verify <manifest> <task-id>    # re-run the landing verdict for
 python3 <runner> lease <manifest>               # who holds the lease
 python3 <runner> lease <manifest> --break       # clear it; operator's explicit call only
 python3 <runner> feed <manifest> --dry-run      # continuous run: what would the next cycle append; writes nothing
+python3 <runner> feed <manifest> --dry-run --detach  # refused: a dry run never detaches, so nothing runs and nothing is written
 python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
@@ -580,7 +581,9 @@ reach the next task the runner launches, even one in the same batch, since the r
 templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's commit,
 never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the feeder
 from it, taking over a live one with restart semantics; `--pin --dry-run` says what it would
-extract and writes nothing. A feeder started from a checkout instead prints the checkout warning,
+extract and writes nothing, and adding `--detach` to that pair is refused rather than launching a
+real feeder from the checkout `--pin` exists to avoid. A feeder started from a checkout instead
+prints the checkout warning,
 naming the tree it runs from, at launch and in its log: that is the signal to relaunch it with
 `--pin` before trusting the next cycle.
 

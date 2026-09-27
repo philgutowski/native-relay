@@ -1029,6 +1029,16 @@ class Verb(FeederCase):
         self.assertEqual(code, 0, text)
         self.assertEqual(text.count("warning: edits reach cycles"), 2, text)
 
+    def test_dry_run_and_detach_refuses_the_pair_and_launches_nothing(self):
+        # Issue #60: `_detach_feeder` never carried `--dry-run` to the child, so the pair started
+        # a real feeder instead of reading one. The pair is refused instead.
+        with mock.patch.object(cli, "_detach_feeder") as detach:
+            code, text = self.call("--dry-run", "--detach")
+        self.assertEqual(code, cli.EXIT_CONFIG, text)
+        self.assertIn("--dry-run and --detach do not combine", text)
+        detach.assert_not_called()
+        self.assertFalse(os.path.exists(self.paths.out))
+
     def test_stop_drops_the_stop_file_and_touches_nothing_else(self):
         code, text = self.call("--stop")
         self.assertEqual(code, 0)

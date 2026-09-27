@@ -157,7 +157,9 @@ def build_parser():
     feed_verb.add_argument("manifest")
     feed_verb.add_argument("--dry-run", action="store_true", dest="dry_run",
                            help="print what the next cycle would append and leave; writes "
-                                "nothing and runs nothing")
+                                "nothing and runs nothing. Refused with --detach: a dry run "
+                                "never detaches, since a detached child cannot carry the flag "
+                                "back and would run for real")
     feed_verb.add_argument("--once", action="store_true",
                            help="run a single cycle and leave, without waiting")
     feed_verb.add_argument("--stop", action="store_true",
@@ -786,6 +788,14 @@ def cmd_feed(args, env, out, deps=None):
         if clash:
             out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(clash))
             return EXIT_CONFIG
+    if args.dry_run and args.detach:
+        # A dry run reads only and a detach starts a child that outlives this process. Carrying
+        # `--dry-run` onto the child (like `--once`, `--restart`, and `--notify` already are)
+        # would still start a real feeder in the parent's own exit, and dropping it silently is
+        # issue #60: the child ran for real while the operator believed nothing had. Neither
+        # runs.
+        out.write("--dry-run and --detach do not combine; a dry run never detaches\n")
+        return EXIT_CONFIG
     if args.stop:
         feeder_module.request_stop(paths)
         out.write("stop requested: %s\nthe feeder leaves after its current cycle\n" % paths.stop)
