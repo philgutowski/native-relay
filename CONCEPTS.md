@@ -422,6 +422,12 @@ Cycle after a wait relaunches the dead Tasks first and appends fresh cards only 
 room they leave. A blocked limit death with no free fallback in a Cycle where something landed
 is neither: it stays blocked for a person, like any other blocked record.
 
+Each Task is bounded as well as each run of waits. The Feeder counts every time one Task is
+moved or waited on as a limit death, a move does not reset that count, and past the bound the
+Task is given up: reported blocked, or excluded when it halted. Two models that fall back to each
+other would otherwise keep one quick dying Task alive for ever, because a mark expires during the
+waits and the move it frees resets the run of waits. A landing clears the count.
+
 The Feeder is the one piece of runner code that writes a Manifest. Every write is a text edit
 that is parsed back and compared with the change intended, validated by the manifest module from
 a temporary file, and only then renamed over the Manifest, so no reader ever sees a half written

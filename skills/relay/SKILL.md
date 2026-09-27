@@ -539,9 +539,10 @@ after `idle_waits_max` waits). 1 a person is needed: the checkout is dirty or of
 branch, the ready source is not configured, the runner refused the manifest, the run halted with
 a run scoped class (nothing is counted against the task then), a task that halted twice could
 not be excluded, every ready card was refused with the model it is routed to, or the ready
-source could not be read three cycles in a row with nothing left to run. 2 every task died
-within minutes for eight hours, which is not a usage limit, so read the summary. 3 another
-feeder already holds this manifest.
+source could not be read three cycles in a row with nothing left to run. 2 every task has died
+quickly for `limit_waits_max` waits in a row (16 by default, eight hours), which is not a usage
+limit or one that outlasts the waits, so read the summary; or a blocking post cycle hook failed
+with `post_cycle_hold` on. 3 another feeder already holds this manifest.
 
 Three things the feeder tells the operator that a summary alone would not. A task it excluded
 after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest
@@ -557,6 +558,12 @@ marked exhausted for `fallback_hours` (5 by default), the task is moved to opus 
 and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
 mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
 where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
+One task is bounded too: each time it is moved or waited on as a limit death it is counted, a
+move never resets that count, and past `limit_waits_max` the feeder gives it up, reporting a
+blocked one blocked and excluding a halted one with its reason. Without that, two models that
+fall back to each other would relaunch a task every half hour for ever, since the first mark
+expires during the waits and the move that follows resets the whole cycle count. A landing
+clears the task's count.
 
 A limit death is sometimes recorded `blocked` with class `no_envelope` rather than halted: the
 process printed only the CLI's limit message and exited in seconds. The fallback covers that too.

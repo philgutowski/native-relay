@@ -46,6 +46,13 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     Without that it fell through to an ordinary blocked report, left its model unmarked, and
     the next cycle filled the batch with fresh cards on the dead model.
 
+    The wait is bounded per task as well as per cycle (issue #54). Two models that fall back to
+    each other never reach the whole cycle bound: the first mark expires during the waits, a
+    move becomes possible, and a move resets the streak. So every time a task is moved or waited
+    on as a limit death it is counted in the state file, the count survives moves and restarts,
+    and past `limit_waits_max` the task is given up: a blocked one is reported blocked and not
+    retried, a halted one is excluded with its reason. A landing clears the count.
+
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes five
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
 file; its log; its events file; and its post cycle hook's output. The tracker is read only here
@@ -773,9 +780,11 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
 def new_state():
     # `retry_blocked` is {id: the blocked record's started_at} for each blocked task the next
     # run is to relaunch. The stamp is how a retry the run never reached is told from one that
-    # ran: every launch restamps it.
+    # ran: every launch restamps it. `limit_deaths` is {id: times moved or waited on as a limit
+    # death}, never reset by a move, so it bounds a task that the streak alone cannot.
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
-            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}}
+            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {},
+            "limit_deaths": {}}
 
 
 class Feeder:
@@ -1156,6 +1165,8 @@ class Feeder:
                                           "was counted. Read the summary."
                                           % (data.get("halt_task"), data.get("halt_class")),
                              "run_scoped_halt")
+        for task in landed:
+            self.state["limit_deaths"].pop(task["id"], None)
         dead = halted + limited
         moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
         if looks_like_usage_limit(dead, landed, config) and len(moves) < len(dead):
@@ -1169,20 +1180,38 @@ class Feeder:
                 for task in limited:
                     self.report_blocked(task)
                 self.save_state()
-                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
-                                              "usage limit, or one that outlasts the waits. "
-                                              "Read the summary." % config.limit_waits_max,
+                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits in a "
+                                              "row. Not a usage limit, or one that outlasts the "
+                                              "waits. Read the summary." % config.limit_waits_max,
                                  "limit_waits_exhausted")
-            for task in limited:
-                self.queue_retry(task)
-            if limited:
-                self.log("%s blocked on a usage limit and will be retried after the wait with "
-                         "--retry-blocked" % sorted(limited_ids))
-            self.save_state()
-            self.log("every task that died this cycle died inside %ds, reading that as a usage "
-                     "limit, waiting %ds; these deaths are not counted"
-                     % (config.quick_death_seconds, config.limit_wait_seconds))
-            return Pending(config.limit_wait_seconds, "usage_limit")
+            # The streak is the cycle's bound; this is each task's (issue #54). A task past it
+            # is given up here and does not hold the wait for the rest.
+            code, spent = self.spend_limit_deaths(dead)
+            if code is not None:
+                return code
+            halted = [task for task in halted if task["id"] not in spent]
+            limited = [task for task in limited if task["id"] not in spent]
+            limited_ids -= spent
+            if halted or limited:
+                for task in limited:
+                    self.queue_retry(task)
+                if limited:
+                    self.log("%s blocked on a usage limit and will be retried after the wait "
+                             "with --retry-blocked" % sorted(limited_ids))
+                self.save_state()
+                self.log("every task that died this cycle died inside %ds, reading that as a "
+                         "usage limit, waiting %ds; these deaths are not counted"
+                         % (config.quick_death_seconds, config.limit_wait_seconds))
+                return Pending(config.limit_wait_seconds, "usage_limit")
+            # Every death was given up, so nothing is left to wait for.
+            moves = []
+        else:
+            code, spent = self.spend_limit_deaths([task for task, _, _ in moves])
+            if code is not None:
+                return code
+            halted = [task for task in halted if task["id"] not in spent]
+            limited = [task for task in limited if task["id"] not in spent]
+            moves = [move for move in moves if move[0]["id"] not in spent]
         self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)
         for task in limited:
@@ -1200,21 +1229,65 @@ class Feeder:
                 continue
             reason = "excluded by the feeder after %d halts, last class %s: %s" % (
                 count, task.get("class"), task.get("cause") or "")
-            try:
-                text = self._read(self.paths.manifest)
-                edited = manifestedit.exclude_task(text, task["id"], reason)
-                if edited is not None:
-                    manifestedit.commit(self.paths.manifest, text, edited, env=self.env)
-            except manifestedit.EditError as exc:
-                # Rule 2 cannot be kept, and without it this task relaunches on every cycle.
-                self.save_state()
-                return self.stop(EXIT_CONFIG, "stopping: %s halted %d times and could not be "
-                                              "excluded: %s" % (task["id"], count, exc),
-                                 "exclusion_failed")
+            code = self.exclude(task, reason, "%s halted %d times" % (task["id"], count))
+            if code is not None:
+                return code
             self.log("%s %s" % (task["id"], reason))
             self.notify("%s excluded after %d halts, %s" % (task["id"], count, task.get("class")))
         self.save_state()
         return EXIT_OK if self.once else None
+
+    def exclude(self, task, reason, what):
+        """Write `task` into the manifest as excluded with `reason`. Returns None, or the exit
+        code to leave with when the edit is refused: without the exclusion the task relaunches
+        on every cycle, so that is a person's to look at. `what` says why it was excluded."""
+        try:
+            text = self._read(self.paths.manifest)
+            edited = manifestedit.exclude_task(text, task["id"], reason)
+            if edited is not None:
+                manifestedit.commit(self.paths.manifest, text, edited, env=self.env)
+        except manifestedit.EditError as exc:
+            self.save_state()
+            return self.stop(EXIT_CONFIG, "stopping: %s and could not be excluded: %s"
+                             % (what, exc), "exclusion_failed")
+        self.state["limit_deaths"].pop(task["id"], None)
+        return None
+
+    def spend_limit_deaths(self, tasks):
+        """Count one limit death for each of `tasks`, the ones this cycle is about to move or
+        wait on (issue #54), and give up on each whose count passes `limit_waits_max`. Returns
+        (exit code or None, the ids given up).
+
+        A task given up is reported blocked in the ordinary way and relaunched no more: a
+        blocked one is simply not queued for a retry, and a halted one, which the runner would
+        relaunch on every run, is excluded with its reason. Its count goes with it, so a person
+        who retries it by hand starts a fresh bound."""
+        bound, counts, spent = self.config.limit_waits_max, self.state["limit_deaths"], set()
+        for task in tasks:
+            count = counts.get(task["id"], 0) + 1
+            counts[task["id"]] = count
+            if count <= bound:
+                continue
+            spent.add(task["id"])
+            message = ("%s has died quickly %d times, moved to a fallback or waited on as a "
+                       "usage limit each time, past limit_waits_max %d. Not a usage limit, or "
+                       "one that outlasts the bound; the feeder stops relaunching it"
+                       % (task["id"], count, bound))
+            if task.get("status") == STATUS_BLOCKED:
+                counts.pop(task["id"], None)
+                self.log(message)
+                self.report_blocked(task)
+                continue
+            reason = "excluded by the feeder after %d usage limit deaths, last class %s: %s" % (
+                count, task.get("class"), task.get("cause") or "")
+            code = self.exclude(task, reason, "%s died quickly %d times" % (task["id"], count))
+            if code is not None:
+                return code, spent
+            self.log(message)
+            self.notify("%s excluded after %d usage limit deaths, %s"
+                        % (task["id"], count, task.get("class")))
+        self.save_state()
+        return None, spent
 
     # Per model usage limits.
     def exhausted_models(self):

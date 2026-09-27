@@ -560,6 +560,79 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.state()["halts"], {})
         self.assertNotIn("blocked; a later run will not retry it", self.log_text())
 
+    def mutual_fallback_past_the_first_mark(self, death):
+        """Issue #54. One card on fable, two models that fall back to each other, and a task
+        that dies quickly on every run. Ninety minutes pass per run, so fable's mark, made at
+        the first run, has expired by the fifth, and a move is possible again."""
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+
+        def ninety_minutes_pass():
+            self.clock = self.clock + timedelta(minutes=90)
+        self.before_run = ninety_minutes_pass
+        self.plans = [{"1": death()} for _ in range(8)]
+        code = self.feed(feeder.Config(model_fallback={"fable": "opus", "opus": "fable"},
+                                       limit_waits_max=4))
+        # Moved to opus once, waited on three times there, and at the fifth death, with fable's
+        # mark gone, the move the streak would have reset on is refused: the task is given up.
+        self.assertEqual(code, 0)
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable"] + ["opus"] * 4)
+        self.assertEqual(self.sleeps, [1800] * 3)
+        self.assertIn("fable was marked exhausted at 2026-09-19T10:20:00, over 5h ago",
+                      self.log_text())
+        self.assertIn("1 has died quickly 5 times, moved to a fallback or waited on as a usage "
+                      "limit each time, past limit_waits_max 4", self.log_text())
+        self.assertEqual(self.state()["limit_deaths"], {})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertEqual(self.state()["halts"], {})
+        self.assertEqual(self.models(), {"1": "opus"})
+        self.assertIn("the queue is empty, leaving", self.log_text())
+
+    def test_under_mutual_fallback_a_blocked_quick_death_is_reported_after_the_bound(self):
+        # No envelope and no result line: the shape that is not a limit at all.
+        self.mutual_fallback_past_the_first_mark(lambda: self.blocked(4, log=""))
+        self.assertEqual(self.retries, [[], ["1"], ["1"], ["1"], ["1"]])
+        hits = [note for note in self.notes if "1 blocked; a later run will not retry it" in note]
+        self.assertEqual(len(hits), 1, self.notes)
+        self.assertNotIn("1", manifestedit.excluded_ids(self.text()))
+
+    def test_under_mutual_fallback_a_halted_quick_death_is_excluded_after_the_bound(self):
+        self.mutual_fallback_past_the_first_mark(lambda: halted(8))
+        tasks = {task.id: task for task in mf.load(self.manifest_path).tasks}
+        self.assertTrue(tasks["1"].excluded)
+        self.assertIn("excluded by the feeder after 5 usage limit deaths, last class "
+                      "unclean_exit", tasks["1"].reason)
+        self.assertTrue(mf.validate(mf.load(self.manifest_path)).ok)
+        self.assertTrue(any("1 excluded after 5 usage limit deaths" in note
+                            for note in self.notes), self.notes)
+
+    def test_a_real_limit_that_clears_inside_the_bound_lands_and_its_count_goes(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)},
+                      {}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus", "opus": "fable"},
+                                limit_waits_max=4))
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "opus", "opus"])
+        self.assertEqual(self.sleeps, [1800, 1800])
+        self.assertEqual(self.records["1"]["status"], "landed")
+        self.assertEqual(self.state()["limit_deaths"], {})
+        self.assertNotIn("blocked; a later run will not retry it", self.log_text())
+
+    def test_the_count_survives_a_move_and_a_restart_and_only_a_landing_clears_it(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        config = feeder.Config(model_fallback={"fable": "opus", "opus": "fable"})
+        self.plans = [{"1": halted(8)}, {"1": halted(9)}]
+        self.feed(config)
+        # One move, one wait, and then the stop file: a new feeder starts from that count.
+        self.assertEqual(self.state()["limit_deaths"], {"1": 2})
+        os.remove(self.paths.stop)
+        self.plans = [{"1": halted(7)}]
+        self.feed(config)
+        self.assertEqual(self.state()["limit_deaths"], {"1": 3})
+        self.assertEqual(self.state()["limit_waits"], 1)
+
     def test_a_blocked_death_with_no_free_fallback_holds_a_movable_halt_to_the_wait(self):
         # 1 halted on fable, whose fallback sonnet is free; 2 blocked on opus, whose fallback
         # haiku is marked and leads nowhere. Nothing landed and one death has nowhere to go, so
