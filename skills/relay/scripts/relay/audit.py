@@ -48,13 +48,14 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
     id. The Runner uses it to clear `card_in_review_by_run` on a card it has now seen out of
     review (issue #64); this module still writes nothing.
 
-    `item_seen`, when a dict, is filled `True` for a landed task whose project item read cleanly
-    at the terminal status (issue #61). The Runner uses it to retire `confirm_board_terminal`'s
-    own record finding, the way it clears `card_in_review_by_run` above; nothing here writes it.
-    Every task's card read and every landed task's item read share one `board_cache` for the
-    pass (both go through the same GitHub board, `adapter.status` for the first and
-    `adapters.board_lag` for the second), so a run with many cards on that tracker makes one full
-    board read rather than one per card.
+    `item_seen`, when a dict, is filled `True` for a landed task whose project item is positively
+    confirmed on the declared project at the terminal status (issue #61); an item the project no
+    longer carries at all leaves no mark, since that is not the same claim. The Runner uses it to
+    retire `confirm_board_terminal`'s own record finding, the way it clears
+    `card_in_review_by_run` above; nothing here writes it. Every task's card read and every
+    landed task's item read share one `board_cache` for the pass (all three go through the same
+    GitHub board: `adapter.status`, `adapters.board_lag`, and `adapters.item_confirmed_terminal`),
+    so a run with many cards on that tracker makes one full board read rather than one per card.
     """
     try:
         records = dict(records if records is not None else store.records())
@@ -112,7 +113,13 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
             if finding:
                 findings.append(finding)
             elif item_seen is not None:
-                item_seen[task_id] = True
+                # Not simply "no lag": that also covers an item the project no longer carries
+                # at all, and confirm_board_terminal's own finding should keep naming that card
+                # rather than have this retire it on a disappearance it never confirmed (issue
+                # #61's own review).
+                confirmed, _ = adapters.item_confirmed_terminal(adapter, task_id, cache=board_cache)
+                if confirmed:
+                    item_seen[task_id] = True
         elif terminal and record_status != contracts.STATUS_LANDED:
             if _landed_by_hand(repo, record, head, task_id):
                 continue

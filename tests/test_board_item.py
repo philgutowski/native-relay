@@ -167,6 +167,24 @@ class BoardLag(unittest.TestCase):
         self.assertIsNone(lag_13)
         self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
 
+    def test_a_failed_read_is_not_cached_so_a_later_call_can_retry(self):
+        """Issue #61's own review of the cache fix: caching a failure the same way a success is
+        cached would let one transient gh error poison every card sharing the pass's cache,
+        turning one card's unreadable board into every card's."""
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"},
+                        board_failure="rate limited")
+        adapter = _adapter(run)
+        cache = {}
+        lag, reason = adapters.board_lag(adapter, "12", cache=cache)
+        self.assertIsNone(lag)
+        self.assertIn("rate limited", reason)
+        run.board_failure = None
+        lag, reason = adapters.board_lag(adapter, "13", cache=cache)
+        self.assertIsNone(reason)
+        self.assertIsNone(lag)
+        self.assertEqual(
+            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 2)
+
     def test_no_cache_reads_the_board_fresh_every_call_as_before(self):
         run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"})
         adapter = _adapter(run)
@@ -182,6 +200,38 @@ class BoardLag(unittest.TestCase):
                   if not attr.startswith("_")
                   and callable(getattr(_adapter(TwoTruths({}, {})), attr))}
         self.assertEqual(public, set(adapters.INTERFACE))
+
+
+class ItemConfirmedTerminal(unittest.TestCase):
+    """Issue #61's own review: the narrower answer `board_lag` cannot give, since its
+    "nothing to report" covers both a confirmed item and one off the board entirely."""
+
+    def test_an_item_on_the_board_at_the_terminal_status_is_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertTrue(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_item_off_the_board_is_not_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"13": "Done"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_item_still_lagging_is_not_confirmed(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "In review"})
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIsNone(reason)
+
+    def test_an_unreadable_board_is_not_confirmed_and_carries_a_reason(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"}, board_failure="no scope")
+        confirmed, reason = adapters.item_confirmed_terminal(_adapter(run), "12")
+        self.assertFalse(confirmed)
+        self.assertIn("no scope", reason)
+
+    def test_an_adapter_with_one_status_per_card_has_nothing_to_confirm(self):
+        self.assertEqual(adapters.item_confirmed_terminal(FakeAdapter(), "T-1"), (False, None))
 
 
 class ConfirmBoardTerminal(unittest.TestCase):
@@ -333,6 +383,15 @@ class Audit(unittest.TestCase):
         self.assertEqual(item_seen, {})
         item_seen = {}
         self.build(TwoTruths({"12": "CLOSED"}, {}, board_failure="no scope"), item_seen=item_seen)
+        self.assertEqual(item_seen, {})
+
+    def test_item_seen_stays_empty_when_the_item_is_off_the_board_rather_than_confirmed(self):
+        """Issue #61's own review: `board_lag`'s "nothing to report" also covers an item the
+        project no longer carries at all, which is not the same claim as reading the item at
+        the terminal status. Only the second should let a later audit retire the stale
+        `confirm_board_terminal` finding a closeout wrote while the item still lagged."""
+        item_seen = {}
+        self.build(TwoTruths({"12": "CLOSED"}, {"13": "Done"}), item_seen=item_seen)
         self.assertEqual(item_seen, {})
 
 

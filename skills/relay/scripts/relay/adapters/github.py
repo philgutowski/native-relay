@@ -107,7 +107,11 @@ class GitHubAdapter:
         #61): the run end audit checks many landed cards in one pass, and each call used to make
         its own `gh project item-list`, bounding the pass at 30 seconds times the landed count
         rather than once. A single-card caller passes nothing and reads fresh every time, same
-        as before."""
+        as before.
+
+        Only a successful read is cached. One transient failure, a rate limit or a flaky
+        network, must cost the one card whose turn it was, the way it always did, not read as
+        an unreadable board for every other card sharing this pass's cache."""
         if cache is not None and "board" in cache:
             return cache["board"]
         payload, reason = self._gh([
@@ -118,10 +122,11 @@ class GitHubAdapter:
             # had moved was still classified partial_landing.
             "--limit", str(PROJECT_ITEM_LIMIT),
         ])
-        result = (None, reason) if payload is None else (payload, None)
+        if payload is None:
+            return None, reason
         if cache is not None:
-            cache["board"] = result
-        return result
+            cache["board"] = (payload, None)
+        return payload, None
 
     def _items(self, cache=None):
         payload, reason = self._board(cache=cache)
@@ -206,6 +211,21 @@ class GitHubAdapter:
         if not on_board or (status and str(status).lower() == str(self._status_field).lower()):
             return None, None
         return {"card_status": status or "no status", "terminal_status": self._status_field}, None
+
+    def _item_confirmed_terminal(self, task_id, cache=None):
+        """Issue #61's own review: `_board_lag`'s `(None, None)` covers two different states, an
+        item that reads the terminal status and one the declared project does not carry at all,
+        because neither is something the closeout's own finding should keep naming. Retiring
+        that finding is a stronger claim than "nothing to report", so it needs the narrower
+        answer: True only when the item is actually on the board and actually reads
+        `status_field`, never when it merely could not be found to disagree."""
+        if not self._status_field:
+            return False, None
+        on_board, status, reason = self._project_item(task_id, cache=cache)
+        if reason:
+            return False, reason
+        return bool(on_board and status
+                   and str(status).lower() == str(self._status_field).lower()), None
 
     def _comments(self, task_id):
         payload, reason = self._issue(task_id)

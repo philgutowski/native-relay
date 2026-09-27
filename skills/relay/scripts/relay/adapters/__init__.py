@@ -143,6 +143,24 @@ def board_lag(adapter, task_id, cache=None):
         return None, "the board read raised: %s" % exc
 
 
+def item_confirmed_terminal(adapter, task_id, cache=None):
+    """Whether a landed task's board item is positively confirmed on the declared project at
+    its terminal status, or (False, reason) otherwise (issue #61).
+
+    `board_lag`'s `(None, None)` is "nothing to report", which is true both of an item that
+    reads the terminal status and of one the project does not carry at all; retiring
+    `confirm_board_terminal`'s own finding is a stronger claim than that, so it needs this
+    narrower answer instead of inferring it from `board_lag`'s absence of a complaint. An
+    adapter with nothing to check answers False, the same as one that could not confirm it."""
+    read = getattr(adapter, "_item_confirmed_terminal", None)
+    if read is None:
+        return False, None
+    try:
+        return read(task_id, cache=cache)
+    except Exception as exc:
+        return False, "the board read raised: %s" % exc
+
+
 def task_tracker_steps(manifest, branch, backend=None):
     """The three places the task brief tells the process to touch the tracker: the start step
     before any other work, the review step before the envelope, and the comment when it cannot
