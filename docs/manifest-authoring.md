@@ -343,9 +343,11 @@ templates while a batch is in flight. From a git work tree, `feed <manifest> --p
 default branch's commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>`,
 reusing an extract whose sha is unchanged rather than remaking it, and starts the feeder from it,
 taking over a live one with restart semantics; from an existing extract or a plugin install copy
-`--pin` is a plain restart and extracts nothing. `--pin --dry-run` says what would be extracted,
-then also runs the ordinary dry run of the next cycle with this checkout's code, noted, and writes
-nothing itself. A feeder started from a checkout instead prints the checkout
+`--pin` is a plain restart and extracts nothing. From a git work tree, `--pin --dry-run` says what
+would be extracted, then also runs the ordinary dry run of the next cycle with this checkout's
+code, noted, and writes nothing itself; from an existing extract or a plugin install copy, `--pin`
+combined with `--dry-run` says nothing about pinning and is silently a no-op. A feeder started
+from a checkout instead prints the checkout
 warning, naming the tree it runs from, at launch and in its log: relaunch it with `--pin` before
 trusting the next cycle.
 
