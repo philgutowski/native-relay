@@ -181,7 +181,12 @@ not an empty queue either; the feeder stops with exit 1 and names them, since on
 change releases them.
 
 It launches the runner from the same tree it was started from. Start it from a pinned extract of
-a commit and it drives that extract, whatever happens in your checkout meanwhile. For the same
+a commit and it drives that extract, whatever happens in your checkout meanwhile. Started from a
+git checkout it says so, on the terminal and in its log, because every cycle would then run
+whatever that checkout holds. `feed <manifest> --pin` is the one flag that fixes it: it extracts
+the checkout's HEAD under `~/.relay/extracts/native-relay-<sha>` and starts the feeder from
+there with `--restart`, so a running feeder finishes its task and hands over. Uncommitted edits
+are not in the extract, and the flag says when there are some. For the same
 reason, editing the sidecar's settings or cutting a new runner does nothing to a feeder already
 running; `--restart` asks the old one to leave, waits for it, and takes its place, and nothing is
 killed, so the task in flight finishes and merges normally. The order and routing files are the

@@ -482,6 +482,56 @@ def runner_entry():
                         "relay_cli.py")
 
 
+def runner_tree():
+    """The root of the tree `runner_entry` launches from: the directory holding `skills/`."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(runner_entry()))))
+
+
+def checkout_warning(tree=None):
+    """The sentence to show when the feeder's own tree is a git work tree, else None. Every
+    cycle launches the runner from that tree, so an edit made there reaches the next task, even
+    one in the same batch, since the runner reads brief templates while a batch is in flight."""
+    tree = tree or runner_tree()
+    top = gitread.work_tree_root(tree)
+    if top is None:
+        return None
+    return ("this feeder launches the runner from %s, inside the git work tree %s, so every "
+            "cycle runs whatever that checkout holds at that moment; start it from a pinned "
+            "extract with `feed <manifest> --pin`" % (tree, top))
+
+
+def pin_extract(tree, home, run=subprocess.run):
+    """Extract the committed HEAD of the work tree at `tree` under `~/.relay/extracts` and
+    return `(extract_dir, uncommitted)`. The directory is named for the sha, so it is the same
+    directory every time HEAD is the same, and an existing one that holds the runner is reused
+    untouched, since a feeder may be running from it. `uncommitted` is the first changed path
+    the extract does not hold, or None."""
+    head = gitread.rev_parse(tree, "HEAD")
+    if not head:
+        raise OSError("HEAD does not resolve in %s, so there is no commit to extract" % tree)
+    sha = head[:12]
+    dirty = gitread.status_porcelain(tree).strip()
+    destination = os.path.join(home, ".relay", "extracts", "native-relay-" + sha)
+    entry = os.path.join(destination, "skills", "relay", "scripts", "relay_cli.py")
+    if not os.path.isfile(entry):
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        partial = "%s.partial-%d" % (destination, os.getpid())
+        os.makedirs(partial)
+        try:
+            archive = subprocess.Popen(["git", "-C", tree, "archive", "HEAD"],
+                                       stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+            untar = run(["tar", "-x", "-C", partial], stdin=archive.stdout)
+            archive.stdout.close()
+            if archive.wait() != 0 or untar.returncode != 0:
+                raise OSError("git archive or tar failed for %s" % tree)
+            if os.path.isdir(destination):
+                shutil.rmtree(destination)
+            os.rename(partial, destination)
+        finally:
+            shutil.rmtree(partial, ignore_errors=True)
+    return destination, (dirty.splitlines()[0].strip() if dirty else None)
+
+
 def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_stdout=None):
     """The real effects. `child_stdout` is where each run's output goes; None inherits the
     feeder's own, which under `--detach` is the output file beside the manifest."""
@@ -580,6 +630,9 @@ class Feeder:
     def run(self):
         self.log("feeder start, dry_run=%s, manifest=%s, runner=%s"
                  % (self.dry_run, self.paths.manifest, runner_entry()))
+        warning = checkout_warning()
+        if warning:
+            self.log("warning: " + warning)
         try:
             # Read again now that the lock is held. Under `--restart` the state was first read
             # while the old feeder still ran, and its last cycle's halts, marks, and queued

@@ -81,7 +81,8 @@ What stays manual under a feeder:
 
 Start a feeder from a pinned extract of a commit, never from a checkout you are editing: it
 launches the runner from its own tree at every cycle, so a file you change there becomes the code
-driving the run ninety minutes later.
+driving the run ninety minutes later. `feed <manifest> --pin` does the extract and the restart in
+one flag, and a feeder started from a checkout without it warns at start.
 
 ## After the run
 

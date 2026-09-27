@@ -15,6 +15,7 @@ import subprocess
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest import mock
 
 import _paths
 import _repo
@@ -902,6 +903,12 @@ class Verb(FeederCase):
         out = io.StringIO()
         code = cli.cmd_feed(args, self.base_env(), out, deps=deps or self.deps())
         return code, out.getvalue()
+
+    def test_the_start_line_and_the_feeder_log_both_carry_the_checkout_warning(self):
+        with mock.patch.object(feeder, "checkout_warning", return_value="edits reach cycles"):
+            code, text = self.call("--dry-run")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(text.count("warning: edits reach cycles"), 2, text)
 
     def test_stop_drops_the_stop_file_and_touches_nothing_else(self):
         code, text = self.call("--stop")
