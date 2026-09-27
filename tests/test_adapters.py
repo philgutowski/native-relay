@@ -14,7 +14,7 @@ from unittest import mock
 
 import _paths
 import _repo
-from relay import adapters, manifest as mf
+from relay import adapters, brief, closeout, manifest as mf
 from relay.adapters import github as gh_adapter, jira as jira_adapter, markdown as md_adapter
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
@@ -233,6 +233,104 @@ class ReturnTo(SharedContract):
         # Eight until the feeder plan of 2026-09-19 added `ready`, which reads and never writes.
         self.assertEqual(len(adapters.INTERFACE), 9)
         self.assertIn("ready", adapters.INTERFACE)
+
+
+# The Task brief's start step names the status it moves the card to in this shape. A start step
+# reworded past it reads here as making no write, which fails the agreement below loudly rather
+# than passing it quietly.
+START_MOVE_RE = re.compile(r"(?:Move|Transition) the (?:tracker )?card to `([^`]+)`")
+
+# Every way a closeout sentence has said "leave the card where it is". Each one is true only
+# while the card still reads the status it had before the run.
+STAY_PUT = ("do not transition the card", "do not move its project item", "do not move the card",
+            "keeps its current status")
+
+
+class StartStepAgreesWithCloseout(AdapterCase):
+    """Issue #13. The Task brief and the Closeout brief are rendered by different code paths
+    for two processes that share no runtime state, so nothing but this test makes them agree
+    about the card's status when the Closeout begins writing. The Task's start step moved the
+    card to in review, and the Closeout's blocked and halted sentence once still said the card
+    "keeps its current status" (fixed in 4e3c8f6); every blocked or halted card then sat in
+    progress with nobody on it, and the suite passed throughout.
+
+    Both sides go through the production renderers, `brief.render` and `closeout.render`, and
+    `return_to` comes from `closeout.return_to_for` over the record the run loop writes, so a
+    drift on either side, or in the refusal rules between them, fails here."""
+
+    BASELINE = "Todo"
+    CARD = {"id": "T-1", "title": "t", "description": "d"}
+
+    def card_after_task(self, manifest):
+        """The status the Task process leaves the card in, read from the start step the brief
+        actually ships. None when the start step makes no tracker write."""
+        steps = adapters.task_tracker_steps(manifest, "relay/T-1")
+        text = brief.render(manifest, manifest.tasks[0], self.CARD)
+        self.assertIn(steps["start_step"], text, "the brief does not ship the start step")
+        found = START_MOVE_RE.search(steps["start_step"])
+        return found.group(1) if found else None
+
+    def closeout_text(self, manifest, adapter, outcome, baseline):
+        record = {"baseline_tracker_status": baseline}
+        return_to = closeout.return_to_for(manifest, record)
+        extra = ({"halt_class": "gate_refused", "cause_line": "gate refused relay/T-1"}
+                 if outcome == adapters.OUTCOME_HALTED else {})
+        return closeout.render(manifest, self.CARD, outcome, {}, [], adapter, [], "claude",
+                               return_to=return_to, **extra)
+
+    def manifests(self):
+        yield "jira", self.jira_manifest()
+        yield "github", self.github_manifest()
+        yield "markdown", self.manifest()
+
+    def adapter_for(self, name):
+        # Borrowed rather than inherited, so this class does not run the shared contract again.
+        return dict(SharedContract.each(self))[name]
+
+    def test_a_card_the_task_moved_is_moved_back_by_the_blocked_and_halted_closeout(self):
+        moved = 0
+        for name, manifest in self.manifests():
+            after = self.card_after_task(manifest)
+            if after is None:
+                continue
+            moved += 1
+            self.assertEqual(after, manifest.tracker.in_review_status, name)
+            adapter = self.adapter_for(name)
+            for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
+                with self.subTest(adapter=name, outcome=outcome):
+                    text = self.closeout_text(manifest, adapter, outcome, self.BASELINE)
+                    self.assertIn("`%s`" % self.BASELINE, text,
+                                  "the Task moved the card to %s and the %s Closeout never says "
+                                  "to move it back" % (after, outcome))
+                    for phrase in STAY_PUT:
+                        self.assertNotIn(phrase, text.lower(),
+                                         "the %s Closeout says the card stays where the Task "
+                                         "left it, which is %s" % (outcome, after))
+        self.assertEqual(moved, 2, "github and jira both move the card at the start step")
+
+    def test_a_card_the_task_never_moved_is_not_moved_by_the_closeout(self):
+        for name, manifest in self.manifests():
+            if self.card_after_task(manifest) is not None:
+                continue
+            adapter = self.adapter_for(name)
+            for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
+                with self.subTest(adapter=name, outcome=outcome):
+                    text = self.closeout_text(manifest, adapter, outcome, self.BASELINE)
+                    self.assertNotIn("`%s`" % self.BASELINE, text)
+                    self.assertNotIn("back to", text.lower())
+
+    def test_a_card_the_operator_staged_in_review_stays_there(self):
+        """The one refusal where the start step and "keeps its current status" agree: the card
+        read in review before the run, so the Task's move changed nothing to undo."""
+        for name, manifest in self.manifests():
+            after = self.card_after_task(manifest)
+            if after is None:
+                continue
+            adapter = self.adapter_for(name)
+            for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
+                with self.subTest(adapter=name, outcome=outcome):
+                    text = self.closeout_text(manifest, adapter, outcome, after)
+                    self.assertNotIn("back to", text.lower())
 
 
 class _JsonOpener:
