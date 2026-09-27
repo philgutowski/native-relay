@@ -347,48 +347,68 @@ def baseline_unknown(manifest, record):
     return not record.get("baseline_tracker_status") and not record.get("landing_ref")
 
 
-def launch_baseline(manifest, record, status):
+def launch_baseline(manifest, record, status, last_audit=None):
     """The baseline a launch records, given the status it just read (issue #51). A relaunch of a
     card a blocked or halted attempt left in review reads the in review status, and recording
     that would make `return_to_for` take the leftover for an operator's staging and never return
-    the card. So on a record an earlier launch already read, an empty read, or one that reads in
-    review, keeps that launch's baseline unless it read in review too. The earlier baseline may
-    itself be empty, and then the card stays unknown rather than turning into a staged one. Any
-    other read wins: a card the operator moved between runs goes back to where they put it, not
-    where it first stood. `baseline_sha` marks an earlier launch, because only the two launch
-    writes set it and they always set it."""
+    the card.
+
+    So on a record an earlier launch already read (`baseline_sha` marks one, because only the
+    two launch writes set it and they always set it), and whose earlier baseline was not itself
+    the in review status, two reads keep that earlier baseline. An empty read, which knows
+    nothing newer. And an in review read when the runner left the card there: `last_audit`, the
+    store's last run end audit, named it a stale card, or the record is a crashed runner's,
+    which ran no Closeout. Without that evidence an in review read is the operator staging the
+    card again, and `return_to_for` leaves staging alone. The earlier baseline may itself be
+    empty, and then the card stays unknown rather than turning into a staged one. Any other read
+    wins: a card the operator moved between runs goes back to where they put it."""
     in_review = manifest.tracker.in_review_status
     earlier = record.get("baseline_tracker_status")
     if not record.get("baseline_sha") or _same(earlier, in_review):
         return status
-    if not status or _same(status, in_review):
+    if not status:
+        return earlier
+    if _same(status, in_review) and _left_in_review(record, last_audit):
         return earlier
     return status
+
+
+def _left_in_review(record, last_audit):
+    """Evidence that the runner, not the operator, left this card in the in review status."""
+    if record.get("halt_class") == contracts.HALT_RUNNER_CRASHED:
+        return True
+    return any(finding.get("task") == record.get("id")
+               and finding.get("class") == contracts.AUDIT_STALE_IN_REVIEW
+               for finding in (last_audit or {}).get("findings") or [])
 
 
 def _same(a, b):
     return bool(a) and bool(b) and str(a).lower() == str(b).lower()
 
 
-# What the runner tells the operator to return a card to when it never read where the card
-# stood; the audit's own sentence uses the same words.
-UNKNOWN_RETURN = "its todo status"
-
-
 def confirm_card_returned(adapter, manifest, task_id, return_to):
     """R4 of the stale cards plan: after a Closeout told to return the card, read it back. A
     finding when it still reads the in review status, or when the read failed, so the summary
     lists the card to move by hand. Never a halt: the run continues, and the runner never moves
-    the card itself. A None `return_to` is a card whose baseline was never read (issue #51), and
-    the finding names `UNKNOWN_RETURN` in its place."""
-    return_to = return_to or UNKNOWN_RETURN
+    the card itself.
+
+    A None `return_to` is a card whose baseline was never read (issue #51), and the finding names
+    `contracts.UNKNOWN_RETURN` in its place. A read that fails then is no finding: nothing says
+    the card was ever moved, the launch read of the same board had already failed, and the run
+    end audit reports the unreadable card in words that claim nothing about where it is."""
+    unknown = not return_to
+    return_to = return_to or contracts.UNKNOWN_RETURN
     in_review = manifest.tracker.in_review_status
     try:
         card = adapter.status(task_id) or {}
     except Exception as exc:
+        if unknown:
+            return None
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": "unreadable", "return_to": return_to,
                 "evidence": "the tracker could not be read to confirm the return: %s" % exc}
+    if card.get("skipped") and unknown:
+        return None
     if card.get("skipped"):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": "unreadable", "return_to": return_to,

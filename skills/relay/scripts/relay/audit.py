@@ -78,7 +78,7 @@ def build(manifest, store, adapter, env=None, live=False, records=None):
         if _same(status, in_review) and not (live and in_flight):
             baseline = record.get("baseline_tracker_status")
             back = ("`%s`" % baseline if baseline and not _same(baseline, in_review)
-                    else "its todo status")
+                    else contracts.UNKNOWN_RETURN)
             findings.append(_finding(
                 contracts.AUDIT_STALE_IN_REVIEW, task_id,
                 "%s's card reads %s but its record reads %s; no process is working on it. "

@@ -2795,7 +2795,7 @@ class _BoardRoutes:
         self.assertEqual(self.card(), self.IN_REVIEW)
         mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
         self.assertEqual([(f["card_status"], f["return_to"]) for f in mine],
-                         [(self.IN_REVIEW, closeout.UNKNOWN_RETURN)])
+                         [(self.IN_REVIEW, contracts.UNKNOWN_RETURN)])
         checks = [check for check in summary_module.build(self.manifest, self.store())
                   ["pending_checks"] if check["kind"] == "card_left_in_review"]
         self.assertEqual(len(checks), 1, checks)
@@ -2850,6 +2850,23 @@ class _BoardRoutes:
         self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], "Backlog")
         self.assertIn("`Backlog`", self.brief(".closeout"))
         self.assertEqual(self.card(), "Backlog")
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
+    def test_a_card_the_operator_staged_in_review_before_a_relaunch_stays_staged(self):
+        """The limit of the relaunch rule. The first Closeout returned the card and the audit
+        found nothing, so a card reading in review at the relaunch is the operator's staging,
+        and `return_to_for` leaves staging alone."""
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked on the design question", move_to=self.BASELINE)
+        self.go_board()
+        self.assertEqual(self.store().audit()["count"], 0)
+        self.set_card("T-1", self.IN_REVIEW)
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again")
+        self.go_board(retry_blocked=True)
+        self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], self.IN_REVIEW)
+        self.assertNotIn("back to", self.brief(".closeout").lower())
+        self.assertEqual(self.card(), self.IN_REVIEW)
         self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
 
     def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):
@@ -3150,3 +3167,58 @@ class TripleCoordinator(RunCase):
         create_worker.assert_not_called()
         launch_worker.assert_not_called()
         release.assert_called_once()
+
+    def test_a_jira_triple_records_each_cards_status_from_before_its_start_transition(self):
+        """Issue #51. The Jira coordinator moves every card to in review before any worker
+        exists, so the snapshot it launches from reads in review. Recorded as the baseline, that
+        made every blocked card look staged and none was ever returned."""
+        from unittest import mock
+
+        class _Stop(Exception):
+            pass
+
+        models = (("claude", "opus"), ("grok", "grok-4.6"), ("codex", "gpt-5-codex"))
+        manifest = replace(
+            self.manifest,
+            execution=mf.Execution("triple"),
+            tracker=replace(self.manifest.tracker, adapter="jira", site="example.atlassian.net",
+                            project_key="EX", in_review_status="In Review",
+                            in_review_transition="Start review",
+                            coordinator_rest_writes_authorized=True),
+            tasks=tuple(replace(task, backend=backend, model=model)
+                        for task, (backend, model) in zip(self.manifest.tasks, models)),
+        )
+        cards = [
+            {"id": task.id, "item_id": task.id, "content_id": task.id, "title": task.id,
+             "description": "work", "status": "To Do", "issue_state": "OPEN", "comments": []}
+            for task in manifest.tasks
+        ]
+        started = [dict(card, status="In Review") for card in cards]
+        board = {"repository_id": "R_test", "project_id": "EX", "cards": cards}
+        acquired = gitwrite.RemoteLeaseResult(
+            True, claim_key="a" * 64,
+            card_leases=tuple(gitwrite.RemoteLease("refs/relay/test/%d" % n, "%040d" % n)
+                              for n in range(1, 4)),
+            integration_lease=gitwrite.RemoteLease("refs/relay/integration/test", "f" * 40))
+        adapter = SimpleNamespace(_authorize_triple_writes=lambda snapshot: (True, None))
+        store = self.store()
+        with mock.patch.object(runner.jira_adapter, "read_triple_snapshot",
+                               return_value={"snapshot": board, "reason": None}), \
+             mock.patch.object(runner.gitwrite, "preflight",
+                               return_value=gitwrite.PreflightResult(True, None)), \
+             mock.patch.object(runner.gitwrite, "acquire_remote_leases", return_value=acquired), \
+             mock.patch.object(runner.gitwrite, "release_remote_leases",
+                               return_value=gitwrite.RemoteLeaseResult(True)), \
+             mock.patch.object(runner, "_triple_jira_start", return_value=(started, None)), \
+             mock.patch.object(runner.gitwrite, "create_worker_clone",
+                               return_value=SimpleNamespace(ok=True, worker=None)), \
+             mock.patch.object(runner, "_triple_launch_worker"), \
+             mock.patch.object(runner, "_triple_classify", side_effect=_Stop), \
+             mock.patch.object(runner, "_triple_workers_stopped", return_value=True), \
+             mock.patch.object(runner, "_write_terminal"):
+            with self.assertRaises(_Stop):
+                runner.run_triple(manifest, adapter=adapter, store=store, home=self.home,
+                                  base_env=self.base_env(), stream=None)
+        records = self.store().records()
+        self.assertEqual([records[task.id]["baseline_tracker_status"] for task in manifest.tasks],
+                         ["To Do"] * 3)

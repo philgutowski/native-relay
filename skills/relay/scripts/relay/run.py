@@ -657,7 +657,11 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
         else:
             snapshot = snapshot["cards"]
         workers = []
-        for task, card in zip(manifest.tasks, snapshot):
+        # Issue #51: the baseline is the status each card read before any start transition. On
+        # Jira the coordinator has already moved every card to in review by here, so `snapshot`
+        # reads that, and recording it would make every blocked card look staged.
+        last_audit = store.audit()
+        for task, card, before_start in zip(manifest.tasks, snapshot, after["snapshot"]["cards"]):
             branch = gitwrite.task_branch_for(task.id, manifest.project.branch_prefix)
             comments = card.get("comments") or []
             item = _TripleWorker(task, dict(card, comments=comments), card, branch, baseline,
@@ -677,7 +681,8 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
             capability = backends.build(task.backend).CAPABILITY
             store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline,
                          baseline_tracker_status=closeout.launch_baseline(
-                             manifest, store.get(task.id) or {}, card.get("status")),
+                             manifest, store.get(task.id) or {}, before_start.get("status"),
+                             last_audit),
                          baseline_comment_id=item.baseline_comment_id, branch=branch,
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
                          model=task.model, halt_class=None, halt_stage=None,
@@ -1426,10 +1431,10 @@ def _begin_task(cfg, task):
     # and wins over the fresh record, so a leftover key would name a previous attempt's sha or
     # branch inside a well formed sentence. The host snapshots clear for the same reason: an
     # attempt that never reaches its own launch must not print the last one's host line.
-    # Issue #51: a relaunch reads the in review status its last attempt left behind, and
+    # Issue #51: a relaunch can read the in review status its last attempt left behind, and
     # `launch_baseline` keeps the status the card read before that attempt instead.
-    baseline_status = closeout.launch_baseline(manifest, store.get(task.id) or {},
-                                               card_status.get("status"))
+    baseline_status = closeout.launch_baseline(manifest, record, card_status.get("status"),
+                                               store.audit())
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
                  baseline_tracker_status=baseline_status,
                  baseline_comment_id=baseline_comment_id, branch=branch,
