@@ -553,7 +553,7 @@ empty description, since the grammar has no body for a task line, only a title a
 comments, so a `.claude/` mention sitting in a comment there is invisible to the dry run and only
 trips at launch. The launch scan is the one that decides; the dry run only previews it. Outside
 `--dry-run`, a scanned card the feeder leaves out of the batch is logged once in
-`<stem>.feeder.log`, "`<id> would be skipped at launch and is left out of the batch: <reason>`",
+`<stem>.feeder.log`, `<id> would be skipped at launch and is left out of the batch: <reason>`,
 named again at every feeder start and again if it scans clean and later trips the scan a second
 time.
 
