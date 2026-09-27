@@ -400,8 +400,15 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         The task process moved the item to the in review status at its first step, so without
         the return every blocked or halted card sits in progress with nobody on it."""
         if outcome == OUTCOME_LANDED:
-            return ("Close the issue with `gh issue close <number>` and add one comment naming the "
-                    "landing reference below, or move its project item to the terminal status.")
+            close = ("Close the issue with `gh issue close <number>` and add one comment naming "
+                     "the landing reference below")
+            if not self._status_field:
+                return close + "."
+            # Closing alone leaves the project item in the in review column, so the board reads
+            # finished work as unfinished. Do both writes; the closeout delta accepts either.
+            return (close + ". Then move its project item to `%s` with `gh project item-edit` "
+                    "and the board's Status field, so the board column matches the closed issue. "
+                    "Do both, not one of them." % self._status_field)
         move = ("Do not close the issue and do not move its project item" if not return_to else
                 "Do not close the issue. Move its project item back to `%s`, the status it read "
                 "before this run, since no process is working on it now; use `gh project "
