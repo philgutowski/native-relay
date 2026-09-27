@@ -413,18 +413,26 @@ post_cycle_timeout_seconds = 3600
   cycle from its environment: `RELAY_CYCLE`, `RELAY_RUN_EXIT`, `RELAY_LANDED`, `RELAY_HALTED`,
   `RELAY_BLOCKED`, and `RELAY_SKIPPED` (that cycle's ids, space separated, empty for none),
   `RELAY_MANIFEST`, `RELAY_REPO`, `RELAY_DEFAULT_BRANCH`, `RELAY_MERGE_BASE` and
-  `RELAY_MERGE_HEAD` (the default branch's sha before and after the run), `RELAY_MERGE_RANGE`
-  (`base..head`, empty when the branch did not move), and `RELAY_CYCLE_JSON`, all of it as one
-  JSON object. Its output is appended to `<stem>.feeder.hook.out`; the feeder log and a
-  `post_cycle` event record the result. It runs before the halt and usage limit rules, so a
-  limit wait never delays it and a cycle that ends in a stop still runs it.
+  `RELAY_MERGE_HEAD` (the default branch's sha before and after the run), `RELAY_MERGE_MOVED`
+  (`true`, `false`, or empty when either sha could not be read), `RELAY_MERGE_RANGE`
+  (`base..head` when the branch moved, else empty), and `RELAY_CYCLE_JSON`, all of it as one
+  JSON object. Read `RELAY_MERGE_MOVED` before trusting an empty range: empty there means
+  unknown, not that nothing merged. Its output is appended to `<stem>.feeder.hook.out`; the
+  feeder log and a `post_cycle` event record the result. It runs after the halt and usage
+  limit rules have saved their counts, but before any wait they ask for, so a limit wait never
+  delays it and a cycle that ends in a stop still runs it.
 - `post_cycle_mode = "blocking"`, the default, waits for the hook, up to
   `post_cycle_timeout_seconds`, and logs its exit code. A nonzero exit, a timeout, or a command
   that cannot start is logged and the feeder goes on, unless `post_cycle_hold = true`: then the
   feeder stops with exit 2 and reason `post_cycle_held` instead of starting the next cycle or
-  waiting. Halt counts and retries are still recorded first. Use it for work the next cycle
+  waiting. When the cycle's own rules already stopped the feeder, their exit and reason stand
+  and the hold shows as `held` in the `post_cycle` event. A timeout kills the hook's whole
+  process group, so a gate it started does not outlive it. Use it for work the next cycle
   should wait on: the full gate on the merged default branch, a push on a cadence. A blocking
   hook must leave the checkout on its default branch and clean, or the next cycle stops there.
+- A hold is the feeder's exit, not a lock. A feeder started again, by hand, by `--restart`,
+  or by a cron line running `--once`, runs its next cycle whatever the last hook said, so
+  repair the default branch before starting it again.
 - `post_cycle_mode = "detached"` starts the hook in its own session and does not wait; the log
   records its pid, and `post_cycle_hold` is refused beside it. Use it for work that takes a
   person or a browser. It runs beside the next cycle, so it must not touch the checkout the

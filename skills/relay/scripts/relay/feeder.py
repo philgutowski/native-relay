@@ -81,6 +81,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -151,6 +152,14 @@ HOLD_WORD = "post_cycle_held"
 
 class ConfigError(ValueError):
     """The sidecar file is wrong. Every problem found is in the message."""
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A wait the rules asked for and `settle` has not taken yet, because the post cycle hook
+    runs first and a hold it asks for replaces the wait."""
+    seconds: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -632,10 +641,22 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
                               check=False, timeout=timeout, stdin=subprocess.DEVNULL)
 
     def run_hook(args, cwd, extra_env, output_path, timeout):
+        # Its own process group, and the whole group is killed on a timeout or an interrupt:
+        # a gate under `make` or a shell script is a grandchild, and killing only the direct
+        # child would leave it running in the checkout the next cycle merges into.
         with open(output_path, "ab") as output:
-            return subprocess.run(list(args), cwd=cwd, env=dict(env, **extra_env), check=False,
-                                  timeout=timeout, stdin=subprocess.DEVNULL, stdout=output,
-                                  stderr=subprocess.STDOUT).returncode
+            proc = subprocess.Popen(list(args), cwd=cwd, env=dict(env, **extra_env),
+                                    stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                return proc.wait(timeout=timeout)
+            except BaseException:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                raise
 
     def start_hook(args, cwd, extra_env, output_path):
         # Its own session, like `feed --detach`, so a hook that outlives the feeder is not
@@ -676,9 +697,6 @@ class Feeder:
         # False until `run` has read the state file under the lock. A state file that could
         # not be read then holds the halt counts, so nothing may save over it.
         self.recording = False
-        # The sentence a held post cycle hook failed with, set only while `settle` applies the
-        # rules for that cycle.
-        self.holding = None
 
     # Reporting.
     def log(self, message):
@@ -804,10 +822,7 @@ class Feeder:
 
     def wait(self, seconds, reason):
         """Sleep and go round again, or under --once leave without sleeping. `reason` is the
-        word the `waiting` event carries: lease_held, usage_limit, unreadable_source, idle.
-        While a post cycle hook holds the feeder, the wait is a stop instead."""
-        if self.holding:
-            return self.hold(self.holding)
+        word the `waiting` event carries: lease_held, usage_limit, unreadable_source, idle."""
         if self.once:
             self.leave_reason = ("once", "left after one cycle instead of waiting (%s)" % reason)
             return EXIT_OK
@@ -908,7 +923,7 @@ class Feeder:
                   tasks=cycle_ids, retry_blocked=list(retry_ids))
         if retry_ids:
             self.log("relaunching blocked %s with --retry-blocked" % retry_ids)
-        base = self.default_head(manifest)
+        merge = self.default_head(manifest)
         code = deps.run_cycle(self.paths.manifest, retry_ids)
         self.log("relay run exited %s" % code)
         if code == EXIT_LEASE:
@@ -919,7 +934,7 @@ class Feeder:
             self.emit_result(code)
             return self.stop(EXIT_CONFIG, "relay refused the manifest or the environment. Run "
                                           "validate and read its output.", "run_refused")
-        return self.settle(manifest, cycle_ids, code, base)
+        return self.settle(manifest, cycle_ids, code, merge)
 
     def emit_result(self, code, by_status=None):
         """The `cycle_result` event: the run's exit code and this cycle's ids by status."""
@@ -965,14 +980,17 @@ class Feeder:
                  % (self.state["idle_waits"], config.idle_waits_max))
         return self.wait(config.idle_wait_seconds, "idle")
 
-    def settle(self, manifest, cycle_ids, code=None, base=None):
-        """Read what the run did to this cycle's tasks, run the post cycle hook, and apply rules
-        2 and 3. `code` is the run's exit code, for the `cycle_result` event and the hook, and
-        `base` the default branch's sha before the run, for the hook's merge range.
+    def settle(self, manifest, cycle_ids, code=None, merge=(None, None)):
+        """Read what the run did to this cycle's tasks, apply rules 2 and 3, and run the post
+        cycle hook. `code` is the run's exit code, for the `cycle_result` event and the hook,
+        and `merge` the default branch and its sha before the run, for the hook's merge range.
 
-        The hook runs before the rules, so a usage limit wait never delays it and a cycle that
-        ends in a stop still runs it. A hold it asks for is kept until the rules have done their
-        bookkeeping, then replaces whatever would have come next, going round or a wait."""
+        The rules come first, so this cycle's halt counts and queued retries are saved before a
+        hook that may run for an hour, and a feeder killed during it loses none of them. A wait
+        the rules ask for is only returned here, and taken after the hook, so a usage limit
+        wait never delays it. A cycle the rules stop still runs it. A hold the hook asks for
+        replaces what would have come next, going round or a wait; a stop the rules already
+        made stands, and the hold is in the log and in the `post_cycle` event."""
         data = self.deps.read_summary(manifest)
         after = {task["id"]: task for task in data.get("tasks", [])}
         mine = [after[task_id] for task_id in cycle_ids if task_id in after]
@@ -982,17 +1000,17 @@ class Feeder:
         self.log("cycle result: landed %s, halted %s, blocked %s, skipped %s" % tuple(
             sorted(task["id"] for task in by_status[status])
             for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED)))
-        self.holding = self.post_cycle(manifest, code, by_status, base)
-        try:
-            outcome = self.apply_rules(data, after, by_status)
-        finally:
-            holding, self.holding = self.holding, None
-        if holding and outcome in (None, EXIT_OK):
-            return self.hold(holding)
+        outcome = self.apply_rules(data, after, by_status)
+        held = self.post_cycle(manifest, code, by_status, merge)
+        if isinstance(outcome, Pending):
+            return self.hold(held) if held else self.wait(outcome.seconds, outcome.reason)
+        if held and outcome in (None, EXIT_OK):
+            return self.hold(held)
         return outcome
 
     def apply_rules(self, data, after, by_status):
-        """Rules 2 and 3 over this cycle's tasks, as `settle` read them from the summary."""
+        """Rules 2 and 3 over this cycle's tasks, as `settle` read them from the summary. Returns
+        an exit code, None to go round, or a `Pending` wait for `settle` to take."""
         config = self.config
         halted, landed = by_status[STATUS_HALTED], by_status[STATUS_LANDED]
         for task in by_status[STATUS_SKIPPED]:
@@ -1055,7 +1073,7 @@ class Feeder:
             self.log("every task that died this cycle died inside %ds, reading that as a usage "
                      "limit, waiting %ds; these deaths are not counted"
                      % (config.quick_death_seconds, config.limit_wait_seconds))
-            return self.wait(config.limit_wait_seconds, "usage_limit")
+            return Pending(config.limit_wait_seconds, "usage_limit")
         self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)
         for task in limited:
@@ -1261,20 +1279,21 @@ class Feeder:
             return ""
 
     # The post cycle hook (issue #37).
-    def default_head(self, manifest):
-        """The sha the target's default branch points at, or None when there is no post cycle
-        hook to read it for or it cannot be read. Read before and after `relay run`, the two
-        make the hook's merge range."""
+    def default_head(self, manifest, branch=None):
+        """(branch, sha) for the target's default branch, either None when there is no post
+        cycle hook to read it for or it cannot be read. Read before `relay run` and again after
+        it on the branch the first read found, so the two ends of the merge range are one
+        branch's. A git that hangs is a timeout here, logged like any other failure."""
         if not self.config.post_cycle_command:
-            return None
+            return None, None
         try:
-            return gitread.rev_parse(manifest.project.repo,
-                                     "refs/heads/" + default_branch_of(manifest))
-        except (gitread.GitError, OSError) as exc:
+            branch = branch or default_branch_of(manifest)
+            return branch, gitread.rev_parse(manifest.project.repo, "refs/heads/" + branch)
+        except (gitread.GitError, OSError, subprocess.SubprocessError) as exc:
             self.log("the default branch could not be read for the post cycle hook: %s" % exc)
-            return None
+            return branch, None
 
-    def post_cycle(self, manifest, code, by_status, base):
+    def post_cycle(self, manifest, code, by_status, merge):
         """Run the post cycle hook for the cycle `settle` just read, if the sidecar names one.
         Returns the sentence to hold the feeder with, which only a failed blocking hook with
         `post_cycle_hold` on produces, else None.
@@ -1286,21 +1305,23 @@ class Feeder:
         if not config.post_cycle_command:
             return None
         repo = manifest.project.repo
-        try:
-            branch = default_branch_of(manifest)
-        except (gitread.GitError, OSError):
-            branch = ""
-        head = self.default_head(manifest)
-        moved = bool(base and head and base != head)
+        branch, base = merge
+        branch, head = self.default_head(manifest, branch)
+        # None when either end could not be read: "unknown", which a hook must not take for
+        # "nothing merged", so it is its own value rather than an empty range.
+        moved = base != head if base and head else None
         outcome = {"manifest": self.paths.manifest, "repo": repo, "cycle": self.state["cycles"],
                    "run_exit": code, "default_branch": branch, "merge_base": base,
-                   "merge_head": head, "merge_range": "%s..%s" % (base, head) if moved else ""}
+                   "merge_head": head, "merge_moved": moved,
+                   "merge_range": "%s..%s" % (base, head) if moved else ""}
         for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED):
             outcome[status] = sorted((task["id"] for task in by_status.get(status, ())),
                                      key=natural_key)
         extra = hook_environment(outcome)
         mode, command = config.post_cycle_mode, list(config.post_cycle_command)
-        merge = {key: outcome[key] for key in ("merge_base", "merge_head", "merge_range")}
+        said = {key: outcome[key] for key in ("merge_base", "merge_head", "merge_moved",
+                                               "merge_range")}
+        where = ("unknown" if moved is None else outcome["merge_range"] or "empty")
         try:
             with open(self.paths.hook_out, "a", encoding="utf-8") as handle:
                 handle.write("%s cycle %d post_cycle %s: %s\n" % (
@@ -1313,11 +1334,11 @@ class Feeder:
                 pid = self.deps.start_hook(command, repo, extra, self.paths.hook_out).pid
             except (OSError, subprocess.SubprocessError) as exc:
                 self.log("the post cycle hook could not start: %s" % exc)
-                self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=None, error=str(exc), **merge)
+                self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=None, error=str(exc), **said)
                 return None
             self.log("the post cycle hook started detached, pid %d, merge range %s, output in %s"
-                     % (pid, outcome["merge_range"] or "empty", self.paths.hook_out))
-            self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=pid, error=None, **merge)
+                     % (pid, where, self.paths.hook_out))
+            self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=pid, error=None, **said)
             return None
         exit_code, failure = None, None
         try:
@@ -1331,10 +1352,10 @@ class Feeder:
             failure = "could not run: %s" % exc
         held = bool(failure) and config.post_cycle_hold
         self.log("the post cycle hook %s%s, merge range %s, output in %s" % (
-            failure or "exited 0", ", holding the feeder" if held else "",
-            outcome["merge_range"] or "empty", self.paths.hook_out))
+            failure or "exited 0", ", holding the feeder" if held else "", where,
+            self.paths.hook_out))
         self.emit(EVENT_POST_CYCLE, mode=mode, exit_code=exit_code, error=failure, held=held,
-                  **merge)
+                  **said)
         return failure if held else None
 
     def hold(self, failure):
@@ -1438,13 +1459,15 @@ def default_branch_of(manifest):
 
 def hook_environment(outcome):
     """The post cycle hook's extra environment: each key of `outcome` as `RELAY_<KEY>`, a list
-    as its ids joined by single spaces and None as empty, and the whole of it again as JSON in
-    `RELAY_CYCLE_JSON` for a hook that would rather parse one value. `RELAY_CYCLE` is the cycle
-    number the events file carries."""
+    as its ids joined by single spaces, a bool as `true` or `false`, None as empty, and the
+    whole of it again as JSON in `RELAY_CYCLE_JSON` for a hook that would rather parse one
+    value. `RELAY_CYCLE` is the cycle number the events file carries."""
     extra = {}
     for key, value in outcome.items():
         if isinstance(value, list):
             value = " ".join(value)
+        elif isinstance(value, bool):
+            value = "true" if value else "false"
         extra["RELAY_" + key.upper()] = "" if value is None else str(value)
     extra["RELAY_CYCLE_JSON"] = json.dumps(outcome, sort_keys=True)
     return extra
