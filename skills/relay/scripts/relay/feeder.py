@@ -153,6 +153,7 @@ EVENT_CYCLE_RESULT = "cycle_result"
 EVENT_WAITING = "waiting"
 EVENT_LEAVING = "leaving"
 EVENT_POST_CYCLE = "post_cycle"
+EVENT_POST_CYCLE_STARTED = "post_cycle_started"
 # Written by `feed --follow`, never by a feeder: the follower's own line for a feeder it found
 # gone without a `leaving` event, killed or never started.
 EVENT_NOT_RUNNING = "not_running"
@@ -816,18 +817,35 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
         return subprocess.CompletedProcess(list(args), proc.returncode, stdout, stderr)
 
     def run_hook(args, cwd, extra_env, output_path, timeout):
-        # Its own process group, and the whole group is ended on a timeout or an interrupt:
-        # a gate under `make` or a shell script is a grandchild, and ending only the direct
-        # child would leave it running in the checkout the next cycle merges into.
+        # Its own process group, and the whole group is ended on a timeout, an interrupt, or
+        # the feeder itself being told to terminate (issue #56): a gate under `make` or a shell
+        # script is a grandchild, and ending only the direct child would leave it running in the
+        # checkout the next cycle merges into.
         with open(output_path, "ab") as output:
             proc = subprocess.Popen(list(args), cwd=cwd, env=dict(env, **extra_env),
                                     stdin=subprocess.DEVNULL, stdout=output,
                                     stderr=subprocess.STDOUT, start_new_session=True)
+            # SIGTERM has no Python level exception of its own, unlike SIGINT's
+            # KeyboardInterrupt, so without this the hook's group would outlive a feeder ended
+            # by signal. The previous handler runs after the group is down, same as launch.py's
+            # own SIGINT/SIGTERM handling around a Task process.
+            previous = signal.getsignal(signal.SIGTERM)
+
+            def handle(signum, frame):
+                end_group(proc)
+                if callable(previous):
+                    previous(signum, frame)
+                else:
+                    raise KeyboardInterrupt()
+
+            signal.signal(signal.SIGTERM, handle)
             try:
                 return proc.wait(timeout=timeout)
             except BaseException:
                 end_group(proc)
                 raise
+            finally:
+                signal.signal(signal.SIGTERM, previous)
 
     def start_hook(args, cwd, extra_env, output_path):
         # Its own session, like `feed --detach`, so a hook that outlives the feeder is not
@@ -851,6 +869,20 @@ def new_state():
     # ran: every launch restamps it.
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
             "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}}
+
+
+def _torn_line(path):
+    """True when `path` exists, holds at least one byte, and its last byte is not a newline
+    (issue #56): a feeder killed mid write to the events file leaves a fragment, and the next
+    line appended straight onto it would glue into one line neither valid JSON nor readable."""
+    try:
+        with open(path, "rb") as handle:
+            if handle.seek(0, os.SEEK_END) == 0:
+                return False
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) != b"\n"
+    except OSError:
+        return False
 
 
 class Feeder:
@@ -892,8 +924,9 @@ class Feeder:
         record = dict(fields, at=self.deps.now().isoformat(timespec="seconds"), event=event,
                       manifest=self.paths.manifest, pid=self.pid, cycle=self.state["cycles"])
         try:
+            prefix = "\n" if _torn_line(self.paths.events) else ""
             with open(self.paths.events, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, sort_keys=True) + "\n")
+                handle.write(prefix + json.dumps(record, sort_keys=True) + "\n")
         except OSError as exc:
             # The events are for watchers. A feeder that stopped feeding over one would be the
             # outcome they exist to catch, so the loop goes on and the log says what was lost.
@@ -1619,6 +1652,10 @@ class Feeder:
                      % (pid, where, self.paths.hook_out))
             self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=pid, error=None, **said)
             return None
+        # A blocking hook can run for up to `post_cycle_timeout_seconds`, an hour by default,
+        # with nothing else to say a feeder is inside it: without this, `feed --status` shows
+        # `cycle_result` as the last event throughout (issue #56).
+        self.emit(EVENT_POST_CYCLE_STARTED, mode=mode, **said)
         exit_code, failure = None, None
         try:
             exit_code = self.deps.run_hook(command, repo, extra, self.paths.hook_out,
@@ -2014,6 +2051,9 @@ def status_lines(report):
                                                 event.get("until"))
         elif event.get("event") == EVENT_LEAVING:
             detail = " exit %s (%s)" % (event.get("exit_code"), event.get("reason"))
+        elif event.get("event") == EVENT_POST_CYCLE_STARTED:
+            detail = " a blocking hook is running, merge range %s" % (event.get("merge_range")
+                                                                       or "empty")
         elif event.get("event") == EVENT_POST_CYCLE:
             detail = " %s, %s" % (event.get("mode"), event.get("error") or (
                 "hook pid %s" % event.get("hook_pid") if event.get("mode") == HOOK_DETACHED

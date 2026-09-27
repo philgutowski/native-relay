@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 import unittest
@@ -1413,6 +1414,25 @@ class Watch(FeederCase):
                          (os.getpid(), 1, "stop_file", 0, feeder.runner_tree()))
         self.assertEqual(self.state()["last_cycle"]["result"], events[2])
 
+    def test_a_torn_final_line_is_repaired_before_the_next_event(self):
+        """Issue #56: a feeder killed mid write can leave the events file without a trailing
+        newline. The next event must land on its own line, not glued onto the fragment into one
+        line that is not valid JSON, which is what a watcher following the file would lose."""
+        self.plans = [{}]
+        self.feed()
+        with open(self.paths.events, "a", encoding="utf-8") as handle:
+            handle.write('{"event": "cycle_started", "manifest": "torn mid write')
+        os.unlink(self.paths.stop)
+        self.plans = [{}]
+        self.feed()
+        lines, _ = feeder.read_events(self.paths)
+        self.assertEqual(len(lines), 9)
+        with self.assertRaises(ValueError):
+            json.loads(lines[4])
+        self.assertEqual([json.loads(line)["event"] for line in lines[5:]],
+                         ["started", "cycle_started", "cycle_result", "leaving"])
+        self.assertEqual(json.loads(lines[0])["event"], "started")
+
     def test_a_wait_is_an_event_with_its_reason_and_when_it_ends(self):
         self.plans = [3, {}]
         self.feed()
@@ -1739,6 +1759,22 @@ class PostCycle(FeederCase):
         with open(self.paths.hook_out, encoding="utf-8") as handle:
             self.assertIn("cycle 1 post_cycle blocking: python3 -c", handle.read())
 
+    def test_a_blocking_hook_running_is_its_own_event_before_the_result(self):
+        """Issue #56: a blocking hook can run for up to an hour with nothing to say so. Before
+        this, `feed --status` showed `cycle_result` as the last event throughout it."""
+        self.plans = [{}]
+        self.assertEqual(self.feed(feeder.Config(post_cycle_command=self.HOOK)), 0)
+        self.assertEqual([event["event"] for event in self.events()],
+                         ["started", "cycle_started", "cycle_result", "post_cycle_started",
+                          "post_cycle", "leaving"])
+        [started] = [event for event in self.events()
+                    if event["event"] == "post_cycle_started"]
+        self.assertEqual(started["mode"], "blocking")
+        report = feeder.status_report(self.paths)
+        report["last_event"] = started
+        self.assertIn("last event: post_cycle_started at %s a blocking hook is running, "
+                      "merge range empty" % started["at"], feeder.status_lines(report))
+
     def test_an_unmoved_default_branch_gives_an_empty_range(self):
         self.plans = [{"1": halted(5000), "2": halted(5000), "3": halted(5000)}]
         self.feed(feeder.Config(post_cycle_command=self.HOOK))
@@ -1885,6 +1921,47 @@ class PostCycle(FeederCase):
         # Past the grandchild's own sleep: had only the direct child been killed, it would
         # have written by now.
         time.sleep(3)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_a_feeder_ended_by_sigterm_during_a_blocking_hook_ends_the_hook_too(self):
+        """Issue #56: `run_hook` was ended only on the exception path a timeout or a keyboard
+        interrupt raises. Ending the feeder itself by SIGTERM installed no handler, so the hook
+        and anything it started kept running in the checkout. `run_hook` runs in its own process
+        here (not the test process), so sending it SIGTERM cannot touch the test runner."""
+        marker = os.path.join(self.tmp.name, "grandchild-lived")
+        started = os.path.join(self.tmp.name, "hook-started")
+        grandchild = "import time; time.sleep(3); open(%r, 'w').write('x')" % marker
+        hook = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); "
+                "time.sleep(30)" % grandchild)
+        driver = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from relay import feeder\n"
+            "import os\n"
+            "deps = feeder.build_deps(feeder.Config(), dict(os.environ))\n"
+            "open(%r, 'w').close()\n"
+            "deps.run_hook(('python3', '-c', %r), %r, {}, %r, 30)\n"
+        ) % (_paths.SCRIPTS_DIR, started, hook, self.repo, self.paths.hook_out)
+        # The driver's own KeyboardInterrupt traceback, once the fix lands, is expected and not
+        # a test failure; dropped rather than left to clutter the suite's output.
+        proc = subprocess.Popen(["python3", "-c", driver], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(100):
+                if os.path.exists(started):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("the driver process never reached run_hook")
+            time.sleep(1)   # let the hook's own Popen start and the SIGTERM handler install
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        # Past the grandchild's own sleep: had the hook's group survived, it would have
+        # written by now.
+        time.sleep(4)
         self.assertFalse(os.path.exists(marker))
 
     def test_the_real_command_runner_kills_what_the_command_started_too(self):
