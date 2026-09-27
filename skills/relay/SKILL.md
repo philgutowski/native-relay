@@ -94,12 +94,14 @@ have landed. The estimate says it has none rather than guessing when no landed t
 duration.
 
 Every launched task's record also carries `host_at_start` and `host_at_end`, the host's one minute
-load average, free and inactive memory, and cumulative swap counters, read just before the Task
-process starts and just after it exits. `summary` prints them as one `host:` line under the
-timing, with swap as the difference between the two reads. When a task ran slower than its
-neighbours, read that line before blaming the card: rising load, vanishing free and inactive
-memory, or thousands of swapouts mean the host was starved, and a red gate under those conditions
-is not evidence about the code.
+load average, free and inactive memory, memory held by the macOS compressor, and cumulative swap
+counters, read just before the Task process starts and just after it exits. `summary` prints them
+as one `host:` line under the timing, with swap as the difference between the two reads. When a
+task ran slower than its neighbours, read that line before blaming the card: rising load,
+vanishing free and inactive memory, a compressor that grew by gigabytes, or thousands of swapouts
+mean the host was starved, and a red gate under those conditions is not evidence about the code.
+On a Mac the compressor moves first and swap often stays at zero, so zero swapouts alone does not
+clear the host.
 
 `audit` reads every task's card and says which ones disagree with the record and with git. The
 runner performs the same audit at the end of every run and writes it to the state file, where

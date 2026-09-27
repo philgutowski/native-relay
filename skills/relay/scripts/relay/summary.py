@@ -401,7 +401,9 @@ def lines(data):
         out.append(("    %s" % _seconds(entry), source + ".active_seconds"))
         conditions = host.line(entry["host_at_start"], entry["host_at_end"])
         if conditions:
-            out.append(("    %s" % conditions, source + ".host_at_start"))
+            # One line reads both keys; it names the start unless only the end was captured.
+            field = "host_at_start" if entry["host_at_start"] else "host_at_end"
+            out.append(("    %s" % conditions, "%s.%s" % (source, field)))
         out.append(("    output: %s" % entry["log_path"], source + ".log_path"))
         out.append(("", source + ".id"))
     if data["pending_checks"]:
