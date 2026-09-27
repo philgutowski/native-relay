@@ -220,9 +220,15 @@ def queue_estimate(data, cards):
 QUEUE_BLIND = "it does not count cards not ready yet or residuals not yet filed"
 
 
+# What plain `status` prints under a feeder in place of the figure (issue #63). Pricing the queue
+# runs the operator's ready command or reads the tracker, so it waits to be asked for.
+QUEUE_ASK = ("queue: not read; `status --queue` prices the ready queue behind this cycle by "
+             "running the feeder's ready source")
+
+
 def queue_line(queue=None, reason=None):
-    """The `queue:` line `status` prints under a feeder. `reason` is the sentence for a queue
-    that could not be read, and replaces the figure."""
+    """The `queue:` line `status --queue` prints under a feeder. `reason` is the sentence for a
+    queue that could not be read, and replaces the figure."""
     if reason is not None:
         return "queue: no estimate, %s" % reason
     if not queue["cards"]:

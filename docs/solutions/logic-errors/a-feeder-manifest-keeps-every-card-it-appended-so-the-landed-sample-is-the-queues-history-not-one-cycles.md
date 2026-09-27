@@ -46,7 +46,10 @@ only the current cycle".
 - `progress.build` carries `landed_by_model`; `queue_estimate` prices each card at its model's
   mean, or the overall mean when its model has none; `queue_line` renders it.
 - `cmd_status` prints the `queue:` line after `remaining:` when a sidecar exists, and turns any
-  failure into a sentence on that line.
+  failure into a sentence on that line. Since issue #63 it does so only under `status --queue`:
+  the ready command runs in the target repository beside a live Task process, so plain `status`
+  prints `queue: not read` and names the flag rather than running it, and the command's whole
+  process group ends at the one minute bound.
 
 ## Review findings deliberately not fixed
 
