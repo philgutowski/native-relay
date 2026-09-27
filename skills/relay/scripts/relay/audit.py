@@ -51,8 +51,10 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
     `item_seen`, when a dict, is filled `True` for a landed task whose project item read cleanly
     at the terminal status (issue #61). The Runner uses it to retire `confirm_board_terminal`'s
     own record finding, the way it clears `card_in_review_by_run` above; nothing here writes it.
-    Every landed task's item read shares one `board_cache` for the pass, so a run with many
-    landed cards makes one full board read rather than one per card.
+    Every task's card read and every landed task's item read share one `board_cache` for the
+    pass (both go through the same GitHub board, `adapter.status` for the first and
+    `adapters.board_lag` for the second), so a run with many cards on that tracker makes one full
+    board read rather than one per card.
     """
     try:
         records = dict(records if records is not None else store.records())
@@ -74,7 +76,7 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
         record = records.get(task_id) or {}
         record_status = record.get("status") or "todo"
         try:
-            card = adapter.status(task_id) or {}
+            card = adapters.status(adapter, task_id, cache=board_cache) or {}
         except Exception as exc:
             card = {"skipped": "adapter.status raised: %s" % exc}
         if card.get("skipped"):

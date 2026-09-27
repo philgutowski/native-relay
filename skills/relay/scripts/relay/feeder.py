@@ -726,13 +726,30 @@ def pin_plan(tree, home, manifest):
 
 # A partial folder's own `finally` covers an exception mid extract, never a kill or a power
 # loss: neither leaves Python's cleanup code a turn to run. Left alone, one of those sits beside
-# the extracts forever. Swept here at a day old (issue #61), so a partial another `--pin` is
-# writing to right now, whose mtime `tar` keeps moving forward, is never mistaken for one.
+# the extracts forever. Swept here at a day old (issue #61).
 PARTIAL_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
+def _pid_alive(pid):
+    """Whether `pid` names a process this user can see, sending it no signal (issue #61's own
+    review of the sweep below): a folder's own mtime only moves when tar adds or removes an
+    entry directly inside it, not when a long extraction is still writing into a subdirectory
+    that folder already holds, so age alone cannot tell a live extraction from an abandoned one.
+    An unreadable answer (no permission) is taken as alive, since the safe failure is to leave a
+    folder in place too long, not to sweep a live one out from under it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def sweep_partials(destination, now=None):
-    """Remove every `<name>.partial-<pid>` directory beside `destination` older than a day."""
+    """Remove every `<name>.partial-<pid>` directory beside `destination` that is both older
+    than a day and whose pid is no longer running, so a partial another `--pin` is still
+    extracting is never mistaken for an abandoned one."""
     now = time.time() if now is None else now
     parent = os.path.dirname(destination)
     try:
@@ -747,8 +764,12 @@ def sweep_partials(destination, now=None):
             age = now - os.stat(path).st_mtime
         except OSError:
             continue
-        if age > PARTIAL_MAX_AGE_SECONDS:
-            shutil.rmtree(path, ignore_errors=True)
+        if age <= PARTIAL_MAX_AGE_SECONDS:
+            continue
+        pid = name.rsplit(".partial-", 1)[-1]
+        if pid.isdigit() and _pid_alive(int(pid)):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def pin_extract(tree, pin, run=subprocess.run):

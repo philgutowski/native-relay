@@ -307,6 +307,18 @@ class Audit(unittest.TestCase):
         self.assertEqual(
             sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
 
+    def test_an_open_cards_status_read_shares_the_same_board_cache_as_a_landed_items_lag(self):
+        """Issue #61's own review of the fix above: `status()` itself reads the project board
+        for any open, non closed card once `status_field` is declared, and the audit's per task
+        loop calls `status()` for every task up front, landed or not. Sharing the cache with
+        `_item_lag` alone left that call making its own board read per non landed card."""
+        self.store.upsert("13", status=contracts.STATUS_BLOCKED)
+        manifest = _manifest(repo=self.repo, task_ids=("12", "13"))
+        run = TwoTruths({"12": "CLOSED", "13": "OPEN"}, {"12": "In review", "13": "Todo"})
+        audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
+        self.assertEqual(
+            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+
     def test_item_seen_marks_a_landed_item_read_cleanly_as_terminal(self):
         """Issue #61: this is what lets the Runner retire `confirm_board_terminal`'s own
         record finding once a later audit confirms the item, the way #64 already retires

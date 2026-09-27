@@ -2571,7 +2571,12 @@ class GitHubBoard(BoardReads, github_adapter.GitHubAdapter):
         except FileNotFoundError:
             return "OPEN"
 
-    def status(self, task_id):
+    def status(self, task_id, cache=None):
+        """`cache` is accepted for the same reason `_project_item` takes it: `adapters.status`
+        passes it through. `_project_item` above reads a file directly rather than a shared
+        board payload, so there is nothing here to actually cache; `BoardReads.status`, which
+        `super()` resolves to ahead of the real `GitHubAdapter.status` in this mixin's MRO,
+        does not know the keyword either."""
         if not self._unreadable(task_id) and self._issue_state(task_id) == "CLOSED":
             return {"status": "CLOSED", "terminal": True, "reference": None, "skipped": None}
         return super().status(task_id)

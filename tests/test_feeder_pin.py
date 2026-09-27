@@ -8,6 +8,7 @@ branch, and `--pin` must extract the default branch's commit, never HEAD.
 """
 import io
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -171,6 +172,24 @@ class PartialSweep(Case):
         fresh = self.make_partial(pin, ".partial-888888")
         feeder.pin_extract(self.checkout, pin)
         self.assertTrue(os.path.exists(fresh))
+
+    def test_a_partial_whose_pid_is_still_alive_is_left_alone_even_if_old(self):
+        """mtime alone is not enough: a long extraction's top level directory stops getting new
+        entries, and so stops updating its own mtime, long before tar is done writing into the
+        subdirectories that top level already holds. The pid is the signal that actually answers
+        whether the extraction is still running. A pid distinct from this test's own: `pin_extract`
+        names its own partial after `os.getpid()`, so reusing this process's pid would collide
+        with the very extraction the test triggers below."""
+        pin = self.plan()
+        proc = subprocess.Popen(["sleep", "5"])
+        try:
+            alive = self.make_partial(pin, ".partial-%d" % proc.pid,
+                                      age_seconds=feeder.PARTIAL_MAX_AGE_SECONDS + 3600)
+            feeder.pin_extract(self.checkout, pin)
+            self.assertTrue(os.path.exists(alive))
+        finally:
+            proc.terminate()
+            proc.wait()
 
     def test_the_sweep_runs_even_when_the_destination_already_exists(self):
         pin = feeder.pin_extract(self.checkout, self.plan())

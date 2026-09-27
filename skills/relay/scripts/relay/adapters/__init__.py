@@ -100,6 +100,22 @@ def unknown_baseline_move(in_review, thing):
             % (thing, status, thing, contracts.UNKNOWN_RETURN))
 
 
+def status(adapter, task_id, cache=None):
+    """`adapter.status(task_id)`, sharing GitHub's one full board read across a batch of calls
+    when the caller passes a `cache` dict (issue #61). An open, non closed GitHub issue with
+    `status_field` declared reads the project board inside `status()` itself, so the run end
+    audit's per task loop, which calls this for every card whether or not it later checks a
+    landed item's lag, made one board read per card before this. Every other adapter's `status`
+    takes `task_id` alone, so a `TypeError` from the extra keyword falls back to the plain call
+    rather than assuming every adapter shares the cache."""
+    if cache is None:
+        return adapter.status(task_id)
+    try:
+        return adapter.status(task_id, cache=cache)
+    except TypeError:
+        return adapter.status(task_id)
+
+
 def board_lag(adapter, task_id, cache=None):
     """Returns (lag, reason) for a landed task's board item, or (None, None) for an adapter
     with nothing to check (issue #43).

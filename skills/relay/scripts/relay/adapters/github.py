@@ -132,12 +132,12 @@ class GitHubAdapter:
     def _issue(self, task_id):
         return self._gh(["gh", "issue", "view", str(task_id), "--json", ISSUE_FIELDS])
 
-    def _project_status(self, task_id):
+    def _project_status(self, task_id, cache=None):
         """Returns (status, reason). The reason is what separates a board this adapter could not
         read from a board that genuinely does not carry the item: both used to come back as
         None, and None reads as `not terminal`, so an unreadable board looked exactly like a card
         that had not moved."""
-        items, reason = self._items()
+        items, reason = self._items(cache=cache)
         if reason:
             return None, reason
         for item in items:
@@ -440,7 +440,12 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             "status": payload.get("state"),
         }
 
-    def status(self, task_id):
+    def status(self, task_id, cache=None):
+        """`cache` (issue #61) shares one full board read across a batch of calls, the way
+        `_board_lag` already does: an open, non closed issue with `status_field` declared reads
+        the project board here too, so a run end audit checking many cards through plain
+        `status()` made one board read per card before this. Every other adapter, and every
+        single-card caller here, passes nothing and reads fresh, same as always."""
         payload, reason = self._issue(task_id)
         if payload is None:
             return skipped(reason)
@@ -449,7 +454,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             return {"status": state, "terminal": True, "reference": None, "skipped": None}
         if not self._status_field:
             return {"status": state, "terminal": False, "reference": None, "skipped": None}
-        board, reason = self._project_status(task_id)
+        board, reason = self._project_status(task_id, cache=cache)
         if reason:
             return skipped("the project board could not be read: %s" % reason)
         terminal = bool(board) and str(board).lower() == str(self._status_field).lower()
