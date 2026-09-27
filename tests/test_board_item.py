@@ -27,28 +27,49 @@ class _Proc:
         self.stderr = stderr
 
 
+REPO = "example-org/relay-target"
+
+
 class TwoTruths:
     """A `run(args, timeout=None)` for `gh`. `issues` maps an issue number to its state, and
     `board` maps an issue number to its item's status on the declared project; a number absent
-    from `board` is an issue the project does not carry. `board_failure` fails the board read
-    alone, the shape that matters: `gh issue view` needs no project scope and item-list does."""
+    from `board` is an issue the project does not carry. `foreign` is the same for another
+    repository's issues on the same project, listed first. `board_failure` fails the board read
+    alone, the shape that matters: `gh issue view` needs no project scope and item-list does.
+    `total` overrides the board's totalCount, to model a board past item-list's limit."""
 
-    def __init__(self, issues, board, board_failure=None):
+    def __init__(self, issues, board, board_failure=None, foreign=None, total=None,
+                 repo_failure=None):
         self.issues = dict(issues)
         self.board = dict(board)
         self.board_failure = board_failure
+        self.foreign = dict(foreign or {})
+        self.total = total
+        self.repo_failure = repo_failure
         self.calls = []
+
+    @staticmethod
+    def _item(number, status, repository):
+        item = {"id": "PVTI_%s_%s" % (repository, number),
+                "content": {"type": "Issue", "number": int(number), "title": "t",
+                            "repository": repository}}
+        if status is not None:
+            item["status"] = status
+        return item
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
+        if args[:3] == ["gh", "repo", "view"]:
+            if self.repo_failure:
+                return _Proc(1, "", self.repo_failure)
+            return _Proc(0, json.dumps({"id": "R_1", "nameWithOwner": REPO}))
         if args[:3] == ["gh", "project", "item-list"]:
             if self.board_failure:
                 return _Proc(1, "", self.board_failure)
-            items = [{"id": "PVTI_%s" % number,
-                      "content": {"type": "Issue", "number": int(number), "title": "t"},
-                      **({"status": status} if status is not None else {})}
-                     for number, status in self.board.items()]
-            return _Proc(0, json.dumps({"items": items, "totalCount": len(items)}))
+            items = ([self._item(n, s, "example-org/elsewhere") for n, s in self.foreign.items()]
+                     + [self._item(n, s, REPO) for n, s in self.board.items()])
+            total = len(items) if self.total is None else self.total
+            return _Proc(0, json.dumps({"items": items, "totalCount": total}))
         if args[:3] == ["gh", "issue", "view"]:
             number = args[3]
             if number not in self.issues:
@@ -104,6 +125,34 @@ class BoardLag(unittest.TestCase):
         lag, reason = adapters.board_lag(_adapter(run), "12")
         self.assertIsNone(lag)
         self.assertIn("missing project scope", reason)
+
+    def test_another_repositorys_item_with_the_same_number_is_not_this_issues_item(self):
+        """A project can carry more than one repository, so a number alone matches the wrong
+        issue: listed first, the foreign item would hide this one's lag or invent one."""
+        run = TwoTruths({"12": "CLOSED"}, {"12": "In review"}, foreign={"12": "Done"})
+        lag, _ = adapters.board_lag(_adapter(run), "12")
+        self.assertEqual(lag["card_status"], "In review")
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"}, foreign={"12": "In review"})
+        self.assertEqual(adapters.board_lag(_adapter(run), "12"), (None, None))
+
+    def test_a_board_past_the_item_limit_is_a_reason_rather_than_an_absence(self):
+        run = TwoTruths({"12": "CLOSED"}, {"13": "Done"}, total=600)
+        lag, reason = adapters.board_lag(_adapter(run), "12")
+        self.assertIsNone(lag)
+        self.assertIn("600", reason)
+
+    def test_a_repository_that_cannot_be_named_is_a_reason(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "In review"}, repo_failure="not a repo")
+        lag, reason = adapters.board_lag(_adapter(run), "12")
+        self.assertIsNone(lag)
+        self.assertIn("not a repo", reason)
+
+    def test_the_repository_is_read_once_per_adapter(self):
+        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"})
+        adapter = _adapter(run)
+        adapters.board_lag(adapter, "12")
+        adapters.board_lag(adapter, "13")
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "repo", "view"]), 1)
 
     def test_an_adapter_with_one_status_per_card_has_nothing_to_check(self):
         self.assertEqual(adapters.board_lag(FakeAdapter(), "T-1"), (None, None))

@@ -94,7 +94,12 @@ def board_lag(adapter, task_id):
     read = getattr(adapter, "_board_lag", None)
     if read is None:
         return None, None
-    return read(task_id)
+    # A raise is a reason like any other failed read, so both callers report it rather than
+    # turning a report into a halt.
+    try:
+        return read(task_id)
+    except Exception as exc:
+        return None, "the board read raised: %s" % exc
 
 
 def task_tracker_steps(manifest, branch, backend=None):

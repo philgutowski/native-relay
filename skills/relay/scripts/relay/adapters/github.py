@@ -76,6 +76,7 @@ class GitHubAdapter:
         self._project_number = manifest.tracker.project_number
         self._status_field = manifest.tracker.status_field
         self._run = run or make_run(manifest.project.repo)
+        self._repository = None
 
     # Transport.
     def _gh(self, args):
@@ -91,7 +92,7 @@ class GitHubAdapter:
         except ValueError as exc:
             return None, "gh returned output that is not JSON: %s" % exc
 
-    def _items(self):
+    def _board(self):
         payload, reason = self._gh([
             "gh", "project", "item-list", str(self._project_number),
             "--owner", str(self._owner), "--format", "json",
@@ -101,31 +102,72 @@ class GitHubAdapter:
             "--limit", str(PROJECT_ITEM_LIMIT),
         ])
         if payload is None:
+            return None, reason
+        return payload, None
+
+    def _items(self):
+        payload, reason = self._board()
+        if payload is None:
             return [], reason
         return payload.get("items") or [], None
 
     def _issue(self, task_id):
         return self._gh(["gh", "issue", "view", str(task_id), "--json", ISSUE_FIELDS])
 
-    def _project_item(self, task_id):
-        """Returns (on_board, status, reason). `on_board` separates an issue the declared project
-        does not carry from an item on it with no status set; both read as a None status."""
-        items, reason = self._items()
-        if reason:
-            return False, None, reason
-        for item in items:
-            content = item.get("content") or {}
-            if str(content.get("number")) == str(task_id):
-                return True, item.get("status"), None
-        return False, None, None
-
     def _project_status(self, task_id):
         """Returns (status, reason). The reason is what separates a board this adapter could not
         read from a board that genuinely does not carry the item: both used to come back as
         None, and None reads as `not terminal`, so an unreadable board looked exactly like a card
         that had not moved."""
-        _, status, reason = self._project_item(task_id)
-        return status, reason
+        items, reason = self._items()
+        if reason:
+            return None, reason
+        for item in items:
+            content = item.get("content") or {}
+            if str(content.get("number")) == str(task_id):
+                return item.get("status"), None
+        return None, None
+
+    def _project_item(self, task_id):
+        """Returns (on_board, status, reason) for this repository's issue on the declared project.
+
+        Stricter than `_project_status` in two ways, because its answer is reported rather than
+        acted on and a wrong "not on the board" is silent. A project can carry issues from more
+        than one repository, so an item matches on the repository as well as the number. And a
+        board past PROJECT_ITEM_LIMIT is a reason rather than an absence, since the item may sit
+        in the part item-list did not return. `on_board` separates an issue the project does not
+        carry from an item on it with no status set; both read as a None status."""
+        repository, reason = self._repository_name()
+        if reason:
+            return False, None, reason
+        payload, reason = self._board()
+        if reason:
+            return False, None, reason
+        items = payload.get("items") or []
+        for item in items:
+            content = item.get("content") or {}
+            if str(content.get("number")) != str(task_id):
+                continue
+            # gh names the repository on every issue item; an item without one is taken as this
+            # repository's, which is how every read before this one matched.
+            owner = content.get("repository")
+            if owner and str(owner).lower() != repository.lower():
+                continue
+            return True, item.get("status"), None
+        total = payload.get("totalCount")
+        if isinstance(total, int) and total > len(items):
+            return False, None, ("the board holds %d items and item-list returned %d, so #%s may "
+                                 "be past the end" % (total, len(items), task_id))
+        return False, None, None
+
+    def _repository_name(self):
+        """`owner/name` of the repository this adapter reads, from `gh repo view`, read once."""
+        if self._repository is None:
+            identity, reason = self._repository_identity()
+            if identity is None:
+                return None, reason
+            self._repository = identity["name"]
+        return self._repository, None
 
     def _board_lag(self, task_id):
         """Issue #43. Returns (lag, reason): `lag` names the item's status and the terminal one

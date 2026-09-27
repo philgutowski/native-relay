@@ -111,10 +111,7 @@ def _item_lag(adapter, task_id, status, record_status):
     a terminal card whose project item does not read the terminal status. GitHub answers terminal
     from a closed issue alone, so `status` here is `CLOSED` and the item's column is invisible
     without its own read. An adapter with one status per card has nothing to add."""
-    try:
-        lag, reason = adapters.board_lag(adapter, task_id)
-    except Exception as exc:
-        lag, reason = None, "the board read raised: %s" % exc
+    lag, reason = adapters.board_lag(adapter, task_id)
     if reason:
         return _finding(contracts.AUDIT_UNREADABLE, task_id,
                         "%s's project item could not be read: %s" % (task_id, reason),

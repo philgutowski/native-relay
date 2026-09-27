@@ -369,10 +369,7 @@ def confirm_board_terminal(adapter, manifest, task_id):
     `adapters.board_lag` answers for GitHub only; every other adapter has one status per card,
     which verify has already read as terminal."""
     terminal = manifest.tracker.status_field or "its terminal status"
-    try:
-        lag, reason = adapters.board_lag(adapter, task_id)
-    except Exception as exc:
-        lag, reason = None, "the board read raised: %s" % exc
+    lag, reason = adapters.board_lag(adapter, task_id)
     if reason:
         return {"class": contracts.BOARD_ITEM_NOT_TERMINAL, "task": task_id,
                 "card_status": "unreadable", "terminal_status": terminal,
