@@ -466,10 +466,11 @@ post_cycle_timeout_seconds = 3600
   `fallback_hours` have passed; then the next fable card runs on fable again, and a fast death
   marks it again. A fallback is taken only when it leads to a model that is not marked and did
   not itself die quickly that cycle, following a chain one model at a time and never coming
-  back to a model it has passed. When every task died quickly, nothing landed, and any of
+  back to a model it has passed within one move; once a mark expires, a later move can return there. When every task died quickly, nothing landed, and any of
   those deaths had no such fallback, the whole cycle is waited out as before.
-- `limit_waits_max` counts waits with no landing between them. Only a landing or a slow death
-  resets the count; a cycle whose quick deaths all moved to a fallback leaves it where it was.
+- `limit_waits_max` counts waits with only fallback moves between them. A cycle whose quick
+  deaths all moved to a fallback, with nothing landed, leaves the count where it was; every
+  other cycle that does not wait resets it.
   With two models that fall back to each other, the first model's mark expires during the
   waits and the task moves back, and that move no longer starts the count again, so a task
   that keeps dying quickly on both reaches exit 2, and a blocked one is reported blocked.

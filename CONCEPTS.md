@@ -408,8 +408,9 @@ right, and not a detection: the Runner has no usage limit handling for it to lea
 The same rule runs per model when the sidecar names a fallback for one: a quick death on that
 model marks it exhausted for a while and moves its Task to the fallback, uncounted, even when
 Tasks on other models landed in the same Cycle. A move is neither a wait nor a sign the limit
-has passed: only a landing or a slow death resets the count of waits, so a Task moved back and
-forth between two models that fall back to each other still runs the waits out.
+has passed, so a Cycle whose quick deaths all moved, with nothing landed, leaves the count of
+waits where it was. A Task moved back and forth between two models that fall back to each other
+still runs the waits out.
 
 A limit death is not always a halt. A Task process that printed only the CLI's limit message
 and exited in seconds has no return envelope, so the Runner records it blocked, and a blocked

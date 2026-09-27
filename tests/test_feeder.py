@@ -584,8 +584,8 @@ class BlockedLimit(FeederCase):
                       self.log_text())
         self.assertEqual(len(re.findall("reading that as (fable|opus)'s usage limit",
                                         self.log_text())), 2)
-        self.assertIn("every task has died quickly for 4 waits, with no landing between them. "
-                      "Not a usage limit, or one that outlasts the waits. Read the summary.",
+        self.assertIn("every task has died quickly for 4 waits, with only fallback moves between "
+                      "them. Not a usage limit, or one that outlasts the waits. Read the summary.",
                       self.log_text())
         self.assertEqual(self.state()["retry_blocked"], {})
         self.assertEqual(self.state()["halts"], {})
