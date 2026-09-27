@@ -16,7 +16,7 @@ at a machine readable file the operator would have to parse to learn anything.
 import shlex
 import string
 
-from . import audit, contracts, gitread, manifest as manifest_module, verify
+from . import audit, contracts, gitread, host, manifest as manifest_module, verify
 
 SCHEMA_VERSION = 1
 
@@ -114,6 +114,10 @@ def _task_entry(store, record):
         "continued_past": bool(record.get("continued_past")),
         "wall_seconds": record.get("wall_seconds"),
         "active_seconds": record.get("active_seconds"),
+        # Issue #32. What the host was doing either side of the timing above, so a slow task can
+        # be told from a slow machine. `.get`, since older records carry neither key.
+        "host_at_start": record.get("host_at_start"),
+        "host_at_end": record.get("host_at_end"),
         # Issue #39. Restamped at every launch, so the feeder can tell a blocked task it asked
         # to retry that ran again from one the run never reached.
         "started_at": record.get("started_at"),
@@ -395,6 +399,11 @@ def lines(data):
             out.append(("    %s" % entry["unenforced_restrictions"],
                         source + ".unenforced_restrictions"))
         out.append(("    %s" % _seconds(entry), source + ".active_seconds"))
+        conditions = host.line(entry["host_at_start"], entry["host_at_end"])
+        if conditions:
+            # One line reads both keys; it names the start unless only the end was captured.
+            field = "host_at_start" if entry["host_at_start"] else "host_at_end"
+            out.append(("    %s" % conditions, "%s.%s" % (source, field)))
         out.append(("    output: %s" % entry["log_path"], source + ".log_path"))
         out.append(("", source + ".id"))
     if data["pending_checks"]:

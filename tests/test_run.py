@@ -368,6 +368,32 @@ class EndToEnd(RunCase):
         self.assertTrue(record["binary_path"].endswith("/claude"))
         self.assertEqual(record["args"][0], "claude")
 
+    def test_a_launched_record_carries_the_host_conditions_at_start_and_end(self):
+        """Issue #32. The probe is called before and after the Task process, in that order, and
+        each answer lands on the record as it was read."""
+        answers = iter([{"load_1m": 1.0, "swapouts": 3}, {"load_1m": 7.5, "swapouts": 9}])
+        self.go(launch_kwargs={"sigkill_grace_seconds": 2, "heartbeat_interval": 0,
+                               "host_probe": lambda: next(answers, {"load_1m": 0.0})})
+        record = self.store().get("T-1")
+        self.assertEqual(record["host_at_start"], {"load_1m": 1.0, "swapouts": 3})
+        self.assertEqual(record["host_at_end"], {"load_1m": 7.5, "swapouts": 9})
+
+    def test_a_relaunch_clears_the_previous_attempts_host_conditions_before_its_launch(self):
+        """The running upsert forgets the last attempt's snapshots, so an attempt that dies
+        between that upsert and its own record write prints no host line of someone else's. The
+        start probe runs in that window, so it reads what such an attempt would leave."""
+        self.store().upsert("T-1", host_at_start={"stale": 1}, host_at_end={"stale": 2})
+        seen = []
+
+        def probe():
+            if not seen:
+                record = self.store().get("T-1")
+                seen.append((record["host_at_start"], record["host_at_end"]))
+            return {"load_1m": 1.0}
+        self.go(launch_kwargs={"sigkill_grace_seconds": 2, "heartbeat_interval": 0,
+                               "host_probe": probe})
+        self.assertEqual(seen, [(None, None)])
+
     def test_a_launch_error_does_not_add_an_unlaunched_backend_to_terminal_versions(self):
         def unavailable(*_args, **_kwargs):
             raise OSError("binary unavailable")

@@ -401,6 +401,7 @@ def _triple_classify(cfg, item):
     cfg.store.upsert(item.task.id, session_id=launched.session_id,
                      transcript_path=launched.transcript_path,
                      wall_seconds=launched.wall_seconds, active_seconds=launched.active_seconds,
+                     host_at_start=launched.host_at_start, host_at_end=launched.host_at_end,
                      findings=item.findings, binary_path=launched.binary_path, args=launched.args,
                      envelope_verdict=digest["envelope_verdict"])
     if launched.launch_error:
@@ -674,6 +675,7 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
                          model=task.model, halt_class=None, halt_stage=None,
                          halt_message=None, halt_evidence=None, envelope_verdict=None,
+                         host_at_start=None, host_at_end=None,
                          unenforced_restrictions=(_unenforced_scalar(manifest, capability)
                                                   if not capability.enforces_at_launch else None))
             workers.append(item)
@@ -1415,12 +1417,14 @@ def _begin_task(cfg, task):
 
     # Every halt field clears here, not just the class. `halt_evidence` feeds the Cause line last
     # and wins over the fresh record, so a leftover key would name a previous attempt's sha or
-    # branch inside a well formed sentence.
+    # branch inside a well formed sentence. The host snapshots clear for the same reason: an
+    # attempt that never reaches its own launch must not print the last one's host line.
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
                  baseline_tracker_status=card_status.get("status"),
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
                  halt_message=None, halt_evidence=None, envelope_verdict=None,
+                 host_at_start=None, host_at_end=None,
                  excluded_reason=None, skip_reason=None,
                  findings=[reassignment] if reassignment else [],
                  continued_past=False, backend=task.backend, model=task.model,
@@ -1479,6 +1483,7 @@ def _complete_task(cfg, begun, launched, tree_repo=None):
     store.upsert(task.id, session_id=launched.session_id,
                  transcript_path=launched.transcript_path, wall_seconds=launched.wall_seconds,
                  active_seconds=launched.active_seconds, findings=findings,
+                 host_at_start=launched.host_at_start, host_at_end=launched.host_at_end,
                  binary_path=launched.binary_path, args=launched.args,
                  envelope_verdict=digest["envelope_verdict"])
 
@@ -1599,7 +1604,7 @@ def _abandon_build(cfg, task_id, branch, dest=None):
     cfg.store.upsert(task_id, status=contracts.STATUS_PENDING, session_id=None,
                      transcript_path=None, halt_class=None, halt_stage=None,
                      halt_message=None, halt_evidence=None, skip_reason=None,
-                     envelope_verdict=None)
+                     envelope_verdict=None, host_at_start=None, host_at_end=None)
 
 
 def _abort_siblings(cfg, slots, waiting, keep_id):

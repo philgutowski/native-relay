@@ -279,7 +279,9 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
         manifest, _closeout_task(manifest, task_id, backend, task_model=task_model), text,
         store.path("logs", task_id + ".closeout.stdout.log"), timeout_seconds,
         allowed=allowed_tools(manifest, adapter, backend=backend),
-        disallowed=contracts.CLOSEOUT_DISALLOWED_EXTRA, **launch_kwargs)
+        # No host reads: the record's host fields describe the Task process, and nothing keeps
+        # a Closeout's (issue #32).
+        disallowed=contracts.CLOSEOUT_DISALLOWED_EXTRA, **dict(launch_kwargs, host_probe=None))
 
     # U7 runs over the closeout transcript too (R44). AE1's denied tracker write most often
     # happens here, after the code has already merged. The backend goes through: a closeout

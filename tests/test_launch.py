@@ -215,6 +215,38 @@ class SuccessfulRun(LaunchCase):
         self.assertGreater(result.wall_seconds, 0)
         self.assertGreater(result.active_seconds, 0)
 
+    def test_the_host_is_read_once_either_side_of_the_process(self):
+        """Issue #32. The start read happens before the child exists and the end read after it
+        exits, so neither is spent from the task's budget."""
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        calls = []
+
+        def probe():
+            calls.append(len(calls))
+            return {"n": len(calls)}
+        result = self.go(host_probe=probe)
+        self.assertEqual(result.host_at_start, {"n": 1})
+        self.assertEqual(result.host_at_end, {"n": 2})
+        self.assertEqual(calls, [0, 1])
+
+    def test_a_probe_that_raises_leaves_the_snapshot_empty_and_still_launches(self):
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+
+        def probe():
+            raise RuntimeError("unreadable host")
+        result = self.go(host_probe=probe)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIsNone(result.host_at_start)
+        self.assertIsNone(result.host_at_end)
+
+    def test_a_process_that_never_started_still_carries_both_snapshots(self):
+        def unavailable(*_args, **_kwargs):
+            raise OSError("binary unavailable")
+        result = self.go(popen=unavailable, host_probe=lambda: {"load_1m": 2.0})
+        self.assertTrue(result.launch_error)
+        self.assertEqual(result.host_at_start, {"load_1m": 2.0})
+        self.assertEqual(result.host_at_end, {"load_1m": 2.0})
+
     def test_a_transcript_written_under_another_slug_is_still_found_by_session_id(self):
         session = "33333333-3333-4333-8333-333333333333"
         other = os.path.join(self.home, ".claude", "projects", "-some-other-slug")

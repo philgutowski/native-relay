@@ -34,7 +34,7 @@ RECORD_FIELDS = (
     "branch", "landing_ref", "verify", "halt_class", "halt_stage", "halt_evidence", "findings",
     "closeout", "started_at", "ended_at", "wall_seconds", "active_seconds", "transcript_path",
     "brief_sha256", "excluded_reason", "skip_reason", "continued_past", "backend", "model", "binary_path",
-    "args",
+    "args", "host_at_start", "host_at_end",
 )
 
 
