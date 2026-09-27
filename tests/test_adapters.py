@@ -540,6 +540,20 @@ class GitHub(AdapterCase):
                         "the project status field named in the manifest was not consulted")
         self.assertEqual(adapter.status("13")["status"], "Done")
 
+    def test_a_landed_closeout_closes_the_issue_and_moves_the_item_to_the_status_field(self):
+        text = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"),
+                                        run=self.run_for()).closeout_instructions("landed")
+        self.assertIn("gh issue close", text)
+        self.assertIn("gh project item-edit", text)
+        self.assertIn("`Done`", text)
+        self.assertNotIn(", or move", text, "the item move must not read as an alternative")
+
+    def test_a_landed_closeout_without_a_status_field_only_closes_the_issue(self):
+        text = gh_adapter.GitHubAdapter(self.github_manifest(status_field=""),
+                                        run=self.run_for()).closeout_instructions("landed")
+        self.assertIn("gh issue close", text)
+        self.assertNotIn("item-edit", text, "no status_field means no board column to move")
+
     def test_candidates_carry_the_project_status_of_each_item(self):
         found = {entry["id"]: entry for entry in self.github(self.run_for()).candidates()}
         self.assertEqual(found["13"]["status"], "Done")
