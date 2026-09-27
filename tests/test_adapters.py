@@ -660,7 +660,9 @@ class GitHub(AdapterCase):
         self.assertIn("project number `4`", text)
         self.assertIn("gh project view 4 --owner example-org --format json", text,
                       "the project id must come from project view, not field-list or item-list")
-        self.assertIn("gh project field-list 4 --owner example-org --format json", text)
+        self.assertIn("gh project field-list 4 --owner example-org --format json --limit %d"
+                      % gh_adapter.PROJECT_ITEM_LIMIT, text,
+                      "field-list defaults to a 30 row page too, so it needs the same limit")
         self.assertIn("gh project item-list 4 --owner example-org --format json --limit %d"
                       % gh_adapter.PROJECT_ITEM_LIMIT, text,
                       "item-list must carry the same limit the adapter's own reads use")
@@ -670,6 +672,20 @@ class GitHub(AdapterCase):
                                         run=self.run_for()).closeout_instructions("landed")
         self.assertIn("leave the board alone", text)
         self.assertIn("say so in the comment", text)
+        self.assertNotIn("adding it", text, "the antecedent of \"it\" is ambiguous")
+
+    def test_a_return_to_move_also_names_the_owner_project_number_and_id_sources(self):
+        for outcome in ("blocked", "halted"):
+            text = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"),
+                                            run=self.run_for()).closeout_instructions(
+                                                outcome, return_to="Todo")
+            self.assertIn("owner `example-org`", text, outcome)
+            self.assertIn("project number `4`", text, outcome)
+            self.assertIn("gh project view 4 --owner example-org --format json", text, outcome)
+            self.assertIn("gh project field-list 4 --owner example-org --format json --limit %d"
+                          % gh_adapter.PROJECT_ITEM_LIMIT, text, outcome)
+            self.assertIn("gh project item-list 4 --owner example-org --format json --limit %d"
+                          % gh_adapter.PROJECT_ITEM_LIMIT, text, outcome)
 
     def test_candidates_carry_the_project_status_of_each_item(self):
         found = {entry["id"]: entry for entry in self.github(self.run_for()).candidates()}
