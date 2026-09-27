@@ -137,6 +137,7 @@ turns that into a continuous run by growing the manifest between runs:
 
 ```bash
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run   # would offer, would hold, or would skip each ready card; writes nothing
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run --detach  # refused: a dry run never detaches
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --once      # one cycle, never waits
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
@@ -167,6 +168,16 @@ twice is excluded**, with the reason written into the manifest, because the runn
 halted task on every run. **A cycle whose launched tasks all died within ten minutes, with
 nothing landed, is read as a usage limit** and waited out for thirty minutes without counting
 those halts. That last one is a heuristic, not a detection: Relay has no usage limit handling.
+
+When the sidecar names a fallback for a model (`[models] fallback`, off by default), a task on
+that model that dies quickly is read the same way, per model: the model is marked exhausted for
+`fallback_hours` (5 by default), the task is moved to the fallback and relaunched there next run,
+its halt is not counted, and new cards on the model go to the fallback until the mark expires. A
+limit death with no free fallback, once confirmed, holds its model back instead: the model is
+marked exhausted, cards routed to it are left out of the batch while none of its fallbacks is
+free, and a blocked one waits for the mark to clear. This holds whether or not a fallback is
+configured for that model. When only held cards and their waiting retries are left to run, the
+feeder waits with reason `model_held` rather than leave.
 
 Every project fact is data in a sidecar file beside the manifest and named from its stem. For
 `queue.toml` the feeder reads `queue.feeder.toml` (settings, all optional), `queue.order`
@@ -239,7 +250,9 @@ there would run unmerged, ungated work at every later cycle. `<sha>` is always t
 characters, what `git rev-parse --short=12 main` prints, so an extract made by hand under that
 name is reused. The flag prints the branch beside the sha, and says when the checkout sits on
 another branch or holds uncommitted edits, neither of which is in the extract. With `--dry-run`
-it says what it would extract and writes nothing. For the same
+it says what it would extract and writes nothing. Adding `--detach` to that pair is refused the
+same way as plain `--dry-run --detach`: a dry run never detaches, so nothing runs and nothing is
+written. For the same
 reason, editing the sidecar's settings or cutting a new runner does nothing to a feeder already
 running; `--restart` asks the old one to leave, waits for it, and takes its place, and nothing is
 killed, so the task in flight finishes and merges normally. The order and routing files are the
