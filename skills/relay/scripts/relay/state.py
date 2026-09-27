@@ -370,7 +370,7 @@ class StateStore:
         finally:
             os.close(fd)
 
-    def _mark_crashed(self, state, previous, cause):
+    def _mark_crashed(self, state, previous, cause, spare=()):
         """R55: a reclaimed lease turns every running or merging record into halted with class
         runner_crashed, and records the old holder per-record in halt_evidence.previous_holder
         rather than in a run-level terminal record.
@@ -381,10 +381,14 @@ class StateStore:
 
         Round six #40: when the crashed task's own stdout log shows it killed the previous
         holder's pid, that self-kill is attached to the record as a runner_self_kill finding
-        instead of leaving the halt bare (classify.scan_self_kill)."""
+        instead of leaving the halt bare (classify.scan_self_kill).
+
+        Issue #71: `spare` names records whose process is still alive, which stay in flight."""
         ids = []
         victim_pid = (previous or {}).get("holder_pid")
         for task_id, record in state.get("tasks", {}).items():
+            if task_id in spare:
+                continue
             if record.get("status") in contracts.IN_FLIGHT_STATUSES:
                 record["halt_evidence"] = {
                     "status_before": record.get("status"),
@@ -482,7 +486,7 @@ class StateStore:
             pass
         return marked["ids"]
 
-    def mark_in_flight_crashed(self, cause=CRASH_INTERRUPTED):
+    def mark_in_flight_crashed(self, cause=CRASH_INTERRUPTED, spare=()):
         """Issue #64: the Runner's own way out when it wrote no terminal record, an interrupt from
         the keyboard most often. Nothing it launched is still being driven, so its records in
         flight are marked the way a reclaim would mark them. Returns the marked ids.
@@ -493,14 +497,17 @@ class StateStore:
         the records in flight now, and they are not this process's to mark.
 
         Unlike a reclaim or a break, the moment of marking is when the work stopped, so the
-        ending is stamped."""
+        ending is stamped.
+
+        `spare` is the ids of records whose Task process outlived the Runner's attempt to end it
+        (issue #71). Something still drives them, so they keep reading running."""
         marked = {"ids": ()}
 
         def fn(state):
             lease = state.get("lease")
             if lease and not self._is_mine(lease):
                 return
-            marked["ids"] = self._mark_crashed(state, self._holder(), cause)
+            marked["ids"] = self._mark_crashed(state, self._holder(), cause, spare)
 
         self._mutate(fn)
         return marked["ids"]
@@ -635,7 +642,10 @@ class StateStore:
 
     # Terminal record.
     def write_terminal(self, run_status, halt_task=None, halt_class=None, cli_version=None,
-                       cli_version_observed=None):
+                       cli_version_observed=None, surviving_flights=()):
+        """`surviving_flights` (issue #71) is the dispatch builds whose process group was still
+        alive when the run left, each `{task, process_group}`. The key is written only when there
+        is one, so every other terminal record keeps its shape."""
         record = {
             "run_status": run_status,
             "halt_task": halt_task,
@@ -644,6 +654,8 @@ class StateStore:
             "cli_version_observed": self._version_map(cli_version_observed),
             "written_at": _iso(self.now()),
         }
+        if surviving_flights:
+            record["surviving_flights"] = [dict(entry) for entry in surviving_flights]
         self._mutate(lambda state: state.update(terminal=record))
         return record
 

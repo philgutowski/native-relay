@@ -48,6 +48,23 @@ TRACKER_FOUR = """# Tasks
 """
 
 
+def _group_alive(group):
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_group_quietly(group):
+    """A test's own cleanup, so a group the runner failed to end never outlives the test."""
+    import signal
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 class DispatchCase(RunCase):
     def setUp(self):
         super().setUp()
@@ -186,6 +203,66 @@ class DispatchEndToEnd(DispatchCase):
         self.assertFalse(os.path.isdir(self.store().path("worktrees", "T-2")))
         self.assertNotEqual(records.get("T-3", {}).get("status"), contracts.STATUS_LANDED)
         self.assertFalse(gitread.branch_exists(self.repo, "relay/T-3"))
+
+    def interrupt_once_building(self, env):
+        """Dispatch with T-1 building in a real stub process that has a sleeping grandchild, and
+        a keyboard interrupt on the main thread once the build's process group exists. The
+        interrupt reaches the main thread only: the Task process sits in its own session and its
+        launch, on a worker thread, installed no signal handler. Returns the group id."""
+        from unittest import mock
+        env["RELAY_STUB_CHILD"] = "1"
+        self.task_success("T-1", sleep=60)
+        seen = []
+        real_wait = runner._wait_any_flight
+
+        def interrupted(slots, timeout=0.1):
+            for flight in slots.values():
+                if flight.pgid:
+                    seen.append(flight.pgid[0])
+                    self.addCleanup(_kill_group_quietly, flight.pgid[0])
+                    raise KeyboardInterrupt()
+            return real_wait(slots, timeout)
+
+        with mock.patch.object(runner, "_wait_any_flight", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.go_dispatch(base_env=env)
+        self.assertEqual(len(seen), 1)
+        return seen[0]
+
+    def test_an_interrupted_dispatch_ends_its_task_processes_before_it_marks_anything(self):
+        """Issue #71. Nothing ended a flight on the way out of an interrupted dispatch, so the
+        Task process kept building and moving cards while its record read crashed and the lease
+        was free for a relaunch to start beside it. Now the whole group is gone before any record
+        is marked, and the build is abandoned the way a halt that does not continue past does."""
+        group = self.interrupt_once_building(self.base_env())
+        self.assertFalse(_group_alive(group))
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_PENDING)
+        self.assertNotEqual(record.get("halt_class"), contracts.HALT_RUNNER_CRASHED)
+        self.assertFalse(os.path.isdir(self.store().path("worktrees", "T-1")))
+        self.assertFalse(gitread.branch_exists(self.repo, "relay/T-1"))
+        self.assertIsNone(self.store().lease())
+        terminal = self.store().terminal()
+        self.assertEqual(terminal["run_status"], contracts.RUN_CRASHED)
+        self.assertNotIn("surviving_flights", terminal)
+
+    def test_a_flight_that_will_not_die_is_named_and_never_marked_crashed(self):
+        """Issue #71. A group still alive at the bound is named in the terminal record, its
+        record keeps reading running because something is still driving it, and its worktree is
+        left for the process using it. The lease is released regardless."""
+        from unittest import mock
+        with mock.patch.object(runner, "_signal_group"), \
+                mock.patch.object(runner, "FLIGHT_EXIT_SECONDS", 0.5):
+            group = self.interrupt_once_building(self.base_env())
+        self.assertTrue(_group_alive(group))
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_RUNNING)
+        self.assertTrue(os.path.isdir(self.store().path("worktrees", "T-1")))
+        self.assertIsNone(self.store().lease())
+        terminal = self.store().terminal()
+        self.assertEqual(terminal["run_status"], contracts.RUN_CRASHED)
+        self.assertEqual(terminal["surviving_flights"],
+                         [{"task": "T-1", "process_group": group}])
 
     def test_dispatch_of_a_pair_file_uses_the_pair_path_for_state(self):
         self.land_all_four()
