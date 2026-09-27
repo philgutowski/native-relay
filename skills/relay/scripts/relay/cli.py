@@ -901,9 +901,11 @@ def cmd_feed(args, env, out, deps=None):
 
 def _watch_feeder(args, paths, out, sleep):
     """`feed --status`, `--events`, and `--follow` (issue #36). Each reads the files beside the
-    manifest and nothing else: no lock is taken, the manifest is not loaded, and nothing is
-    written, so all three are safe beside a live feeder. Exit 0 whatever the answer; the answer
-    is in the output, and `--status --json` carries it as `running`."""
+    manifest and nothing else: the manifest is not loaded and nothing is written, so all three
+    are safe beside a live feeder. `--status` takes a brief shared lock to test liveness, and
+    `--follow` does the same each time it finds nothing new; `--events` takes no lock at all.
+    Exit 0 whatever the answer; the answer is in the output, and `--status --json` carries it
+    as `running`."""
     if args.feed_status:
         try:
             report = feeder_module.status_report(paths)
