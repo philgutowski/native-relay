@@ -28,6 +28,7 @@ operator finished by hand is promoted to landed by `startup_reverify` without ev
 `running`, and a record written before the stamps existed carries none either. Both read landed
 with nothing to average.
 """
+import os
 import time
 
 from . import contracts, state
@@ -35,6 +36,9 @@ from . import contracts, state
 # A manifest task with no record, or a record still pending. Not a record status: nothing writes
 # `todo` to state, and the point of the bucket is to count what has not started yet.
 TODO = "todo"
+
+SCOPE_RUN = "run"
+SCOPE_CYCLE = "cycle"
 
 
 def _elapsed(record, now, live):
@@ -80,6 +84,24 @@ def _entry(task_id, record, now, in_manifest, live):
     }
 
 
+def _scope(manifest):
+    """`cycle` when a feeder sidecar sits beside the manifest, `run` otherwise. Under a feeder the
+    manifest holds only the current cycle's cards, so an estimate drawn from its tasks prices the
+    cycle and not the queue behind it, and the line has to say so. Imported here because the
+    feeder imports the runner, which imports this module."""
+    path = getattr(manifest, "path", None)
+    if not path:
+        return SCOPE_RUN
+    from . import feeder
+    return SCOPE_CYCLE if os.path.isfile(feeder.paths_for(path).config) else SCOPE_RUN
+
+
+def _left(data):
+    """The phrase for the estimate, naming what it covers when that is a feeder's cycle."""
+    text = "roughly %s left" % duration(data["estimate_seconds"])
+    return text + " in this cycle" if data.get("scope") == SCOPE_CYCLE else text
+
+
 def build(manifest, store, now=time.time, raw=None, live=True):
     """The progress view as data. Reads state only; acquires nothing and changes nothing.
 
@@ -123,6 +145,7 @@ def build(manifest, store, now=time.time, raw=None, live=True):
         "measured_count": len(measured),
         "landed_sample": len(landed),
         "estimate_seconds": _estimate(mine, landed),
+        "scope": _scope(manifest),
     }
 
 
@@ -204,7 +227,7 @@ def phrase(data):
     settled, total = settled_of_total(data)
     text = "%d of %d settled" % (settled, total)
     if _worth_saying(data["estimate_seconds"]):
-        text += ", roughly %s left" % duration(data["estimate_seconds"])
+        text += ", " + _left(data)
     return text
 
 
@@ -231,7 +254,7 @@ def bar(data, width=BAR_WIDTH):
         if entry["in_manifest"] and entry["status"] in contracts.IN_FLIGHT_STATUSES:
             parts.append("%s %s" % (entry["id"], task_line(entry)))
     if _worth_saying(data["estimate_seconds"]):
-        parts.append("roughly %s left" % duration(data["estimate_seconds"]))
+        parts.append(_left(data))
     return "; ".join(parts)
 
 
@@ -245,8 +268,9 @@ def lines(data):
     if data["estimate_seconds"] is None:
         out.append("remaining: no estimate yet, no landed task carries a duration")
     else:
-        out.append("remaining: roughly %s, from the mean of %d landed task(s)"
-                   % (duration(data["estimate_seconds"]), data["landed_sample"]))
+        scope = " in this cycle" if data.get("scope") == SCOPE_CYCLE else ""
+        out.append("remaining: roughly %s%s, from the mean of %d landed task(s)"
+                   % (duration(data["estimate_seconds"]), scope, data["landed_sample"]))
     return out
 
 

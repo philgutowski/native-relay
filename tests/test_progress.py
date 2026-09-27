@@ -438,6 +438,31 @@ class Phrase(unittest.TestCase):
         text = self.phrase({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)})
         self.assertEqual(text, "1 of 3 settled, roughly 3m 20s left")
 
+    def test_a_feeder_manifest_names_the_cycle_as_the_scope(self):
+        """Under a feeder the manifest holds only the cycle's cards, so "left" alone would read
+        as the whole queue."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "run.toml")
+            open(os.path.join(tmp, "run.feeder.toml"), "w").close()
+            man = manifest("T-1", "T-2", "T-3")
+            man.path = path
+            store = FakeStore({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)})
+            data = progress.build(man, store, now=lambda: NOW)
+        self.assertEqual(data["scope"], "cycle")
+        self.assertEqual(progress.phrase(data), "1 of 3 settled, roughly 3m 20s left in this cycle")
+        self.assertIn("roughly 3m 20s left in this cycle", progress.bar(data))
+        self.assertIn("remaining: roughly 3m 20s in this cycle, from the mean of 1 landed",
+                      "\n".join(progress.lines(data)))
+
+    def test_a_manifest_with_no_sidecar_is_scoped_to_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            man = manifest("T-1", "T-2", "T-3")
+            man.path = os.path.join(tmp, "run.toml")
+            store = FakeStore({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)})
+            data = progress.build(man, store, now=lambda: NOW)
+        self.assertEqual(data["scope"], "run")
+        self.assertNotIn("cycle", progress.phrase(data))
+
     def test_no_estimate_says_nothing_about_one(self):
         text = self.phrase({"T-1": record(contracts.STATUS_RUNNING, NOW - 5)})
         self.assertNotIn("roughly", text)
