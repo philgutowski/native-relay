@@ -405,12 +405,22 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
             if not self._status_field:
                 return close + "."
             # Closing alone leaves the project item in the in review column, so the board reads
-            # finished work as unfinished. Do both writes; the closeout delta accepts either.
-            return (close + ". Then set the board's single select Status field on its project item to the option "
-                    "`%s` with `gh project item-edit`, reading the project, item, field, and option "
-                    "ids from `gh project field-list` and `gh project item-list`, so the board "
-                    "column matches the closed issue. Do both, not one of them."
-                    % self._status_field)
+            # finished work as unfinished. Do both writes when there is an item to move; the
+            # closeout delta accepts either, since a CLOSED issue is terminal on its own.
+            return (
+                close + ". Then set the board's single select Status field on its project item "
+                "to the option `%s` with `gh project item-edit`, for owner `%s` and project "
+                "number `%s`. Read the project id from `gh project view %s --owner %s "
+                "--format json`, the field and option ids from `gh project field-list %s "
+                "--owner %s --format json`, and the item id from `gh project item-list %s "
+                "--owner %s --format json --limit %d`. Do both writes when the issue has an "
+                "item on that project. If it has none, leave the board alone and say so in the "
+                "comment instead of adding it."
+                % (self._status_field, self._owner, self._project_number,
+                   self._project_number, self._owner,
+                   self._project_number, self._owner,
+                   self._project_number, self._owner, PROJECT_ITEM_LIMIT)
+            )
         move = ("Do not close the issue and do not move its project item" if not return_to else
                 "Do not close the issue. Move its project item back to `%s`, the status it read "
                 "before this run, since no process is working on it now; use `gh project "
