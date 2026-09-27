@@ -141,6 +141,7 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --once      # one cycl
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  # relaunch one blocked task next cycle
 ```
 
 Three rules carry it. **Only ready cards are appended.** Ready is the tracker's own account that
@@ -303,7 +304,8 @@ Part of that repair can be the manifest itself. Editing a task's `model` moves a
 not landed, and the next run launches it where you sent it, naming the move on its output and on
 the task's record. A stranded task branch is still refused the same way, judged against the name
 and baseline the record already carries, so the edit does not get a task past it; a blocked task
-needs `--retry-blocked` before a reassignment reaches it.
+needs `--retry-blocked` before a reassignment reaches it. `--retry-blocked T-4` retries that task
+alone, where the bare flag retries every blocked record.
 
 ## Where things are
 

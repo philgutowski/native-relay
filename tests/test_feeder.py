@@ -34,6 +34,23 @@ def halted(wall, halt_class="unclean_exit", cause="the tree was left dirty"):
     return {"status": "halted", "wall_seconds": wall, "class": halt_class, "cause": cause}
 
 
+# A plan entry that leaves the task's record exactly as it was: the run never reached it.
+UNREACHED = "unreached"
+
+# The last two lines a task prints when the account's limit for its model is already spent, cut
+# down from a real log. The CLI streams its own limit message as the only turn and ends.
+LIMIT_RESULT = {"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+                "terminal_reason": "api_error", "api_error_status": 429,
+                "result": "You've reached your Fable limit. Switch to another model."}
+LIMIT_LOG = "\n".join(json.dumps(line) for line in (
+    {"type": "assistant", "error": "rate_limit", "api_error": "model_requires_usage_credits",
+     "message": {"content": [{"type": "text", "text": LIMIT_RESULT["result"]}]}},
+    LIMIT_RESULT)) + "\n"
+# A model the account cannot reach ends the same way, with a 404 beside the same reason.
+MISSING_MODEL_LOG = json.dumps(dict(LIMIT_RESULT, api_error_status=404,
+                                    result="There's an issue with the selected model.")) + "\n"
+
+
 class FeederCase(RunCase):
     """A manifest with no tasks yet, a fake board, and a fake runner that follows a script.
 
@@ -51,6 +68,7 @@ class FeederCase(RunCase):
         self.paths = feeder.paths_for(self.manifest_path)
         self.adapter = FakeAdapter(ready=[card(n) for n in (1, 2, 3, 4, 5)])
         self.plans, self.runs, self.sleeps, self.notes = [], [], [], []
+        self.retries = []        # the ids each run was asked to retry with --retry-blocked
         self.records, self.lease = {}, []
         self.run_record = {}     # the summary's run level keys: run_status, halt_task, halt_class
         self.before_run = None
@@ -74,11 +92,12 @@ class FeederCase(RunCase):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(text)
 
-    def _run_cycle(self, manifest_path):
+    def _run_cycle(self, manifest_path, retry_ids=()):
         if self.before_run:
             self.before_run()
         listed = self.listed()
         self.runs.append(listed)
+        self.retries.append(list(retry_ids))
         plan = self.plans.pop(0) if self.plans else {}
         if not self.plans:
             feeder.request_stop(self.paths)
@@ -88,15 +107,22 @@ class FeederCase(RunCase):
         models = manifestedit.task_models(self.text())
         self.ran_on = getattr(self, "ran_on", []) + [dict(models)]
         for task_id in listed:
-            if self.records.get(task_id, {}).get("status") in ("landed", "blocked"):
+            status = self.records.get(task_id, {}).get("status")
+            # The runner steps over a blocked record unless this run names it (issue #39).
+            if status == "landed" or (status == "blocked" and task_id not in retry_ids):
                 continue
             outcome = plan.get(task_id, "landed")
+            if outcome == UNREACHED:
+                continue
             record = dict(outcome) if isinstance(outcome, dict) else {"status": outcome,
                                                                       "wall_seconds": 1500}
             if task_id in excluded:
                 record = {"status": "excluded"}
-            # The real summary carries the model each task ran on.
-            self.records[task_id] = dict({"model": models.get(task_id)}, **record, id=task_id)
+            # The real summary carries the model each task ran on, and every launch restamps
+            # `started_at`.
+            self.records[task_id] = dict({"model": models.get(task_id),
+                                          "started_at": "run %d" % len(self.runs)},
+                                         **record, id=task_id)
         return 2 if any(r["status"] == "halted" for r in self.records.values()) else 0
 
     def deps(self):
@@ -364,6 +390,149 @@ class ModelFallback(FeederCase):
         self.assertIsNone(manifestedit.set_model(added, "2", "opus"))
         with self.assertRaises(manifestedit.EditError):
             manifestedit.set_model(text, "9", "opus")
+
+
+class BlockedLimit(FeederCase):
+    """Issue #39. A limit death the runner recorded as blocked, not halted, falls back too."""
+    CONFIG = feeder.Config(model_fallback={"fable": "opus"})
+
+    def state(self):
+        with open(self.paths.state) as handle:
+            return json.load(handle)
+
+    def blocked(self, wall, log=LIMIT_LOG, halt_class="no_envelope"):
+        """A blocked record the way the summary reports it, its stdout log written for real."""
+        path = None
+        if log is not None:
+            path = os.path.join(self.tmp.name, "log-%d.stdout.log" % len(os.listdir(self.tmp.name)))
+            self.write(path, log)
+        return {"status": "blocked", "wall_seconds": wall, "class": halt_class,
+                "log_path": path}
+
+    def test_a_blocked_limit_death_falls_back_and_only_it_is_retried(self):
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.plans = [{"1": self.blocked(900, log=None, halt_class="blocked_envelope"),
+                       "2": self.blocked(4)}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.ran_on[0]["2"], "fable")
+        # The second run names 2 alone; 1 is an ordinary blocked task and stays blocked.
+        self.assertEqual(self.retries, [[], ["2"]])
+        self.assertEqual(self.ran_on[1]["2"], "opus")
+        self.assertEqual(self.records["2"]["status"], "landed")
+        self.assertEqual(self.records["1"]["status"], "blocked")
+        self.assertEqual(self.state()["exhausted"], {"fable": "2026-09-19T08:50:00"})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertEqual(self.state()["halts"], {})
+        self.assertIn("1 blocked; a later run will not retry it", self.log_text())
+        self.assertNotIn("2 blocked;", self.log_text())
+        hits = [note for note in self.notes if "reading that as fable's usage limit" in note]
+        self.assertEqual(len(hits), 1, self.notes)
+        self.assertIn("2 read blocked and relaunch with --retry-blocked", hits[0])
+        self.assertIn("relaunching blocked ['2'] with --retry-blocked", self.log_text())
+
+    def test_a_quick_blocked_death_with_no_result_line_is_read_by_the_time_rule(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4, log="")}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.retries, [[], ["1"]])
+        self.assertEqual(self.ran_on[1]["1"], "opus")
+
+    def test_a_result_line_that_is_not_a_429_is_not_a_usage_limit(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4, log=MISSING_MODEL_LOG)}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.models(), {"1": "fable"})
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("1 blocked; a later run will not retry it without --retry-blocked 1",
+                      self.log_text())
+
+    def test_a_slow_blocked_task_or_another_class_is_never_a_usage_limit(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 fable\n2 fable\n")
+        self.plans = [{"1": self.blocked(5000), "2": self.blocked(4, halt_class="timeout")}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.models(), {"1": "fable", "2": "fable"})
+        self.assertEqual(self.state()["exhausted"], {})
+
+    def test_off_by_default_a_blocked_limit_death_stays_blocked(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}]
+        self.feed()
+        self.assertEqual(self.models(), {"1": "fable"})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("1 blocked;", self.log_text())
+
+    def test_a_blocked_limit_death_in_a_whole_cycle_wait_retries_where_it_was(self):
+        # 1 halted fast on sonnet, which has no fallback, and nothing landed: the whole cycle
+        # is waited out. 2 waits with it and relaunches on fable, as a halt would.
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 sonnet\n2 fable\n")
+        self.plans = [{"1": halted(8), "2": self.blocked(4)}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.retries, [[], ["2"]])
+        self.assertEqual(self.ran_on[1]["2"], "fable")
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertIn("['2'] blocked on a usage limit and will be retried after the wait",
+                      self.log_text())
+
+    def test_a_retry_the_run_never_reached_keeps_its_place(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}, {"1": UNREACHED}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.retries, [[], ["1"], ["1"]])
+        self.assertEqual(self.records["1"]["status"], "landed")
+        # One move and one mark, not a second one for the unchanged record.
+        marks = [note for note in self.notes if "usage limit" in note]
+        self.assertEqual(len(marks), 1, self.notes)
+
+    def test_a_retry_that_dies_on_its_fallback_too_moves_on_or_stays_blocked(self):
+        config = feeder.Config(model_fallback={"fable": "opus", "opus": "sonnet"})
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)}]
+        self.feed(config)
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "sonnet"])
+        # sonnet has no fallback of its own, so the third death is an ordinary block.
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertIn("1 blocked; a later run will not retry it", self.log_text())
+
+    def test_the_result_line_is_found_under_a_torn_first_line(self):
+        tail = LIMIT_LOG[7:]
+        self.assertEqual(feeder.result_event(tail)["api_error_status"], 429)
+        self.assertIsNone(feeder.result_event('{"type": "assistant"}\nnot json\n'))
+        config = feeder.Config()
+        task = {"class": "no_envelope", "wall_seconds": 4}
+        self.assertTrue(feeder.blocked_by_usage_limit(task, config, LIMIT_LOG))
+        self.assertTrue(feeder.blocked_by_usage_limit(task, config, ""))
+        self.assertFalse(feeder.blocked_by_usage_limit(task, config, MISSING_MODEL_LOG))
+        self.assertFalse(feeder.blocked_by_usage_limit(dict(task, wall_seconds=None), config,
+                                                       LIMIT_LOG))
+
+    def test_the_real_run_cycle_names_each_retried_id_and_never_the_bare_flag(self):
+        seen = []
+
+        def fake_run(command, **_kwargs):
+            seen.append(command)
+            return SimpleNamespace(returncode=0)
+
+        deps = feeder.build_deps(feeder.Config(caffeinate=False), self.base_env())
+        real = feeder.subprocess.run
+        feeder.subprocess.run = fake_run
+        try:
+            deps.run_cycle("/m.toml", ["7", "12"])
+            deps.run_cycle("/m.toml", [])
+        finally:
+            feeder.subprocess.run = real
+        self.assertEqual(seen[0][-5:], ["/m.toml", "--retry-blocked", "7", "--retry-blocked",
+                                        "12"])
+        self.assertNotIn("--retry-blocked", seen[1])
 
 
 class Exits(FeederCase):
@@ -707,6 +876,26 @@ class Verb(FeederCase):
         self.assertEqual(len(self.runs), 1)
         self.assertIn("restart requested", self.log_text())
         self.assertIn("the old feeder is gone, starting", self.log_text())
+
+    def test_retry_blocked_queues_that_one_blocked_task_and_no_other(self):
+        self.write(self.manifest_path, self.head + "".join(
+            '[[tasks]]\nid = "%s"\nmodel = "opus"\neffort = "high"\n\n' % n for n in (7, 8)))
+        self.adapter.ready_cards = []
+        for task_id in ("7", "8"):
+            self.records[task_id] = {"id": task_id, "status": "blocked", "started_at": "old"}
+        self.plans = [{}]
+        code, text = self.call("--retry-blocked", "7", "--once")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.retries, [["7"]])
+        self.assertEqual(self.records["7"]["status"], "landed")
+        self.assertEqual(self.records["8"]["status"], "blocked")
+        self.assertIn("7 is queued for a retry at the operator's request", self.log_text())
+
+    def test_retry_blocked_refuses_an_id_the_manifest_does_not_list(self):
+        code, text = self.call("--retry-blocked", "99", "--once")
+        self.assertEqual(code, 1)
+        self.assertIn("--retry-blocked names 99, not a task in the manifest", text)
+        self.assertEqual(self.runs, [])
 
     def test_a_bad_sidecar_is_exit_1_before_anything_runs(self):
         self.write(self.paths.config, "[feeder]\nbatch = -1\n")

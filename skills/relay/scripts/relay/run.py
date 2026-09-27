@@ -55,7 +55,7 @@ class _Run:
     base_env: dict
     home: str
     stream: object
-    retry_blocked: bool
+    retry_blocked: object      # True for every blocked record, else the ids to retry (#39)
     overrides: dict
     launch_kwargs: dict
     now: object
@@ -1287,6 +1287,15 @@ class _Flight:
     box: list
 
 
+def retries_blocked(retry_blocked, task_id):
+    """Whether a blocked record for `task_id` is retried this run. `--retry-blocked` alone is
+    True and retries every one; with ids it is a set, and only those are retried (issue #39),
+    so one blocked task can be relaunched without reviving every older blocked record too."""
+    if isinstance(retry_blocked, (set, frozenset, tuple, list)):
+        return task_id in retry_blocked
+    return bool(retry_blocked)
+
+
 def _one_task(cfg, task):
     begun = _begin_task(cfg, task)
     if begun is None:
@@ -1315,7 +1324,7 @@ def _begin_task(cfg, task):
         return
     branch = gitwrite.task_branch_for(task.id, cfg.manifest.project.branch_prefix)
 
-    if status == contracts.STATUS_BLOCKED and not cfg.retry_blocked:
+    if status == contracts.STATUS_BLOCKED and not retries_blocked(cfg.retry_blocked, task.id):
         return
 
     # Issue #58. The manifest's resolution decides where a relaunch goes, so a task the operator

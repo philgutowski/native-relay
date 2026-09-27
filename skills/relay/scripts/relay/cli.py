@@ -29,6 +29,20 @@ EXIT_LEASE = run_module.EXIT_LEASE
 # that a queue behind a wedged runner still ends on its own.
 DEFAULT_LEASE_WAIT_MINUTES = 1440
 
+# What a bare `run --retry-blocked` appends. Not a string, so no task id can collide with it.
+RETRY_ALL = object()
+
+
+def retry_blocked_value(raw):
+    """`run --retry-blocked` as the runner takes it: False when absent, True for every blocked
+    record, else the frozenset of ids named. A bare flag beside named ids still means every
+    one. `dispatch` keeps a plain flag, which arrives here as a bool and passes through."""
+    if not raw:
+        return False
+    if raw is True or RETRY_ALL in raw:
+        return True
+    return frozenset(raw)
+
 
 class _Parser(argparse.ArgumentParser):
     """argparse exits 2 on a usage error, which is Relay's halted code. A bad command line is a
@@ -67,8 +81,13 @@ def build_parser():
 
     run_verb = verbs.add_parser("run", help="run the manifest to completion or to a halt")
     run_verb.add_argument("manifest")
-    run_verb.add_argument("--retry-blocked", action="store_true",
-                          help="retry tasks whose records read blocked")
+    # Issue #39. Bare, every blocked record is retried; with an id, only that task, repeatable.
+    # The id is optional, so an id placed before the manifest is read as the id: put the
+    # manifest first, as every example does.
+    run_verb.add_argument("--retry-blocked", action="append", nargs="?", const=RETRY_ALL,
+                          metavar="ID",
+                          help="retry tasks whose records read blocked; name an id to retry "
+                               "only that task, and repeat the flag for more than one")
     run_verb.add_argument("--detach", action="store_true",
                           help="start the run in its own session, logging to the state "
                                "directory, and return at once")
@@ -152,6 +171,10 @@ def build_parser():
     feed_verb.add_argument("--notify", action="store_true",
                            help="fire a macOS notification when the feeder stops, excludes a "
                                 "task, or meets a skipped card, and pass --notify to each run")
+    feed_verb.add_argument("--retry-blocked", action="append", metavar="ID", default=[],
+                           dest="retry_blocked",
+                           help="relaunch this one blocked task on the next cycle, leaving every "
+                                "other blocked record alone; repeat the flag for more than one")
     return parser
 
 
@@ -265,6 +288,15 @@ def cmd_run(args, env, out):
             out.write("error: %s\n" % error)
         out.write("refusing to run an invalid manifest; fix it and run validate again\n")
         return EXIT_CONFIG
+    retry_blocked = retry_blocked_value(args.retry_blocked)
+    if isinstance(retry_blocked, frozenset):
+        # A mistyped id would retry nothing and say nothing, which is the one outcome the
+        # operator asked for this flag to avoid.
+        unknown = sorted(retry_blocked - {task.id for task in manifest.tasks})
+        if unknown:
+            out.write("--retry-blocked names %s, not a task in this manifest\n"
+                      % ", ".join(unknown))
+            return EXIT_CONFIG
     adapter, failure = _adapter_for(manifest, env, out)
     if failure:
         return failure
@@ -276,7 +308,7 @@ def cmd_run(args, env, out):
         "adapter": adapter,
         "home": env.get("HOME"),
         "base_env": env,
-        "retry_blocked": args.retry_blocked,
+        "retry_blocked": retry_blocked,
         "wait_for_lease_seconds": _wait_seconds(args),
         "stream": lambda line: out.write(line + "\n"),
         "notifier": notify.build(getattr(args, "notify", False)),
@@ -316,7 +348,11 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     this function.
     """
     command = [sys.executable, "-u", entry, verb, manifest_path]
-    if retry_blocked:
+    if isinstance(retry_blocked, (set, frozenset, tuple, list)):
+        # Issue #39: named ids stay named, so the child retries only those.
+        for task_id in sorted(retry_blocked):
+            command += ["--retry-blocked", task_id]
+    elif retry_blocked:
         command.append("--retry-blocked")
     if notify_on:
         command.append("--notify")
@@ -337,7 +373,8 @@ def _detach(args, manifest, env, out, verb="run"):
     store = _store_for(manifest, env)
     log_path = store.path("runner.log")
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_cli.py")
-    command = detach_command(entry, os.path.abspath(args.manifest), args.retry_blocked,
+    command = detach_command(entry, os.path.abspath(args.manifest),
+                             retry_blocked_value(args.retry_blocked),
                              notify_on=getattr(args, "notify", False),
                              wait_minutes=getattr(args, "wait_for_lease", None),
                              verb=verb, policy=getattr(args, "policy", None))
@@ -694,7 +731,7 @@ def cmd_feed(args, env, out, deps=None):
             deps = feeder_module.build_deps(config, env, notifier=notify.build(args.notify),
                                             notify_on=args.notify)
         loop = feeder_module.Feeder(paths, config, deps, env, out, dry_run=args.dry_run,
-                                    once=args.once)
+                                    once=args.once, retry_blocked=args.retry_blocked)
     except feeder_module.ConfigError as exc:
         out.write("%s\n" % exc)
         return EXIT_CONFIG
@@ -722,6 +759,8 @@ def _detach_feeder(args, paths, config, env, out):
     command = [sys.executable, "-u", entry, "feed", paths.manifest]
     command += [flag for flag, on in (("--once", args.once), ("--restart", args.restart),
                                       ("--notify", args.notify)) if on]
+    for task_id in args.retry_blocked:
+        command += ["--retry-blocked", task_id]
     if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
         command = ["caffeinate", "-i"] + command
     with open(paths.out, "ab") as log:

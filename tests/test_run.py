@@ -1091,6 +1091,29 @@ class RetryBlocked(RunCase):
         self.assertIn("git tag -a stranded/relay/T-2 relay/T-2", outcome.message)
         self.assertIn("refs/heads", outcome.message)
 
+    def test_named_ids_retry_only_those_blocked_records(self):
+        """Issue #39. Naming another task leaves T-2 blocked; naming T-2 reaches its retry,
+        which the stranded branch then refuses exactly as the bare flag does."""
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        self.go()
+        self.assertEqual(self.go(retry_blocked=frozenset({"T-1"})).exit_code, runner.EXIT_OK)
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_BLOCKED)
+        outcome = self.go(retry_blocked=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_HALTED)
+        self.assertIn("relay/T-2", outcome.message)
+
+    def test_retries_blocked_reads_true_as_every_record_and_a_set_as_those(self):
+        self.assertTrue(runner.retries_blocked(True, "T-2"))
+        self.assertFalse(runner.retries_blocked(False, "T-2"))
+        self.assertTrue(runner.retries_blocked(frozenset({"T-2"}), "T-2"))
+        self.assertFalse(runner.retries_blocked(frozenset({"T-3"}), "T-2"))
+        self.assertFalse(runner.retries_blocked(frozenset(), "T-2"))
+
 
 class Reassignment(RunCase):
     """Issue #58. Round eight: task 45 halted on grok, the operator moved it in the manifest,

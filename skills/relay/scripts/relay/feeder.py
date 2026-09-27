@@ -34,6 +34,13 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     chain of fallbacks never loops. A cycle where every task died quickly, nothing landed, and
     some halt has no such fallback is still waited out as a whole.
 
+    A limit death is not always a halt (issue #39). A process that printed only the CLI's limit
+    message and exited is recorded `blocked` with class `no_envelope`, and a blocked record is
+    one the runner never relaunches unasked. `blocked_by_usage_limit` reads such a record, on a
+    model that has a fallback, as that model's limit too, confirmed by the log's `result` line
+    when it has one. It is moved like a halt, and the feeder then passes `--retry-blocked ID`
+    for it alone to the next run, so no other blocked record is revived with it.
+
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes three
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
 file; and its log. The tracker is read only here too, so the invariant that the runner never
@@ -87,6 +94,11 @@ UNREADABLE_WAITS_MAX = 2          # waits on a ready source that fails to read, 
 UNRANKED = 10 ** 9
 DRY_RUN_LINES = 12
 MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
+# The HTTP status the CLI's `result` line carries as `api_error_status` when the account's
+# limit for the model is spent. Not `terminal_reason: api_error` alone: a model the account
+# cannot reach at all ends with that too, beside a 404.
+USAGE_LIMIT_STATUS = 429
+LOG_TAIL_BYTES = 64 * 1024        # the terminal `result` line is the log's last
 
 
 class ConfigError(ValueError):
@@ -359,6 +371,38 @@ def looks_like_usage_limit(halted, landed, config):
     return all(died_quickly(task, config) for task in halted)
 
 
+def result_event(log_text):
+    """The last `result` event in a task's stream-json stdout, or None when there is none: the
+    process was killed first, the text is a tail that cut it off, or the backend prints another
+    format. A line that is not JSON, a torn first line of a tail above all, is passed over."""
+    for line in reversed((log_text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    return None
+
+
+def blocked_by_usage_limit(task, config, log_text):
+    """Issue #39. A blocked record that reads as a usage limit death: no envelope, and a process
+    that died inside `quick_death_seconds`, which also means it had no time to write anything a
+    retry would have to step over.
+
+    The log decides when it can. A `result` event with `api_error_status` 429 is the CLI saying
+    the limit is spent; a `result` event saying anything else is a process that finished a turn
+    or failed on something else, a model it cannot reach for one, and moving it would not help.
+    With no `result` event to read, the time rule stands alone, as it does for a halt."""
+    if task.get("class") != contracts.HALT_NO_ENVELOPE or not died_quickly(task, config):
+        return False
+    event = result_event(log_text)
+    return event is None or event.get("api_error_status") == USAGE_LIMIT_STATUS
+
+
 def resolve_fallback(model, table, unavailable):
     """The first model along `model`'s fallback chain that is not in `unavailable`, or None
     when the chain ends or comes back on itself first. `model` itself is taken to be
@@ -375,10 +419,11 @@ def resolve_fallback(model, table, unavailable):
 
 def model_limit_moves(halted, models, config, exhausted):
     """The per model half of rule 3, and a heuristic like the whole cycle half. [(task, from,
-    to)] for every halted task whose model has a fallback and that died quickly: each is read
-    as its model's usage limit and moved.
+    to)] for every task whose model has a fallback and that died quickly: each is read as its
+    model's usage limit and moved. The tasks are the halted ones and the blocked ones
+    `blocked_by_usage_limit` already chose.
 
-    `models` is {id: model} for the halted tasks and `exhausted` the models already marked. A
+    `models` is {id: model} for those tasks and `exhausted` the models already marked. A
     model that died quickly this cycle is treated as exhausted too when it is looked at as a
     fallback, so two models that fall back to each other and both died never send their
     tasks back and forth; neither is moved, and the whole cycle rule decides."""
@@ -404,7 +449,7 @@ class Deps:
     replaces the few it cares about."""
     sleep: object
     now: object
-    run_cycle: object          # (manifest_path) -> the runner's exit code
+    run_cycle: object          # (manifest_path, retry_ids) -> the runner's exit code
     read_summary: object       # (manifest) -> the summary JSON as a dict, {} when none
     lease_held: object         # (manifest) -> True while a live runner holds this manifest
     build_adapter: object      # (manifest) -> a tracker adapter
@@ -436,8 +481,11 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
     feeder's own, which under `--detach` is the output file beside the manifest."""
     import time
 
-    def run_cycle(manifest_path):
+    def run_cycle(manifest_path, retry_ids=()):
         command = [sys.executable, "-u", runner_entry(), "run", manifest_path]
+        for task_id in retry_ids:
+            # One id per flag, never the bare flag, which would retry every blocked record.
+            command += ["--retry-blocked", task_id]
         if notify_on:
             command.append("--notify")
         if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
@@ -466,15 +514,20 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
 
 
 def new_state():
+    # `retry_blocked` is {id: the blocked record's started_at} for each blocked task the next
+    # run is to relaunch. The stamp is how a retry the run never reached is told from one that
+    # ran: every launch restamps it.
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
-            "reported": {}, "refused": {}, "exhausted": {}}
+            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}}
 
 
 class Feeder:
-    def __init__(self, paths, config, deps, env, out, dry_run=False, once=False):
+    def __init__(self, paths, config, deps, env, out, dry_run=False, once=False,
+                 retry_blocked=()):
         self.paths, self.config, self.deps = paths, config, deps
         self.env, self.out = env, out
         self.dry_run, self.once = dry_run, once
+        self.requested = tuple(retry_blocked)     # `feed --retry-blocked ID`, taken once
         self.name = os.path.basename(os.path.splitext(paths.manifest)[0])
         self.state = self._load_state()
 
@@ -587,8 +640,15 @@ class Feeder:
         listed = manifestedit.task_ids(text)
         excluded = manifestedit.excluded_ids(text)
         records = self._records(manifest)
+        if self.requested:
+            code = self.take_requests(listed, records)
+            if code is not None:
+                return code
+        retry_ids = self.pending_retries(listed, excluded, records)
+        # A blocked task queued for a retry holds room like any task the next run launches.
         unsettled = [task_id for task_id in listed if task_id not in excluded
-                     and records.get(task_id, {}).get("status") not in SETTLED]
+                     and (records.get(task_id, {}).get("status") not in SETTLED
+                          or task_id in retry_ids)]
         cards, readable = self.ready_cards(manifest)
         fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
                               len(unsettled))
@@ -622,7 +682,9 @@ class Feeder:
         self.state["cycles"] += 1
         self.save_state()
         cycle_ids = list(unsettled) + [entry["id"] for entry in appended]
-        code = deps.run_cycle(self.paths.manifest)
+        if retry_ids:
+            self.log("relaunching blocked %s with --retry-blocked" % retry_ids)
+        code = deps.run_cycle(self.paths.manifest, retry_ids)
         self.log("relay run exited %s" % code)
         if code == EXIT_LEASE:
             self.log("another runner holds the lease, waiting")
@@ -686,23 +748,40 @@ class Feeder:
             self.report_once("skipped:" + task["id"], "%s was skipped by the runner and will not "
                              "be built until the card is fixed: %s"
                              % (task["id"], task.get("skip_reason") or "no reason recorded"))
-        for task in by_status[STATUS_BLOCKED]:
-            self.report_once("blocked:" + task["id"], "%s blocked; a later run will not retry "
-                             "it without --retry-blocked" % task["id"])
+        self.prune_retries(after)
+        blocked = by_status[STATUS_BLOCKED]
+        limited = self.limit_blocked(blocked)
+        limited_ids = {task["id"] for task in limited}
+        for task in blocked:
+            # A limit death is reported below only if no fallback takes it; a task still queued
+            # is one this run never reached, and its report was made when it first blocked.
+            if task["id"] not in limited_ids and task["id"] not in self.state["retry_blocked"]:
+                self.report_blocked(task)
         if (data.get("run_status") == contracts.RUN_HALTED
                 and data.get("halt_class") in contracts.RUN_SCOPED_HALT_CLASSES):
             # The remote moved, the lease was lost, or the runner itself failed. None of that
             # is the task's doing, so counting it would exclude an innocent card on the next
             # cycle and then the card after it. The original script had this cascade.
+            for task in limited:
+                self.report_blocked(task)
             self.save_state()
             return self.stop(EXIT_CONFIG, "stopping: the run halted on %s with class %s, which "
                                           "puts something outside the task in question. No halt "
                                           "was counted. Read the summary."
                                           % (data.get("halt_task"), data.get("halt_class")))
-        moves = model_limit_moves(halted, self._models(halted), config, self.exhausted_models())
-        if looks_like_usage_limit(halted, landed, config) and len(moves) < len(halted):
+        dead = halted + limited
+        moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
+        halted_ids = {task["id"] for task in halted}
+        halted_moves = [move for move in moves if move[0]["id"] in halted_ids]
+        if looks_like_usage_limit(halted, landed, config) and len(halted_moves) < len(halted):
             # Some quick death has no fallback to take, so the whole cycle rule decides. When
-            # every one has, the moves below replace the wait.
+            # every one has, the moves below replace the wait. A blocked limit death waits with
+            # the halts and then relaunches where it was, as they do.
+            for task in limited:
+                self.queue_retry(task)
+            if limited:
+                self.log("%s blocked on a usage limit and will be retried after the wait with "
+                         "--retry-blocked" % sorted(limited_ids))
             if self.strike("limit_waits", config.limit_waits_max):
                 return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
                                               "usage limit. Read the summary."
@@ -712,7 +791,13 @@ class Feeder:
                                                            config.limit_wait_seconds))
             return self.wait(config.limit_wait_seconds)
         self.state["limit_waits"] = 0
-        moved = self.fall_back(moves)
+        moved = self.fall_back(moves, limited_ids)
+        for task in limited:
+            if task["id"] in moved:
+                self.queue_retry(task)
+            else:
+                # No fallback is free, so this is an ordinary blocked task again.
+                self.report_blocked(task)
         for task in halted:
             if task["id"] in moved:
                 continue
@@ -780,10 +865,12 @@ class Feeder:
         listed = manifestedit.task_models(self._read(self.paths.manifest))
         return {task["id"]: task.get("model") or listed.get(task["id"]) for task in tasks}
 
-    def fall_back(self, moves):
+    def fall_back(self, moves, blocked_ids=()):
         """Mark each model in `moves` exhausted and move its tasks to the fallback in the
         manifest. Returns the ids moved, whose halts are not counted. A task the manifest edit
-        refused stays where it is and its halt counts as any other."""
+        refused stays where it is and its halt counts as any other. `blocked_ids` are the moved
+        tasks that read blocked rather than halted, named apart because only a retry relaunches
+        them."""
         moved, by_source = set(), {}
         for task, source, target in moves:
             try:
@@ -805,10 +892,93 @@ class Feeder:
                        "exhausted for %dh and moved to %s; these halts are not counted"
                        % (", ".join(ids), self.config.quick_death_seconds, source, source,
                           source, self.config.fallback_hours, target))
+            retried = [task_id for task_id in ids if task_id in blocked_ids]
+            if retried:
+                message += ("; %s read blocked and relaunch with --retry-blocked"
+                            % ", ".join(retried))
             self.log(message)
             self.notify(message)
         self.save_state()
         return moved
+
+    # Blocked tasks and their retries (issue #39).
+    def limit_blocked(self, blocked):
+        """The blocked tasks this cycle that read as their model's usage limit, on a model with
+        a fallback, since without one the feeder has nowhere better to send them. A task still
+        queued for a retry is left out: the run never reached it, so its record is the old one
+        and was read when it was queued."""
+        if not self.config.model_fallback:
+            return []
+        fresh = [task for task in blocked if task["id"] not in self.state["retry_blocked"]]
+        models = self._models(fresh)
+        return [task for task in fresh
+                if models.get(task["id"]) in self.config.model_fallback
+                and blocked_by_usage_limit(task, self.config,
+                                           self._log_tail(task.get("log_path")))]
+
+    def report_blocked(self, task):
+        self.report_once("blocked:" + task["id"], "%s blocked; a later run will not retry it "
+                         "without --retry-blocked %s" % (task["id"], task["id"]))
+
+    def queue_retry(self, task):
+        self.state["retry_blocked"][task["id"]] = task.get("started_at")
+
+    def prune_retries(self, after):
+        """Drop each queued retry the run carried out: the record moved off blocked, or it was
+        launched again and so carries a new `started_at`. One the run never reached, because it
+        halted first, keeps its place for the next run."""
+        for task_id, stamp in list(self.state["retry_blocked"].items()):
+            record = after.get(task_id)
+            if (record is None or record.get("status") != STATUS_BLOCKED
+                    or record.get("started_at") != stamp):
+                del self.state["retry_blocked"][task_id]
+
+    def pending_retries(self, listed, excluded, records):
+        """The ids the next run is to pass as `--retry-blocked`, sorted. A queued id that is no
+        longer listed, is excluded, or no longer reads blocked has nothing to retry, and is
+        dropped here rather than carried for ever."""
+        queue = self.state["retry_blocked"]
+        keep = {task_id: stamp for task_id, stamp in queue.items()
+                if task_id in listed and task_id not in excluded
+                and records.get(task_id, {}).get("status") == STATUS_BLOCKED}
+        if keep != queue:
+            self.state["retry_blocked"] = keep
+            self.save_state()
+        return sorted(keep, key=natural_key)
+
+    def take_requests(self, listed, records):
+        """`feed --retry-blocked ID`: queue those blocked tasks and no others. An id the
+        manifest does not list stops the feeder, since a typo would otherwise retry nothing and
+        say nothing; one that is listed but not blocked is logged and passed over."""
+        requested, self.requested = self.requested, ()
+        unknown = [task_id for task_id in requested if task_id not in listed]
+        if unknown:
+            return self.stop(EXIT_CONFIG, "stopping: --retry-blocked names %s, not a task in "
+                                          "the manifest" % ", ".join(unknown))
+        for task_id in requested:
+            record = records.get(task_id, {})
+            if record.get("status") != STATUS_BLOCKED:
+                self.log("%s reads %s, not blocked; nothing to retry"
+                         % (task_id, record.get("status") or "no record"))
+                continue
+            self.queue_retry(record)
+            self.log("%s is queued for a retry at the operator's request" % task_id)
+        self.save_state()
+        return None
+
+    @staticmethod
+    def _log_tail(path):
+        """The end of a task's stdout log, or "" when there is none to read. The tail is
+        enough: the `result` event is the last line a finished process prints."""
+        if not path:
+            return ""
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - LOG_TAIL_BYTES))
+                return handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
 
     # The steps.
     def pre_cycle(self, manifest):

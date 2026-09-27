@@ -114,6 +114,9 @@ def _task_entry(store, record):
         "continued_past": bool(record.get("continued_past")),
         "wall_seconds": record.get("wall_seconds"),
         "active_seconds": record.get("active_seconds"),
+        # Issue #39. Restamped at every launch, so the feeder can tell a blocked task it asked
+        # to retry that ran again from one the run never reached.
+        "started_at": record.get("started_at"),
         "verify_failed": failed,
         # Round eight #54: beside `findings`, not as a Cause line. The empty findings list is
         # what gets misread on a backend that enforces nothing at launch, and an operator who
