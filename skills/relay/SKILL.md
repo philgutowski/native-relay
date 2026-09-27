@@ -558,12 +558,12 @@ marked exhausted for `fallback_hours` (5 by default), the task is moved to opus 
 and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
 mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
 where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
-One task is bounded too: each time it is moved or waited on as a limit death it is counted, a
-move never resets that count, and past `limit_waits_max` the feeder gives it up, reporting a
+One task is bounded too: every usage limit wait it dies into is counted against it, a move or a
+restart never resets that count, and past `limit_waits_max` the feeder gives it up, reporting a
 blocked one blocked and excluding a halted one with its reason. Without that, two models that
 fall back to each other would relaunch a task every half hour for ever, since the first mark
-expires during the waits and the move that follows resets the whole cycle count. A landing
-clears the task's count.
+expires during the waits and the move that follows resets the whole cycle count. A landing, an
+exit 2, or `--retry-blocked` for that task clears its count.
 
 A limit death is sometimes recorded `blocked` with class `no_envelope` rather than halted: the
 process printed only the CLI's limit message and exited in seconds. The fallback covers that too.

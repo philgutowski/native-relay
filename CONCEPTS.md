@@ -422,9 +422,9 @@ Cycle after a wait relaunches the dead Tasks first and appends fresh cards only 
 room they leave. A blocked limit death with no free fallback in a Cycle where something landed
 is neither: it stays blocked for a person, like any other blocked record.
 
-Each Task is bounded as well as each run of waits. The Feeder counts every time one Task is
-moved or waited on as a limit death, a move does not reset that count, and past the bound the
-Task is given up: reported blocked, or excluded when it halted. Two models that fall back to each
+Each Task is bounded as well as each run of waits. The Feeder counts every usage limit wait one
+Task dies into, a move does not reset that count, and past the bound the Task is given up:
+reported blocked, or excluded when it halted. Two models that fall back to each
 other would otherwise keep one quick dying Task alive for ever, because a mark expires during the
 waits and the move it frees resets the run of waits. A landing clears the count.
 

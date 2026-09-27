@@ -481,13 +481,15 @@ post_cycle_timeout_seconds = 3600
   relaunches on its own model with `--retry-blocked <id>`. In a cycle where something landed,
   one with no free fallback stays blocked. `feed <manifest>
   --retry-blocked <id>` queues one blocked task by hand the same way.
-- `limit_waits_max` bounds one task as well as the whole cycle wait. Every time a task is moved
-  to a fallback or waited on as a limit death, the state file counts it against that task, and
-  a move does not reset the count the way it resets the whole cycle one. Past `limit_waits_max`
-  the task is given up: a blocked one is reported blocked and not retried, a halted one is
-  excluded with its reason. Two models that fall back to each other need this, because the
-  first model's mark expires during the waits, a move becomes possible again, and the whole
-  cycle count never reaches its bound. A landing clears the count.
+- `limit_waits_max` bounds one task as well as the whole cycle wait. Every usage limit wait a
+  task dies into is counted against it in the state file, and neither a move nor a restart
+  resets that count the way they reset the waits in a row. Past `limit_waits_max` the task is
+  given up: a blocked one is reported blocked and not retried, a halted one is excluded with its
+  reason. Two models that fall back to each other need this, because the first model's mark
+  expires during the waits, a move becomes possible again, and the waits in a row never reach
+  their bound. Moves are not counted, since each one marks the model it leaves; counting them
+  would give a task up one wait before the exit 2 stop that asks for a person. A landing, an
+  exit 2, or `feed --retry-blocked` for that task clears its count.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart` reloads them on whatever tree the feeder already runs from; add `--pin` to also
   re-extract the current default branch commit into a fresh pinned tree and hand the feeder over
