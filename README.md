@@ -274,6 +274,10 @@ settled; 2 landed, 1 running, 5 todo; T-3 running 4m 12s; roughly 40m left`, whe
 move and once a minute in between. It is a new line each time rather than one that redraws, so it
 reads the same in a terminal, in a session's tool output, and in `runner.log`. It never notifies.
 
+Under a feeder the manifest holds only the current cycle, so the estimate on each of these lines
+reads `roughly 1h 2m left in this cycle`. It prices the cycle's cards, not the ready queue behind
+them.
+
 A board stays honest across a run. The task process moves a card to the in review status at its
 first step, and a Closeout for a blocked or halted task returns it to the status it read before
 the run, since nobody is on it any more. At the end of every run the runner audits every card
