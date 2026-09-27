@@ -407,7 +407,10 @@ it. The usage limit rule is a heuristic, a rule of thumb that is usually
 right, and not a detection: the Runner has no usage limit handling for it to lean on.
 The same rule runs per model when the sidecar names a fallback for one: a quick death on that
 model marks it exhausted for a while and moves its Task to the fallback, uncounted, even when
-Tasks on other models landed in the same Cycle.
+Tasks on other models landed in the same Cycle. A move is neither a wait nor a sign the limit
+has passed, so a Cycle whose quick deaths all moved, with nothing landed, leaves the count of
+waits where it was. A Task moved back and forth between two models that fall back to each other
+still runs the waits out.
 
 A limit death is not always a halt. A Task process that printed only the CLI's limit message
 and exited in seconds has no return envelope, so the Runner records it blocked, and a blocked

@@ -560,6 +560,76 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.state()["halts"], {})
         self.assertNotIn("blocked; a later run will not retry it", self.log_text())
 
+    def mutual_fallback_past_the_first_mark(self, death):
+        """Issue #54. One card on fable, two models that fall back to each other, and a task
+        that dies quickly on every run. Ninety minutes pass per run, so fable's mark, made at
+        the first run, has expired by the fifth, and a move is possible again."""
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+
+        def ninety_minutes_pass():
+            self.clock = self.clock + timedelta(minutes=90)
+        self.before_run = ninety_minutes_pass
+        self.plans = [{"1": death()} for _ in range(10)]
+        code = self.feed(feeder.Config(model_fallback={"fable": "opus", "opus": "fable"},
+                                       limit_waits_max=4))
+        # Moved to opus and waited on three times there. At the fifth run fable's mark is gone
+        # and the task moves back. That move used to reset the waits, so this went on for ever;
+        # now it leaves the count at three, and the second wait on fable runs it out.
+        self.assertEqual(code, 2)
+        self.assertEqual([ran["1"] for ran in self.ran_on],
+                         ["fable"] + ["opus"] * 4 + ["fable"] * 2)
+        self.assertEqual(self.sleeps, [1800] * 4)
+        self.assertIn("fable was marked exhausted at 2026-09-19T10:20:00, over 5h ago",
+                      self.log_text())
+        self.assertEqual(len(re.findall("reading that as (fable|opus)'s usage limit",
+                                        self.log_text())), 2)
+        self.assertIn("every task has died quickly for 4 waits, with only fallback moves between "
+                      "them. Not a usage limit, or one that outlasts the waits. Read the summary.",
+                      self.log_text())
+        self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertEqual(self.state()["halts"], {})
+
+    def test_under_mutual_fallback_a_blocked_quick_death_is_reported_after_the_bound(self):
+        # No envelope and no result line: the shape that may not be a limit at all.
+        self.mutual_fallback_past_the_first_mark(lambda: self.blocked(4, log=""))
+        self.assertEqual(self.retries, [[]] + [["1"]] * 6)
+        hits = [note for note in self.notes if "1 blocked; a later run will not retry it" in note]
+        self.assertEqual(len(hits), 1, self.notes)
+
+    def test_under_mutual_fallback_a_halted_quick_death_runs_out_the_waits(self):
+        self.mutual_fallback_past_the_first_mark(lambda: halted(8))
+        self.assertEqual(manifestedit.excluded_ids(self.text()), set())
+
+    def test_a_real_limit_that_clears_inside_the_waits_lands_and_resets_them(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)},
+                      {}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus", "opus": "fable"},
+                                limit_waits_max=4))
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "opus", "opus"])
+        self.assertEqual(self.sleeps, [1800, 1800])
+        self.assertEqual(self.records["1"]["status"], "landed")
+        self.assertEqual(self.state()["limit_waits"], 0)
+        self.assertNotIn("blocked; a later run will not retry it", self.log_text())
+
+    def test_a_cycle_whose_deaths_all_moved_leaves_the_waits_where_they_were(self):
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), limit_waits=3)))
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": halted(8)}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        self.assertEqual(self.models(), {"1": "opus"})
+        self.assertEqual(self.state()["limit_waits"], 3)
+        # A slow death beside it would have said the waits were not a usage limit.
+        os.remove(self.paths.stop)
+        self.write(self.paths.routing, "2 fable\n")
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.plans = [{"1": halted(5000), "2": halted(8)}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        self.assertEqual(self.state()["limit_waits"], 0)
+
     def test_a_blocked_death_with_no_free_fallback_holds_a_movable_halt_to_the_wait(self):
         # 1 halted on fable, whose fallback sonnet is free; 2 blocked on opus, whose fallback
         # haiku is marked and leads nowhere. Nothing landed and one death has nowhere to go, so

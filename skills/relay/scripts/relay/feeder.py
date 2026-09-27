@@ -46,6 +46,12 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     Without that it fell through to an ordinary blocked report, left its model unmarked, and
     the next cycle filled the batch with fresh cards on the dead model.
 
+    A cycle whose quick deaths all moved, with nothing landed, neither waits nor resets the
+    count of waits (issue #54); every other cycle that does not wait resets it. So two models
+    that fall back to each other still reach `limit_waits_max` and exit 2, with each blocked
+    limit death reported blocked. Before, the move that follows the first mark's expiry reset
+    the count, and a quick dying task was relaunched every half hour for ever with no report.
+
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes five
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
 file; its log; its events file; and its post cycle hook's output. The tracker is read only here
@@ -99,7 +105,8 @@ EXIT_HALTED = 2
 EXIT_LEASE = 3
 EXIT_INTERRUPTED = 130
 
-# The state counts that mean "this many times in a row", reset when a feeder starts.
+# The state counts that mean "this many times in a row", reset when a feeder starts. A cycle
+# whose quick deaths all moved to a fallback does not break the `limit_waits` row (issue #54).
 STREAKS = ("limit_waits", "idle_waits", "unreadable_waits")
 
 # A task in one of these statuses is one the next run will not launch, so it holds no room in
@@ -1158,7 +1165,8 @@ class Feeder:
                              "run_scoped_halt")
         dead = halted + limited
         moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
-        if looks_like_usage_limit(dead, landed, config) and len(moves) < len(dead):
+        quick = looks_like_usage_limit(dead, landed, config)
+        if quick and len(moves) < len(dead):
             # Some quick death, halted or a blocked limit death, has no fallback to take, so the
             # whole cycle rule decides (issue #45: a cycle of blocked deaths alone counts). When
             # every one has, the moves below replace the wait. A blocked limit death waits with
@@ -1169,9 +1177,10 @@ class Feeder:
                 for task in limited:
                     self.report_blocked(task)
                 self.save_state()
-                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
-                                              "usage limit, or one that outlasts the waits. "
-                                              "Read the summary." % config.limit_waits_max,
+                return self.stop(EXIT_HALTED, "every task has died quickly for %d waits, with "
+                                              "only fallback moves between them. Not a usage "
+                                              "limit, or one that outlasts the waits. Read the "
+                                              "summary." % config.limit_waits_max,
                                  "limit_waits_exhausted")
             for task in limited:
                 self.queue_retry(task)
@@ -1183,7 +1192,13 @@ class Feeder:
                      "limit, waiting %ds; these deaths are not counted"
                      % (config.quick_death_seconds, config.limit_wait_seconds))
             return Pending(config.limit_wait_seconds, "usage_limit")
-        self.state["limit_waits"] = 0
+        if not quick:
+            # A cycle that is not a usage limit cycle breaks the row: something landed, a death
+            # was not quick, or nothing died. The one it leaves alone is a cycle whose quick
+            # deaths all moved (issue #54). Resetting there let two models that fall back to
+            # each other dodge the bound for ever: the first mark expires during the waits, the
+            # task moves back, and the count began again.
+            self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)
         for task in limited:
             if task["id"] in moved:
