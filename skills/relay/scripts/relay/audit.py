@@ -13,11 +13,12 @@ It reads the adapter, the store, and git, takes no Lease, and writes nothing; th
 what `build` returned under its own Lease at run end, and the `audit` verb prints the same view
 without writing, because a reader beside a live run would race the Runner for the state file.
 
-Four disagreements, each a class from `contracts.AUDIT_CLASSES`, and every one is a report
-rather than a repair. The Runner never writes to a tracker, so the fix is the operator's, and
+Five disagreements, each a class from `contracts.AUDIT_CLASSES`, and every one is a report
+rather than a repair. The fifth (issue #43) is GitHub's alone: a landed record whose issue is
+closed while its project item sits in another column. The Runner never writes to a tracker, so the fix is the operator's, and
 each sentence says what to move and where.
 """
-from . import contracts, gitread, verify
+from . import adapters, contracts, gitread, verify
 
 
 def _same(a, b):
@@ -90,6 +91,10 @@ def build(manifest, store, adapter, env=None, live=False, records=None):
                 "stick. Check the card by hand."
                 % (task_id, (record.get("landing_ref") or "an unrecorded reference")[:12],
                    status), status, record_status))
+        elif record_status == contracts.STATUS_LANDED:
+            finding = _item_lag(adapter, task_id, status, record_status)
+            if finding:
+                findings.append(finding)
         elif terminal and record_status != contracts.STATUS_LANDED:
             if _landed_by_hand(repo, record, head, task_id):
                 continue
@@ -99,6 +104,28 @@ def build(manifest, store, adapter, env=None, live=False, records=None):
                 "Confirm the close was deliberate, or reopen the card."
                 % (task_id, status), status, record_status))
     return findings
+
+
+def _item_lag(adapter, task_id, status, record_status):
+    """Issue #43, the between runs half of `closeout.confirm_board_terminal`: a landed record on
+    a terminal card whose project item does not read the terminal status. GitHub answers terminal
+    from a closed issue alone, so `status` here is `CLOSED` and the item's column is invisible
+    without its own read. An adapter with one status per card has nothing to add."""
+    try:
+        lag, reason = adapters.board_lag(adapter, task_id)
+    except Exception as exc:
+        lag, reason = None, "the board read raised: %s" % exc
+    if reason:
+        return _finding(contracts.AUDIT_UNREADABLE, task_id,
+                        "%s's project item could not be read: %s" % (task_id, reason),
+                        None, record_status)
+    if not lag:
+        return None
+    return _finding(
+        contracts.AUDIT_ITEM_NOT_TERMINAL, task_id,
+        "%s landed and its card reads %s, but its project item reads %s. Move the item to `%s` "
+        "by hand." % (task_id, status, lag["card_status"], lag["terminal_status"]),
+        lag["card_status"], record_status)
 
 
 def _landed_by_hand(repo, record, head, task_id):

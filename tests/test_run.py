@@ -2551,9 +2551,32 @@ class _LeakOpener:
 
 
 class GitHubBoard(BoardReads, github_adapter.GitHubAdapter):
+    """GitHub keeps two truths per card (issue #43): `<id>.issue` holds the issue's state and
+    `<id>.status` its project item's status. A CLOSED issue is terminal on its own, the way the
+    real `status` reads it, so a Closeout that closes the issue and leaves the item is visible
+    only to the item read below."""
+
     def __init__(self, manifest, root):
         super().__init__(manifest, root,
                          run=lambda args, timeout=None: self._leak(" ".join(args)))
+
+    def _issue_state(self, task_id):
+        try:
+            with open(self._file(task_id, "issue")) as handle:
+                return handle.read().strip()
+        except FileNotFoundError:
+            return "OPEN"
+
+    def status(self, task_id):
+        if not self._unreadable(task_id) and self._issue_state(task_id) == "CLOSED":
+            return {"status": "CLOSED", "terminal": True, "reference": None, "skipped": None}
+        return super().status(task_id)
+
+    def _project_item(self, task_id):
+        if self._unreadable(task_id):
+            return False, None, "the board refused the read"
+        with open(self._file(task_id, "status")) as handle:
+            return True, handle.read().strip(), None
 
 
 class JiraBoard(BoardReads, jira_adapter.JiraAdapter):
@@ -2789,6 +2812,56 @@ project_number = 6
 status_field = "Done"
 done_statuses = ["Done"]
 in_review_status = "In review"
+"""
+
+    def closeout_closes_issue(self, move_item_to=None, task_id="T-1"):
+        script = CLOSEOUT_CLOSES_ISSUE_SH % (task_id, task_id)
+        if move_item_to:
+            script += CLOSEOUT_MOVES_SH % (move_item_to, task_id)
+        self.queue_entry("closeout_skipped.jsonl", script)
+
+    def test_a_closed_issue_with_its_item_left_in_review_lands_with_a_finding(self):
+        """Issue #43, the round 2 self run: the issue closed, the item stayed in review, and the
+        run reported every card as agreeing with its record."""
+        self.task_moves_card("success.jsonl")
+        self.closeout_closes_issue()
+        seen = self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.card(), self.IN_REVIEW)
+        mine = self.findings(contracts.BOARD_ITEM_NOT_TERMINAL)
+        self.assertEqual([(f["card_status"], f["terminal_status"]) for f in mine],
+                         [(self.IN_REVIEW, self.DONE)])
+        checks = summary_module.build(self.manifest, self.store())["pending_checks"]
+        mine = [check for check in checks if check["kind"] == "board_item_not_terminal"]
+        self.assertEqual(len(mine), 1, checks)
+        self.assertIn("move T-1 to Done by hand", mine[0]["text"])
+        self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
+                         [contracts.AUDIT_ITEM_NOT_TERMINAL])
+        self.assertIn("1 stale card(s)", seen[-1])
+
+    def test_a_closed_issue_whose_item_reached_the_terminal_status_carries_nothing(self):
+        self.task_moves_card("success.jsonl")
+        self.closeout_closes_issue(move_item_to=self.DONE)
+        self.go_board()
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL), [])
+        self.assertEqual(self.store().audit()["count"], 0)
+
+    def test_the_audit_between_runs_finds_an_item_moved_back_after_a_clean_landing(self):
+        self.task_moves_card("success.jsonl")
+        self.closeout_closes_issue(move_item_to=self.DONE)
+        self.go_board()
+        self.set_card("T-1", self.IN_REVIEW)
+        findings = audit.build(self.manifest, self.store(), self.adapter)
+        self.assertEqual([f["class"] for f in findings], [contracts.AUDIT_ITEM_NOT_TERMINAL])
+        self.assertIn("`Done`", findings[0]["text"])
+
+
+# Issue #43. Closes the issue and comments the landing, and leaves the project item alone.
+CLOSEOUT_CLOSES_ISSUE_SH = """set -e
+printf 'CLOSED' > "$RELAY_BOARD/%s.issue"
+echo "Landed at $(git rev-parse origin/main)" >> "$RELAY_BOARD/%s.comments"
 """
 
 

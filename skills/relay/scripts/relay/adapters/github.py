@@ -107,19 +107,42 @@ class GitHubAdapter:
     def _issue(self, task_id):
         return self._gh(["gh", "issue", "view", str(task_id), "--json", ISSUE_FIELDS])
 
+    def _project_item(self, task_id):
+        """Returns (on_board, status, reason). `on_board` separates an issue the declared project
+        does not carry from an item on it with no status set; both read as a None status."""
+        items, reason = self._items()
+        if reason:
+            return False, None, reason
+        for item in items:
+            content = item.get("content") or {}
+            if str(content.get("number")) == str(task_id):
+                return True, item.get("status"), None
+        return False, None, None
+
     def _project_status(self, task_id):
         """Returns (status, reason). The reason is what separates a board this adapter could not
         read from a board that genuinely does not carry the item: both used to come back as
         None, and None reads as `not terminal`, so an unreadable board looked exactly like a card
         that had not moved."""
-        items, reason = self._items()
+        _, status, reason = self._project_item(task_id)
+        return status, reason
+
+    def _board_lag(self, task_id):
+        """Issue #43. Returns (lag, reason): `lag` names the item's status and the terminal one
+        when the issue's item on the declared project reads anything but `status_field`.
+
+        `status()` stops at a closed issue and never reads the board, so a Closeout that closed
+        the issue and skipped or failed the item edit landed with the item still in review and
+        nothing reported. This is the read that notices. An issue the project does not carry has
+        no item to lag, and no `status_field` means no board column is declared terminal."""
+        if not self._status_field:
+            return None, None
+        on_board, status, reason = self._project_item(task_id)
         if reason:
             return None, reason
-        for item in items:
-            content = item.get("content") or {}
-            if str(content.get("number")) == str(task_id):
-                return item.get("status"), None
-        return None, None
+        if not on_board or (status and str(status).lower() == str(self._status_field).lower()):
+            return None, None
+        return {"card_status": status or "no status", "terminal_status": self._status_field}, None
 
     def _comments(self, task_id):
         payload, reason = self._issue(task_id)

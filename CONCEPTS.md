@@ -293,6 +293,12 @@ finding when it did not move; it never moves the card itself. No return is asked
 status before the run is unknown, when it was already the in review status, or when the record
 carries a landing reference, since that card was closed by a landing.
 
+On GitHub a landed card has two truths, the issue's state and its project item's status, and a
+closed issue is terminal on its own (issue #43). So after a landed Closeout the Runner also reads
+the project item when the manifest names a `status_field`, and attaches a
+`board_item_not_terminal` finding when the item is on the declared project and reads anything
+else. The card audit makes the same read between runs. Neither moves the item.
+
 Its ending is a contract: the final line of its last message says whether the Learning judgment
 wrote a learning or skipped one, and the Runner reads that line from the end of the message, not
 the start. A Closeout process that ends any other way is recorded as unfinished, which is a
