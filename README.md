@@ -136,7 +136,7 @@ turns that into a continuous run by growing the manifest between runs:
 ```
 
 ```bash
-python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run   # what would it append? writes nothing
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run   # would offer, would hold, or would skip each ready card; writes nothing
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --once      # one cycle, never waits
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
@@ -146,6 +146,16 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  #
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle; --json for data
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --follow    # new events as JSON lines until it leaves
 ```
+
+`--dry-run` previews the next cycle without appending anything: `would offer` for a card it would
+add, `would hold` for one routed to a model held back by a usage limit, and `would skip` for one
+the runner's own launch time scan would refuse. It reads only the ready source, so a card it
+offers is not a guarantee; the markdown adapter's ready read, for one, always returns an empty
+description, so a `.claude/` mention sitting in a comment there is invisible to the dry run and
+only trips the runner's scan at launch. The launch scan is the one that decides. Outside
+`--dry-run`, a scanned card the feeder leaves out of the batch is logged once, naming the card and
+the reason, and named again at every feeder start and again if it later trips the scan a second
+time.
 
 Three rules carry it. **Only ready cards are appended.** Ready is the tracker's own account that
 a card can start now: open issues carrying every configured label on GitHub, the cards a
@@ -352,6 +362,13 @@ the mean of the tasks that have already landed. It says it has no estimate rathe
 when nothing has landed yet. Like `tail` it takes no lease, and plain `status` reads state only,
 running no command and reading no tracker, so it is safe to poll against a live run. `--queue` is
 the one form that reaches outside the state directory, as above.
+
+Every launched task's record also carries a snapshot of the host, load average, free and inactive
+memory, memory held by the macOS compressor, and cumulative swap counters, read just before the
+Task process starts and just after it exits. `summary` prints them as one `host:` line under the
+timing, with swap shown as the difference between the two reads. Read that line before blaming a
+slow task on the card: rising load, vanishing free and inactive memory, a compressor that grew by
+gigabytes, or thousands of swapouts mean the host was starved instead.
 
 `tail` is how you watch a run that is already going. It follows each task's output in order and
 prints it decoded, one line per event, instead of the stream json that lands in `runner.log`. It

@@ -503,7 +503,9 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
                     "Do not close the issue. Move its project item back to `%s`, the status it "
                     "read before this run, for owner `%s` and project number `%s`, since no "
                     "process is working on it now. %s Use `gh project item-edit` with the board's "
-                    "Status field"
+                    "Status field when the issue has an item on that project. If it has none, "
+                    "leave the board alone and say so in the comment instead of trying to add "
+                    "the issue to the project"
                     % (return_to, self._owner, self._project_number, ids))
         if outcome == OUTCOME_HALTED:
             return ("Add one comment naming the halt class and the cause line below with `gh issue "
