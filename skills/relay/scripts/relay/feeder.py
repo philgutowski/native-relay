@@ -46,10 +46,18 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     Without that it fell through to an ordinary blocked report, left its model unmarked, and
     the next cycle filled the batch with fresh cards on the dead model.
 
-The feeder never merges, pushes, moves a card, or edits the target repository. It writes three
+The feeder never merges, pushes, moves a card, or edits the target repository. It writes four
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
-file; and its log. The tracker is read only here too, so the invariant that the runner never
-writes to a tracker on a normal manifest holds for the feeder as well.
+file; its log; and its events file. The tracker is read only here too, so the invariant that
+the runner never writes to a tracker on a normal manifest holds for the feeder as well.
+
+A feeder answers for itself (issue #36). The state file carries a `process` record, its pid,
+host, start, runner tree, and current cycle, stamped with the exit and the reason when it
+leaves, and `liveness` checks that pid against this manifest's own lock file, so no watcher has
+to guess from a process listing that cannot tell two manifests apart. The events file,
+`<stem>.feeder.events.jsonl`, holds one JSON object per line for each start, cycle, result,
+wait, and leave, every one naming its manifest and pid, and `feed --follow` streams it. The log
+stays the human account; nothing reads its sentences.
 
 Everything project specific is data in the sidecar file, `<manifest stem>.feeder.toml`. It is a
 sidecar and not a manifest table because the feeder rewrites the manifest while older pinned
@@ -59,16 +67,20 @@ to refuse it.
 Every outside effect is reached through `Deps`, a record of callables, so the suite drives the
 whole loop with a fake runner and a sleep that does not sleep.
 """
+import errno
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import (adapters, contracts, gitread, manifest as manifest_module, manifestedit,
                run as run_module, state as state_module, summary as summary_module)
@@ -105,6 +117,23 @@ MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
 USAGE_LIMIT_STATUS = 429
 LOG_TAIL_BYTES = 64 * 1024        # the terminal `result` line is the log's last
 
+# The events file's `event` words (issue #36). A watcher keys on these, so they are a contract:
+# add one if a new kind of moment needs it, never rename one.
+EVENT_STARTED = "started"
+EVENT_CYCLE_STARTED = "cycle_started"
+EVENT_CYCLE_RESULT = "cycle_result"
+EVENT_WAITING = "waiting"
+EVENT_LEAVING = "leaving"
+# Written by `feed --follow`, never by a feeder: the follower's own line for a feeder it found
+# gone without a `leaving` event, killed or never started.
+EVENT_NOT_RUNNING = "not_running"
+FOLLOW_POLL_SECONDS = 2
+FOLLOW_GRACE_POLLS = 5            # how long a follower waits for a feeder that is starting
+# The stop file's content when a restart is waiting to take over, and the leaving reason then.
+RESTART_WORD = "restart"
+LOCK_ATTEMPTS = 3
+LOCK_RETRY_SECONDS = 0.05
+
 
 class ConfigError(ValueError):
     """The sidecar file is wrong. Every problem found is in the message."""
@@ -123,6 +152,7 @@ class Paths:
     log: str
     lock: str
     out: str
+    events: str
 
 
 def paths_for(manifest_path):
@@ -131,7 +161,7 @@ def paths_for(manifest_path):
     return Paths(manifest=manifest_path, config=stem + ".feeder.toml", stop=stem + ".feeder.stop",
                  state=stem + ".feeder.state.json", order=stem + ".order",
                  routing=stem + ".models", log=stem + ".feeder.log", lock=stem + ".feeder.lock",
-                 out=stem + ".feeder.out")
+                 out=stem + ".feeder.out", events=stem + ".feeder.events.jsonl")
 
 
 @dataclass(frozen=True)
@@ -542,7 +572,6 @@ def pin_extract(tree, home, run=subprocess.run):
 def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_stdout=None):
     """The real effects. `child_stdout` is where each run's output goes; None inherits the
     feeder's own, which under `--detach` is the output file beside the manifest."""
-    import time
 
     def run_cycle(manifest_path, retry_ids=()):
         # A frozenset, so the ids stay named: never the bare flag, which retries every one.
@@ -592,6 +621,12 @@ class Feeder:
         self.requested = tuple(retry_blocked)     # `feed --retry-blocked ID`, taken once
         self.name = os.path.basename(os.path.splitext(paths.manifest)[0])
         self.state = self._load_state()
+        self.pid = os.getpid()
+        # (reason word, sentence) for the `leaving` event, set where the feeder decides to go.
+        self.leave_reason = None
+        # False until `run` has read the state file under the lock. A state file that could
+        # not be read then holds the halt counts, so nothing may save over it.
+        self.recording = False
 
     # Reporting.
     def log(self, message):
@@ -607,6 +642,29 @@ class Feeder:
         if self.deps.notifier is not None and not self.dry_run:
             self.deps.notifier("feeder %s: %s" % (self.name, message))
 
+    def emit(self, event, **fields):
+        """Append one JSON line to the events file and keep it in the state file too, as the
+        last event and, for a cycle, the last cycle, so `feed --status` reads one file. Every
+        line names its manifest and pid, so a stream of two feeders' lines cannot be misread."""
+        if self.dry_run:
+            return
+        record = dict(fields, at=self.deps.now().isoformat(timespec="seconds"), event=event,
+                      manifest=self.paths.manifest, pid=self.pid, cycle=self.state["cycles"])
+        try:
+            with open(self.paths.events, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as exc:
+            # The events are for watchers. A feeder that stopped feeding over one would be the
+            # outcome they exist to catch, so the loop goes on and the log says what was lost.
+            self.log("the events file could not be written, %s lost: %s" % (event, exc))
+        self.state["last_event"] = record
+        if event == EVENT_CYCLE_STARTED:
+            self.state["last_cycle"] = {"started": record, "result": None}
+        elif event == EVENT_CYCLE_RESULT and self.state.get("last_cycle"):
+            self.state["last_cycle"]["result"] = record
+        if self.recording:
+            self.save_state()
+
     def report_once(self, key, message):
         """Log and notify something that stays true across cycles, a skipped card above all,
         the first time only. Without this a skip would notify every ninety minutes for a day."""
@@ -619,13 +677,10 @@ class Feeder:
     # State.
     def _load_state(self):
         loaded = new_state()
-        if os.path.exists(self.paths.state):
-            try:
-                with open(self.paths.state, encoding="utf-8") as handle:
-                    loaded.update(json.load(handle))
-            except (OSError, ValueError) as exc:
-                raise ConfigError("%s could not be read: %s. It holds the halt counts, so fix "
-                                  "or remove it by hand." % (self.paths.state, exc))
+        try:
+            loaded.update(read_state(self.paths))
+        except ConfigError as exc:
+            raise ConfigError("%s. It holds the halt counts, so fix or remove it by hand." % exc)
         return loaded
 
     def save_state(self):
@@ -646,36 +701,71 @@ class Feeder:
             # retries would be overwritten by that copy at the first save below.
             self.state = self._load_state()
         except ConfigError as exc:
-            return self.stop(EXIT_CONFIG, "stopping: %s" % exc)
+            return self.leave(self.stop(EXIT_CONFIG, "stopping: %s" % exc, "state_unreadable"))
+        self.recording = True
         if not self.once:
             # The "in a row" counts belong to one feeder's life. A stop, a restart, or an
             # interrupt would otherwise hand a partial count to the next feeder. `--once` keeps
             # them, since a feeder driven a cycle at a time by cron has no other life.
             for key in STREAKS:
                 self.state[key] = 0
-            self.save_state()
+        # Written while the lock is held, so the pid here is the lock holder's (issue #36).
+        self.state["process"] = {
+            "pid": self.pid, "hostname": socket.gethostname(),
+            "started_at": self.deps.now().isoformat(timespec="seconds"),
+            "manifest": self.paths.manifest, "runner": runner_entry(),
+            "runner_tree": runner_tree(), "once": self.once, "cycle": self.state["cycles"]}
+        self.emit(EVENT_STARTED, runner_tree=runner_tree(), once=self.once)
         try:
             while True:
                 code = self.cycle()
                 if code is not None:
-                    return code
+                    return self.leave(code)
         except KeyboardInterrupt:
             self.log("interrupted")
-            return EXIT_INTERRUPTED
+            self.leave_reason = ("interrupted", "interrupted")
+            return self.leave(EXIT_INTERRUPTED)
         except Exception as exc:
             # A feeder that dies silently is the worst outcome: say so, then let it raise.
-            self.log("feeder crashed: %s: %s" % (type(exc).__name__, exc))
+            message = "feeder crashed: %s: %s" % (type(exc).__name__, exc)
+            self.log(message)
             self.notify("crashed: %s" % type(exc).__name__)
+            self.leave_reason = ("crashed", message)
+            try:
+                self.leave(None)
+            except Exception:
+                # The crash is often a disk that refuses writes, and recording it would then
+                # raise over the exception that says so.
+                pass
             raise
 
-    def wait(self, seconds):
-        """Sleep and go round again, or under --once leave without sleeping."""
+    def leave(self, code):
+        """Stamp the process record and write the `leaving` event. `code` is None only for a
+        crash, which leaves by raising."""
+        reason, message = self.leave_reason or ("once", "left after one cycle")
+        process = self.state.get("process")
+        if process and process.get("pid") == self.pid:
+            process.update(left_at=self.deps.now().isoformat(timespec="seconds"),
+                           exit_code=code, left_reason=reason, left_message=message)
+        self.emit(EVENT_LEAVING, exit_code=code, reason=reason, message=message)
+        return code
+
+    def wait(self, seconds, reason):
+        """Sleep and go round again, or under --once leave without sleeping. `reason` is the
+        word the `waiting` event carries: lease_held, usage_limit, unreadable_source, idle."""
         if self.once:
+            self.leave_reason = ("once", "left after one cycle instead of waiting (%s)" % reason)
             return EXIT_OK
+        until = self.deps.now() + timedelta(seconds=seconds)
+        self.emit(EVENT_WAITING, reason=reason, seconds=seconds,
+                  until=until.isoformat(timespec="seconds"))
         self.deps.sleep(seconds)
         return None
 
-    def stop(self, code, message):
+    def stop(self, code, message, reason):
+        """Leave with `code`. `reason` is the word the `leaving` event and the process record
+        carry, so a watcher never has to parse `message`."""
+        self.leave_reason = (reason, message)
         self.log(message)
         self.notify(message)
         return code
@@ -692,19 +782,24 @@ class Feeder:
         """One pass. Returns an exit code to leave with, or None to go round again."""
         config, deps = self.config, self.deps
         if os.path.exists(self.paths.stop):
-            return self.stop(EXIT_OK, "stop file present, leaving")
+            if RESTART_WORD in self._read(self.paths.stop).split():
+                return self.stop(EXIT_OK, "stop file present, a restart is taking over, leaving",
+                                 RESTART_WORD)
+            return self.stop(EXIT_OK, "stop file present, leaving", "stop_file")
         try:
             manifest = manifest_module.load(self.paths.manifest, allow_no_tasks=True)
         except manifest_module.ManifestError as exc:
-            return self.stop(EXIT_CONFIG, "stopping: %s" % exc)
-        problem = ready_source_problem(manifest, config) or checkout_problem(manifest)
-        if problem:
-            return self.stop(EXIT_CONFIG, "stopping: %s. Relay owns the default branch while it "
-                                          "runs, so this is a person's to look at." % problem)
+            return self.stop(EXIT_CONFIG, "stopping: %s" % exc, "manifest_error")
+        for reason, problem in (("ready_source", ready_source_problem(manifest, config)),
+                                ("checkout", checkout_problem(manifest))):
+            if problem:
+                return self.stop(EXIT_CONFIG, "stopping: %s. Relay owns the default branch while "
+                                              "it runs, so this is a person's to look at."
+                                 % problem, reason)
         if not self.dry_run and deps.lease_held(manifest):
             # The manifest is about to be rewritten, and a live runner read it at its start.
             self.log("a runner holds the lease on this manifest, not appending, waiting")
-            return self.wait(config.lease_wait_seconds)
+            return self.wait(config.lease_wait_seconds, "lease_held")
         if not self.dry_run:
             self.pre_cycle(manifest)
 
@@ -752,19 +847,30 @@ class Feeder:
             return self.idle(readable, [card["id"] for card in fresh])
 
         self.state["cycles"] += 1
-        self.save_state()
+        self.state.get("process", {})["cycle"] = self.state["cycles"]
         cycle_ids = list(unsettled) + [entry["id"] for entry in appended]
+        self.emit(EVENT_CYCLE_STARTED, appended=[entry["id"] for entry in appended],
+                  tasks=cycle_ids, retry_blocked=list(retry_ids))
         if retry_ids:
             self.log("relaunching blocked %s with --retry-blocked" % retry_ids)
         code = deps.run_cycle(self.paths.manifest, retry_ids)
         self.log("relay run exited %s" % code)
         if code == EXIT_LEASE:
+            self.emit_result(code)
             self.log("another runner holds the lease, waiting")
-            return self.wait(config.lease_wait_seconds)
+            return self.wait(config.lease_wait_seconds, "lease_held")
         if code == EXIT_CONFIG:
+            self.emit_result(code)
             return self.stop(EXIT_CONFIG, "relay refused the manifest or the environment. Run "
-                                          "validate and read its output.")
-        return self.settle(manifest, cycle_ids)
+                                          "validate and read its output.", "run_refused")
+        return self.settle(manifest, cycle_ids, code)
+
+    def emit_result(self, code, by_status=None):
+        """The `cycle_result` event: the run's exit code and this cycle's ids by status."""
+        by_status = by_status or {}
+        self.emit(EVENT_CYCLE_RESULT, run_exit=code, **{
+            status: sorted((task["id"] for task in by_status.get(status, ())), key=natural_key)
+            for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED)})
 
     def idle(self, readable, fresh_ids):
         """Nothing was appended and no listed task is left to run, while no runner holds the
@@ -784,32 +890,35 @@ class Feeder:
             if self.strike("unreadable_waits", UNREADABLE_WAITS_MAX):
                 return self.stop(EXIT_CONFIG, "stopping: the ready source could not be read for "
                                               "%d cycles in a row and nothing is left to run. "
-                                              "Read the log." % (UNREADABLE_WAITS_MAX + 1))
+                                              "Read the log." % (UNREADABLE_WAITS_MAX + 1),
+                                 "unreadable_source")
             self.log("the ready source could not be read and nothing is left to run, waiting")
-            return self.wait(config.idle_wait_seconds)
+            return self.wait(config.idle_wait_seconds, "unreadable_source")
         self.state["unreadable_waits"] = 0
         if fresh_ids:
             return self.stop(EXIT_CONFIG, "stopping: every ready card was refused with the model "
                                           "it is routed to, and nothing is left to run: %s. "
                                           "Change the routing and start the feeder again."
-                                          % ", ".join(fresh_ids))
+                                          % ", ".join(fresh_ids), "all_refused")
         if self.strike("idle_waits", config.idle_waits_max):
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
-                                      "is nothing left.")
+                                      "is nothing left.", "empty_queue")
         self.log("nothing ready and nothing unsettled, waiting (%d of %d)"
                  % (self.state["idle_waits"], config.idle_waits_max))
-        return self.wait(config.idle_wait_seconds)
+        return self.wait(config.idle_wait_seconds, "idle")
 
-    def settle(self, manifest, cycle_ids):
-        """Read what the run did to this cycle's tasks and apply rules 2 and 3."""
+    def settle(self, manifest, cycle_ids, code=None):
+        """Read what the run did to this cycle's tasks and apply rules 2 and 3. `code` is the
+        run's exit code, for the `cycle_result` event."""
         config = self.config
         data = self.deps.read_summary(manifest)
         after = {task["id"]: task for task in data.get("tasks", [])}
         mine = [after[task_id] for task_id in cycle_ids if task_id in after]
         by_status = {status: [task for task in mine if task.get("status") == status]
                      for status in (STATUS_HALTED, STATUS_LANDED, STATUS_BLOCKED, STATUS_SKIPPED)}
+        self.emit_result(code, by_status)
         halted, landed = by_status[STATUS_HALTED], by_status[STATUS_LANDED]
         self.log("cycle result: landed %s, halted %s, blocked %s, skipped %s" % tuple(
             sorted(task["id"] for task in by_status[status])
@@ -846,7 +955,8 @@ class Feeder:
             return self.stop(EXIT_CONFIG, "stopping: the run halted on %s with class %s, which "
                                           "puts something outside the task in question. No halt "
                                           "was counted. Read the summary."
-                                          % (data.get("halt_task"), data.get("halt_class")))
+                                          % (data.get("halt_task"), data.get("halt_class")),
+                             "run_scoped_halt")
         dead = halted + limited
         moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
         if looks_like_usage_limit(dead, landed, config) and len(moves) < len(dead):
@@ -862,7 +972,8 @@ class Feeder:
                 self.save_state()
                 return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
                                               "usage limit, or one that outlasts the waits. "
-                                              "Read the summary." % config.limit_waits_max)
+                                              "Read the summary." % config.limit_waits_max,
+                                 "limit_waits_exhausted")
             for task in limited:
                 self.queue_retry(task)
             if limited:
@@ -872,7 +983,7 @@ class Feeder:
             self.log("every task that died this cycle died inside %ds, reading that as a usage "
                      "limit, waiting %ds; these deaths are not counted"
                      % (config.quick_death_seconds, config.limit_wait_seconds))
-            return self.wait(config.limit_wait_seconds)
+            return self.wait(config.limit_wait_seconds, "usage_limit")
         self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)
         for task in limited:
@@ -899,7 +1010,8 @@ class Feeder:
                 # Rule 2 cannot be kept, and without it this task relaunches on every cycle.
                 self.save_state()
                 return self.stop(EXIT_CONFIG, "stopping: %s halted %d times and could not be "
-                                              "excluded: %s" % (task["id"], count, exc))
+                                              "excluded: %s" % (task["id"], count, exc),
+                                 "exclusion_failed")
             self.log("%s %s" % (task["id"], reason))
             self.notify("%s excluded after %d halts, %s" % (task["id"], count, task.get("class")))
         self.save_state()
@@ -1046,7 +1158,7 @@ class Feeder:
         unknown = [task_id for task_id in requested if task_id not in listed]
         if unknown:
             return self.stop(EXIT_CONFIG, "stopping: --retry-blocked names %s, not a task in "
-                                          "the manifest" % ", ".join(unknown))
+                                          "the manifest" % ", ".join(unknown), "retry_unknown")
         for task_id in requested:
             record = records.get(task_id, {})
             if task_id in excluded:
@@ -1184,22 +1296,267 @@ def checkout_problem(manifest):
 
 # The lock and the restart path.
 
-def acquire_lock(paths):
+def acquire_lock(paths, sleep=None):
     """An exclusive lock on the feeder's lock file, held for the life of the process, or None
     when another feeder holds it. `flock` is released by the operating system when the holder
-    exits however it exits, so there is no stale lock to clean up and no process to look for."""
+    exits however it exits, so there is no stale lock to clean up and no process to look for.
+
+    A refusal is tried again a moment later, `LOCK_ATTEMPTS` times in all, because a watcher's
+    `lock_held` probe holds a shared lock for a few system calls, and a feeder that met one would
+    otherwise exit 3 as if another feeder held the manifest."""
     handle = open(paths.lock, "a+")
+    for attempt in range(LOCK_ATTEMPTS):
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError as exc:
+            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN) or attempt + 1 == LOCK_ATTEMPTS:
+                break
+        (sleep or time.sleep)(LOCK_RETRY_SECONDS)
+    handle.close()
+    return None
+
+
+def request_stop(paths, word=""):
+    """Drop the stop file. `word` is written into it: `restart` when a new feeder is waiting to
+    take over, so the leaving feeder says handover rather than stop (issue #36)."""
+    with open(paths.stop, "a", encoding="utf-8") as handle:
+        if word:
+            handle.write(word + "\n")
+
+
+# Liveness and the watcher's commands (issue #36). A process listing matched on `relay_cli.py
+# feed` cannot tell one manifest's feeder from another's; the lock file can, since each manifest
+# has its own and only a live feeder holds it.
+
+def lock_held(paths):
+    """True when some process holds this manifest's feeder lock. The file is never created here.
+
+    The probe takes a shared lock and drops it at once when nobody holds the exclusive one. A
+    feeder starting in that same instant is why `acquire_lock` tries more than once."""
+    if not os.path.exists(paths.lock):
+        return False
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle = open(paths.lock, "r")
     except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            return exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN)
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return False
+    finally:
         handle.close()
-        return None
-    return handle
 
 
-def request_stop(paths):
-    with open(paths.stop, "a", encoding="utf-8"):
+def pid_alive(pid):
+    """True when a process with this pid exists on this host, whoever it belongs to."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def read_state(paths):
+    """The feeder's state file as a dict, {} when there is none. Raises ConfigError when it
+    exists and cannot be read. The feeder's own load goes through here too, so a watcher and a
+    feeder never disagree about whether the file is readable."""
+    if not os.path.exists(paths.state):
+        return {}
+    try:
+        with open(paths.state, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ConfigError("%s could not be read: %s" % (paths.state, exc))
+    if not isinstance(loaded, dict):
+        raise ConfigError("%s is not a JSON object" % paths.state)
+    return loaded
+
+
+def liveness(paths, state, hostname=None):
+    """{"running": True or False, "pid": ..., "detail": sentence} for this manifest's feeder.
+
+    The lock decides. Each manifest has its own lock file and only a live feeder holds it, so
+    another board's feeder, a recycled pid, or a laptop whose hostname changed with its network
+    can never turn the answer. The record says which process holds it: its pid, checked when it
+    was recorded on this host, since a pid means nothing on another."""
+    process = state.get("process") or {}
+    pid = process.get("pid")
+    recorded_here = process.get("hostname") == (hostname or socket.gethostname())
+    if lock_held(paths):
+        if process and not process.get("left_at") and (pid_alive(pid) or not recorded_here):
+            where = "" if recorded_here else " (recorded on host %s)" % process.get("hostname")
+            return {"running": True, "pid": pid,
+                    "detail": "pid %s%s holds %s" % (pid, where, paths.lock)}
+        # Held by a feeder that has not recorded itself: one started from a runner older than
+        # the process record, or one in the moment between its lock and its record.
+        return {"running": True, "pid": None,
+                "detail": "a feeder holds %s but has recorded no pid; a runner older than the "
+                          "process record, or one that is starting" % paths.lock}
+    if not process:
+        return {"running": False, "pid": None,
+                "detail": "no feeder has recorded itself for this manifest"}
+    if process.get("left_at"):
+        return {"running": False, "pid": pid,
+                "detail": "pid %s left at %s with exit %s (%s): %s"
+                          % (pid, process["left_at"], process.get("exit_code"),
+                             process.get("left_reason"), process.get("left_message"))}
+    if recorded_here and pid_alive(pid):
+        return {"running": False, "pid": pid,
+                "detail": "pid %s exists but does not hold %s, so it is another process; the "
+                          "feeder left without recording why" % (pid, paths.lock)}
+    return {"running": False, "pid": pid,
+            "detail": "pid %s holds no lock and recorded no leaving: killed, or the machine "
+                      "went down" % pid}
+
+
+def status_report(paths, hostname=None):
+    """What `feed --status --json` prints: the liveness answer beside what the state file holds
+    about the feeder, its last cycle, and its last event. Raises ConfigError on an unreadable
+    state file."""
+    state = read_state(paths)
+    report = {"manifest": paths.manifest, "state_path": paths.state, "events_path": paths.events,
+              "process": state.get("process"), "cycles": state.get("cycles", 0),
+              "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event")}
+    report.update(liveness(paths, state, hostname=hostname))
+    return report
+
+
+def _ids(values):
+    return "[%s]" % ", ".join(str(value) for value in values or ())
+
+
+def feeder_line(report):
+    """One line: whether this manifest's feeder is running, and why the answer is what it is."""
+    line = "feeder: %s, %s" % ("running" if report["running"] else "not running",
+                               report["detail"])
+    process = report.get("process") or {}
+    if report["running"] and process.get("pid") == report.get("pid"):
+        line += ", since %s, cycle %s" % (process.get("started_at"), process.get("cycle"))
+    return line
+
+
+def status_lines(report):
+    """`feed --status` for a person: the feeder line, then the last cycle and the last event."""
+    lines = [feeder_line(report), "manifest: %s" % report["manifest"]]
+    process = report.get("process") or {}
+    if process.get("runner_tree"):
+        lines.append("runner tree: %s" % process["runner_tree"])
+    cycle = report.get("last_cycle") or {}
+    started, result = cycle.get("started"), cycle.get("result")
+    if started:
+        line = "last cycle: %s started %s, appended %s, tasks %s" % (
+            started.get("cycle"), started.get("at"), _ids(started.get("appended")),
+            _ids(started.get("tasks")))
+        if result:
+            line += "; relay run exited %s at %s: landed %s, halted %s, blocked %s, skipped %s" % (
+                result.get("run_exit"), result.get("at"), _ids(result.get(STATUS_LANDED)),
+                _ids(result.get(STATUS_HALTED)), _ids(result.get(STATUS_BLOCKED)),
+                _ids(result.get(STATUS_SKIPPED)))
+        else:
+            line += "; no result yet"
+        lines.append(line)
+    else:
+        lines.append("last cycle: none recorded")
+    event = report.get("last_event")
+    if event:
+        detail = ""
+        if event.get("event") == EVENT_WAITING:
+            detail = " %s for %ss, until %s" % (event.get("reason"), event.get("seconds"),
+                                                event.get("until"))
+        elif event.get("event") == EVENT_LEAVING:
+            detail = " exit %s (%s)" % (event.get("exit_code"), event.get("reason"))
+        lines.append("last event: %s at %s%s" % (event.get("event"), event.get("at"), detail))
+    lines.append("events: %s" % report["events_path"])
+    lines.append("state: %s" % report["state_path"])
+    return lines
+
+
+def read_events(paths, offset=0):
+    """(complete lines from `offset`, the offset after the last complete line). A line still
+    being written has no newline yet and is left for the next read. A file shorter than
+    `offset` was replaced, and is read again from its start."""
+    try:
+        with open(paths.events, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() < offset:
+                offset = 0
+            handle.seek(offset)
+            chunk = handle.read()
+    except FileNotFoundError:
+        return [], 0
+    end = chunk.rfind(b"\n") + 1
+    text = chunk[:end].decode("utf-8", errors="replace")
+    return [line for line in text.splitlines() if line.strip()], offset + end
+
+
+def end_offset(paths):
+    """The offset just past the events file's last complete line, found from the end so a
+    follower starting over weeks of events reads a block, not the file."""
+    try:
+        with open(paths.events, "rb") as handle:
+            position = handle.seek(0, os.SEEK_END)
+            while position > 0:
+                start = max(0, position - LOG_TAIL_BYTES)
+                handle.seek(start)
+                newline = handle.read(position - start).rfind(b"\n")
+                if newline >= 0:
+                    return start + newline + 1
+                position = start
+    except FileNotFoundError:
         pass
+    return 0
+
+
+def follow_events(paths, write, sleep, now=datetime.now, hostname=None,
+                  poll_seconds=FOLLOW_POLL_SECONDS, grace_polls=FOLLOW_GRACE_POLLS):
+    """`feed --follow`: write each event appended from now on, one JSON line each, until the
+    feeder leaves. A `leaving` event ends it, except one whose reason is a restart: the new
+    feeder's lines follow, so the follow goes on and allows the restart's poll time for them.
+    A feeder found not running for `grace_polls` polls in a row with nothing new ends it too,
+    which is how a killed feeder, or none at all, ends a follow; that ending is one
+    `not_running` line of the follower's own, so a watcher reading JSON lines sees why the
+    stream stopped."""
+    offset = end_offset(paths)
+    missed, allowance = 0, grace_polls
+    while True:
+        lines, offset = read_events(paths, offset)
+        for line in lines:
+            write(line)
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("event") != EVENT_LEAVING:
+                allowance = grace_polls
+            elif event.get("reason") == RESTART_WORD:
+                allowance = grace_polls + math.ceil(2 * RESTART_POLL_SECONDS / poll_seconds)
+            else:
+                return
+        if lines:
+            missed = 0
+        else:
+            try:
+                answer = liveness(paths, read_state(paths), hostname=hostname)
+            except ConfigError as exc:
+                answer = {"running": False, "pid": None, "detail": str(exc)}
+            missed = 0 if answer["running"] else missed + 1
+            if missed >= allowance:
+                write(json.dumps({"at": now().isoformat(timespec="seconds"),
+                                  "event": EVENT_NOT_RUNNING, "manifest": paths.manifest,
+                                  "pid": answer.get("pid"), "detail": answer["detail"]},
+                                 sort_keys=True))
+                return
+        sleep(poll_seconds)
 
 
 def wait_for_lock(paths, sleep, log, polls_max=RESTART_POLLS_MAX):
@@ -1207,7 +1564,7 @@ def wait_for_lock(paths, sleep, log, polls_max=RESTART_POLLS_MAX):
     Nothing is killed, so the task that is running finishes and merges normally. It exists
     because editing a sidecar, or cutting a new runner, does nothing to a process already
     running: that process holds the settings and the code it loaded when it started."""
-    request_stop(paths)
+    request_stop(paths, RESTART_WORD)
     log("restart requested, waiting for the running feeder to leave")
     for _ in range(polls_max):
         handle = acquire_lock(paths)

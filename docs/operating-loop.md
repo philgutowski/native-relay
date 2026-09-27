@@ -78,6 +78,10 @@ What stays manual under a feeder:
 5. **Start with `--dry-run`, then `--once`,** and read the manifest after each. Then `--detach`.
 6. **Do not launch that manifest by hand while its feeder is alive.** The lease will refuse you,
    and the order file is where order lives, not the manifest.
+7. **Ask the feeder whether it is alive, never the process table.** `feed <manifest> --status`
+   checks the pid it recorded against that manifest's lock; `pgrep -f "relay_cli.py feed"`
+   matches every board's feeder and once kept a board idle for five and a half hours after its
+   own feeder had left. A watcher follows `feed <manifest> --follow`, JSON lines, not the log.
 
 Start a feeder from a pinned extract of a commit, never from a checkout you are editing: it
 launches the runner from its own tree at every cycle, so a file you change there becomes the code

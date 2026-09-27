@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 from . import (adapters, audit as audit_module, brief as brief_module, contracts, gitread,
                feeder as feeder_module, manifest as manifest_module, notify, pair as pair_module,
@@ -179,6 +180,19 @@ def build_parser():
                            dest="retry_blocked",
                            help="relaunch this one blocked task on the next cycle, leaving every "
                                 "other blocked record alone; repeat the flag for more than one")
+    # Read only, one at a time; `cmd_feed` refuses one beside a flag that acts on a feeder.
+    watch = feed_verb.add_mutually_exclusive_group()
+    watch.add_argument("--status", action="store_true", dest="feed_status",
+                       help="say whether this manifest's feeder is running, checked against "
+                            "its pid and its lock, and what its last cycle did; reads only")
+    watch.add_argument("--events", action="store_true",
+                       help="print every event this manifest's feeders have recorded, one "
+                            "JSON object per line; reads only")
+    watch.add_argument("--follow", action="store_true",
+                       help="print each new event as a JSON line until the feeder leaves; "
+                            "reads only")
+    feed_verb.add_argument("--json", action="store_true", dest="as_json",
+                           help="with --status, print one JSON object")
     return parser
 
 
@@ -407,8 +421,11 @@ def cmd_status(args, env, out):
         return failure
     store = _store_for(manifest, env)
     raw = store.read()
+    feeder_line = _feeder_line(args.manifest)
     if raw is None:
         out.write("no state for %s yet\n" % args.manifest)
+        if feeder_line:
+            out.write(feeder_line + "\n")
         return EXIT_OK
     word = store.status_word()
     # The progress view is built from the read above rather than taking its own, so the counts,
@@ -456,8 +473,23 @@ def cmd_status(args, env, out):
     for entry in view["tasks"]:
         out.write("  %s %s%s\n" % (entry["id"], progress.task_line(entry),
                                    "  (not in this manifest)" if not entry["in_manifest"] else ""))
+    if feeder_line:
+        out.write(feeder_line + "\n")
     out.write("state: %s\n" % store.dir)
     return EXIT_OK
+
+
+def _feeder_line(manifest_path):
+    """The one line `status` adds for a manifest a feeder has driven (issue #36), None for one no
+    feeder ever touched. The lease above is the current batch's `relay run`; this is the loop
+    around it, and `feed <manifest> --status` has the rest."""
+    paths = feeder_module.paths_for(manifest_path)
+    if not (os.path.exists(paths.state) or os.path.exists(paths.lock)):
+        return None
+    try:
+        return feeder_module.feeder_line(feeder_module.status_report(paths))
+    except feeder_module.ConfigError as exc:
+        return "feeder: unknown, %s" % exc
 
 
 def _follow(args, manifest, store, out, floor=None, proc=None):
@@ -715,13 +747,31 @@ def cmd_feed(args, env, out, deps=None):
     `deps` is the suite's way in; an operator never passes it.
     """
     paths = feeder_module.paths_for(args.manifest)
+    watching = args.feed_status or args.events or args.follow
+    if args.as_json and not args.feed_status:
+        out.write("--json goes with --status only\n")
+        return EXIT_CONFIG
+    if watching:
+        # A watcher's flags read only. Beside a flag that starts, stops, or changes a feeder,
+        # one of the two would be silently dropped, so the pair is refused instead.
+        clash = [flag for flag, on in (
+            ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
+            ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
+            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked)) if on]
+        if clash:
+            out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(clash))
+            return EXIT_CONFIG
     if args.stop:
         feeder_module.request_stop(paths)
         out.write("stop requested: %s\nthe feeder leaves after its current cycle\n" % paths.stop)
         return EXIT_OK
     if not os.path.isfile(paths.manifest):
+        # Before a watcher's answer too: a mistyped path would otherwise read as a manifest
+        # whose feeder is not running.
         out.write("manifest not found: %s\n" % paths.manifest)
         return EXIT_CONFIG
+    if watching:
+        return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
     warning = feeder_module.checkout_warning()
     if warning and args.pin:
         return _pin_feeder(args, env, out)
@@ -758,6 +808,40 @@ def cmd_feed(args, env, out, deps=None):
         return loop.run()
     finally:
         lock.close()
+
+
+def _watch_feeder(args, paths, out, sleep):
+    """`feed --status`, `--events`, and `--follow` (issue #36). Each reads the files beside the
+    manifest and nothing else: no lock is taken, the manifest is not loaded, and nothing is
+    written, so all three are safe beside a live feeder. Exit 0 whatever the answer; the answer
+    is in the output, and `--status --json` carries it as `running`."""
+    if args.feed_status:
+        try:
+            report = feeder_module.status_report(paths)
+        except feeder_module.ConfigError as exc:
+            out.write("%s\n" % exc)
+            return EXIT_CONFIG
+        if args.as_json:
+            out.write(json.dumps(report, indent=1, sort_keys=True) + "\n")
+        else:
+            for line in feeder_module.status_lines(report):
+                out.write(line + "\n")
+        return EXIT_OK
+
+    def write(line):
+        out.write(line + "\n")
+        if hasattr(out, "flush"):
+            out.flush()
+
+    if args.events:
+        for line in feeder_module.read_events(paths)[0]:
+            write(line)
+        return EXIT_OK
+    try:
+        feeder_module.follow_events(paths, write, sleep)
+    except KeyboardInterrupt:
+        pass
+    return EXIT_OK
 
 
 def _pin_feeder(args, env, out):

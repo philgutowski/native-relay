@@ -67,6 +67,8 @@ python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
 python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
 python3 <runner> feed <manifest> --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle
+python3 <runner> feed <manifest> --status       # is this manifest's feeder running, and what did its last cycle do; add --json for data
+python3 <runner> feed <manifest> --follow       # its events as JSON lines until it leaves; --events prints the ones so far
 ```
 
 `run --follow` and `tail` share four options: `--phases` prints phase events without the decoded
@@ -488,7 +490,13 @@ python3 <runner> feed <manifest> --detach --notify
 
 While a feeder is alive, do not `run` or `dispatch` its manifest by hand, and do not reorder the
 tasks it appended. `status`, `tail`, `summary`, and `audit` stay safe, since none takes the
-lease. What it is doing is in `<stem>.feeder.log`, one line per decision. To change its settings,
+lease. What it is doing is in `<stem>.feeder.log`, one line per decision. Whether it is alive is
+`feed <manifest> --status`, never a process listing: a `pgrep` for `relay_cli.py feed` matches
+every board's feeder, and has reported one board alive while it sat idle for hours. The status
+checks the pid the feeder recorded against that manifest's own lock file. A watcher that needs
+each cycle as it happens runs `feed <manifest> --follow`, which prints JSON lines, `started`,
+`cycle_started`, `cycle_result`, `waiting`, and `leaving`, each carrying a `reason` where one
+applies, and ends when the feeder leaves. To change its settings,
 edit the sidecar and `feed --restart`: a running feeder holds the settings and the code it
 loaded at its start. Nothing is killed by `--stop` or `--restart`; the task in flight finishes
 and merges first.
