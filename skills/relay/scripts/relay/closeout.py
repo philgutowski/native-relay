@@ -28,7 +28,7 @@ import os
 import string
 from dataclasses import dataclass, field
 
-from . import brief, classify, contracts, launch, manifest as manifest_module, state
+from . import adapters, brief, classify, contracts, launch, manifest as manifest_module, state
 
 OUTCOME_LANDED = "landed"
 OUTCOME_BLOCKED = "blocked"
@@ -357,4 +357,25 @@ def confirm_card_returned(adapter, manifest, task_id, return_to):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": status, "return_to": return_to,
                 "evidence": "the card reads %s after the closeout" % status}
+    return None
+
+
+def confirm_board_terminal(adapter, manifest, task_id):
+    """Issue #43: after a landed Closeout, read the task's project item. A finding when the item
+    is on the declared project and does not read the terminal status, or when the read failed,
+    so the summary lists the item to move by hand. Never a halt: verify already decided the
+    landing, and the runner never moves the item itself.
+
+    `adapters.board_lag` answers for GitHub only; every other adapter has one status per card,
+    which verify has already read as terminal."""
+    terminal = manifest.tracker.status_field or "its terminal status"
+    lag, reason = adapters.board_lag(adapter, task_id)
+    if reason:
+        return {"class": contracts.BOARD_ITEM_NOT_TERMINAL, "task": task_id,
+                "card_status": "unreadable", "terminal_status": terminal,
+                "evidence": "the project item could not be read to confirm the move: %s" % reason}
+    if lag:
+        return {"class": contracts.BOARD_ITEM_NOT_TERMINAL, "task": task_id,
+                "card_status": lag["card_status"], "terminal_status": lag["terminal_status"],
+                "evidence": "the project item reads %s after the closeout" % lag["card_status"]}
     return None

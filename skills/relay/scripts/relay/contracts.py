@@ -475,6 +475,11 @@ BACKEND_REASSIGNED = "backend_reassigned"
 # Runner reads it back. Finding only, the same shape as BLOCKED_UNRECORDED: the Runner never
 # writes to a tracker, so a card it could not get moved is a check by hand, not a stop.
 CARD_LEFT_IN_REVIEW = "card_left_in_review"
+# Issue #43. A landed Task whose issue is closed and whose item on the declared project does not
+# read the terminal status. A closed issue is terminal on its own, so verify lands the Task and
+# the item stays in the in review column unless something reads it. Finding only, the same shape
+# as CARD_LEFT_IN_REVIEW: the Runner never moves the item.
+BOARD_ITEM_NOT_TERMINAL = "board_item_not_terminal"
 
 # The audit's own classes (stale cards, 2026-09-08). These belong to a run rather than to a
 # record, so they are not in LINE_CLASSES and have no HALT_LINES template: `audit.build` writes
@@ -484,8 +489,10 @@ AUDIT_REOPENED = "card_reopened"
 AUDIT_CLOSED_UNLANDED = "card_closed_unlanded"
 AUDIT_UNREADABLE = "card_unreadable"
 AUDIT_FAILED = "audit_failed"
+# Issue #43: BOARD_ITEM_NOT_TERMINAL read between runs.
+AUDIT_ITEM_NOT_TERMINAL = "card_item_not_terminal"
 AUDIT_CLASSES = (AUDIT_STALE_IN_REVIEW, AUDIT_REOPENED, AUDIT_CLOSED_UNLANDED,
-                 AUDIT_UNREADABLE, AUDIT_FAILED)
+                 AUDIT_UNREADABLE, AUDIT_FAILED, AUDIT_ITEM_NOT_TERMINAL)
 
 # The two .claude/ operator sentences, one per raiser of HALT_PATH_GATE from
 # CLAUDE_DIR_PATH_REGEX (issue #8). HALT_LINES[path_gate] is {detail}, so the raiser writes the
@@ -581,6 +588,7 @@ FINDING_CLASSES = (
     REVIEW_FAILED,
     BACKEND_REASSIGNED,
     CARD_LEFT_IN_REVIEW,
+    BOARD_ITEM_NOT_TERMINAL,
 )
 
 # Every class that can reach a summary line: the closed halt class set of KTD6, plus the
@@ -588,7 +596,7 @@ FINDING_CLASSES = (
 LINE_CLASSES = HALT_CLASSES + (
     CLOSEOUT_UNFINISHED, BLOCKED_UNRECORDED, UNENFORCED_DISALLOWED, RUNNER_SELF_KILL,
     WAITING_LAST_MESSAGE, CANCELLED_TOOL_CALL, REVIEW_SKIPPED, REVIEW_FAILED, BACKEND_REASSIGNED,
-    CARD_LEFT_IN_REVIEW,
+    CARD_LEFT_IN_REVIEW, BOARD_ITEM_NOT_TERMINAL,
 )
 
 HALT_LINES = {
@@ -629,6 +637,8 @@ HALT_LINES = {
                          "{from_backend} {from_model}"),
     CARD_LEFT_IN_REVIEW: ("the card still reads {card_status} after the closeout; move {task} "
                           "to {return_to} by hand"),
+    BOARD_ITEM_NOT_TERMINAL: ("landed, but its project item reads {card_status} after the "
+                              "closeout; move {task} to {terminal_status} by hand"),
 }
 
 # The digest classify.classify() (U7) guarantees, read by run.py and closeout.py via

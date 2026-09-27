@@ -213,6 +213,9 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
             elif finding["class"] == contracts.CARD_LEFT_IN_REVIEW:
                 checks.append({"kind": "card_left_in_review", "task": task_id,
                                "text": "%s: %s" % (task_id, finding["line"])})
+            elif finding["class"] == contracts.BOARD_ITEM_NOT_TERMINAL:
+                checks.append({"kind": "board_item_not_terminal", "task": task_id,
+                               "text": "%s: %s" % (task_id, finding["line"])})
     for finding in (card_audit or {}).get("findings") or []:
         checks.append({"kind": finding.get("class"), "task": finding.get("task"),
                        "text": finding.get("text") or ""})

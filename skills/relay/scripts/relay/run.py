@@ -502,8 +502,11 @@ def _triple_integrate(cfg, item, integration_lease, expected_remote):
     # A Closeout normally commits documentation or tracker evidence.  If it did not create a
     # commit, the task landing's token remains current; otherwise guarded_closeout_push rotated it.
     next_lease = closeout_push.get("lease", pushed.integration_lease)
+    finding = closeout.confirm_board_terminal(cfg.adapter, cfg.manifest, item.task.id)
+    if finding:
+        item.findings.append(finding)
     cfg.store.upsert(item.task.id, status=contracts.STATUS_LANDED,
-                     halt_class=contracts.HALT_LANDED, branch=None)
+                     halt_class=contracts.HALT_LANDED, branch=None, findings=item.findings)
     return next_lease, gitread.rev_parse(cfg.repo, cfg.default), None
 
 
@@ -1921,11 +1924,16 @@ def _merge_route(ctx):
                     {"sha": tail.merge_sha, "card_status": verify.card_status_of(final),
                      "branch": ctx.default, "checks": final.checks})
 
+    # Issue #43: a closed issue verifies as landed on its own, so the item the Closeout was also
+    # told to move is read here, after the landing is settled, and a lag is a finding only.
+    finding = closeout.confirm_board_terminal(ctx.adapter, ctx.manifest, ctx.task.id)
+    if finding:
+        ctx.findings.append(finding)
     if gitread.branch_exists(ctx.repo, ctx.branch):
         gitwrite.delete_branch(ctx.repo, ctx.branch, ops=ctx.store, task_id=ctx.task.id,
                                env=ctx.env)
     ctx.store.upsert(ctx.task.id, status=contracts.STATUS_LANDED,
-                     halt_class=contracts.HALT_LANDED, branch=None)
+                     halt_class=contracts.HALT_LANDED, branch=None, findings=ctx.findings)
 
 
 def _blocked_route(ctx, halt_class):

@@ -106,7 +106,7 @@ clear the host.
 `audit` reads every task's card and says which ones disagree with the record and with git. The
 runner performs the same audit at the end of every run and writes it to the state file, where
 `status` and `summary` show it, so the verb is for a fresh look between runs. It takes no lease
-and writes nothing, so it is safe beside a live run. Four disagreements, each a report and never
+and writes nothing, so it is safe beside a live run. Five disagreements, each a report and never
 a repair, because the runner never moves a card:
 
 - `card_stale_in_review`: the card reads the in review status and no process is working on it.
@@ -114,12 +114,20 @@ a repair, because the runner never moves a card:
 - `card_reopened`: the record landed and the card is no longer terminal.
 - `card_closed_unlanded`: the card is terminal, nothing landed, and no commit on the default
   branch since the record's baseline names the task. The next run will skip it.
-- `card_unreadable`: the tracker could not be read for that card.
+- `card_unreadable`: the tracker could not be read for that card, or, on GitHub, its project item
+  could not be.
+- `card_item_not_terminal`: GitHub only. The record landed and the issue is closed, but the
+  issue's item on the declared project does not read the manifest's `status_field`. A closed
+  issue is terminal on its own, so nothing else notices the item left in the in review column.
+  An issue the project does not carry is never reported.
 
 Behind the audit, a Closeout for a blocked or halted task returns the card to the status it read
 before the run, since the task process moved it to in review at its first step and nobody is on
 it any more. When the card still reads in review after that Closeout, the record carries a
-`card_left_in_review` finding and the summary lists the card to move by hand.
+`card_left_in_review` finding and the summary lists the card to move by hand. After a landed
+Closeout on GitHub with a `status_field`, the runner reads the project item the same way, and an
+item on the declared project that does not read that status attaches a `board_item_not_terminal`
+finding naming the status to move it to.
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease. Under `on_halt.continue_past_task_halt`, 0
@@ -383,6 +391,7 @@ The classes and what they mean for the operator:
 | `unclean_exit` | the process left a dirty tree, claimed to finish and left nothing to merge, or a Task branch from an earlier attempt is still in place (evidence check `no_task_branch`) | inspect the tree, clean it, resume. For a stranded branch that carries finished commits there are three moves, not two. Keep it and the card stays blocked, discard it and the work is gone, or tag it and delete it: pre flight reads `refs/heads` only, so `git tag -a stranded/<branch> <branch> -m stranded && git branch -D <branch>` keeps every commit and frees the card, and if the tag name is taken the tag fails and the delete must not run. Rebuilding from the card's brief is often cheaper than resuming a branch whose recorded findings have gone stale |
 | `review_skipped` (a finding, never a halt) | on Claude, the task claimed complete without a `/code-review` Skill call in its transcript; it landed if the gate passed. On grok the skip is undetectable, so this finding is not attached and the digest lists `review_skipped` as not checked | review the diff of the landing commit by hand |
 | `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review | move the card back by hand to the status the line names |
+| `board_item_not_terminal` (a finding, never a halt) | GitHub only: the task landed and its issue is closed, but its item on the declared project does not read the manifest's `status_field`, or could not be read | move the item by hand to the status the line names |
 | `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
 | `unexpected_error` | the run loop hit something it did not anticipate: a defect, a library error, a task process that could not be launched, or a manifest naming an unimplemented shipping mode | read the error text in the cause line and the runner log; the fault is in the runner or the manifest, not the task, so fix that before resuming |
 | `ci_undecided` | reserved for `pr_terminal` mode, which `validate` refuses; no run can reach it today | not applicable |
