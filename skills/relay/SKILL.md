@@ -575,8 +575,9 @@ and before a running feeder is asked to leave; an id the manifest does not list 
 terminal with exit 1, and the running feeder is left untouched.
 
 Start a feeder pinned to a commit, `feed <manifest> --pin`, rather than from a checkout somebody
-may still edit: it launches the runner from its own tree at every cycle, so an edit made there
-reaches a cycle already in flight. `feed <manifest> --pin` extracts the default branch's commit,
+may still edit: it launches the runner from its own tree at every cycle, so an edit made there can
+reach the next task the runner launches, even one in the same batch, since the runner reads brief
+templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's commit,
 never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the feeder
 from it, taking over a live one with restart semantics; `--pin --dry-run` says what it would
 extract and writes nothing. A feeder started from a checkout instead prints the checkout warning,

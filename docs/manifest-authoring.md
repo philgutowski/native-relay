@@ -330,8 +330,9 @@ Skip this unless the queue is too long to list or its cards depend on each other
 meant for `relay feed` is written exactly as above with two differences.
 
 A feeder launches the runner from its own tree at every cycle, so start it pinned to a commit,
-`feed <manifest> --pin`, rather than from a checkout you may still edit: an edit made there
-becomes the code that runs the next cycle. `feed <manifest> --pin` extracts the default branch's
+`feed <manifest> --pin`, rather than from a checkout you may still edit: an edit made there can
+reach the next task the runner launches, even one in the same batch, since the runner reads brief
+templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's
 commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the
 feeder from it, taking over a live one with restart semantics; `--pin --dry-run` says what it
 would extract and writes nothing. A feeder started from a checkout instead prints the checkout
