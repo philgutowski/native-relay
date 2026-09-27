@@ -408,8 +408,11 @@ Manifest once and the Task list is fixed for that run, while a resumed run skips
 appending Tasks between runs is how one Manifest runs for a day. The Feeder sits outside the
 Runner and above it: it launches a fresh Runner each Cycle, from the same tree it was itself
 started from, and reads that run's summary afterwards. It never merges, pushes, moves a card, or
-edits the target repository. It writes the Manifest, its own state file, and its log, all beside
-the Manifest, and it holds no way to write to a Tracker.
+edits the target repository. It writes the Manifest, its own state file, its log, its events file,
+and its post cycle hook's output, all beside the Manifest, and it holds no way to write to a
+Tracker. The state file carries a process record, the pid, host, start time, and current Cycle of
+whichever Feeder holds it, stamped with the exit and the reason when it leaves, so a watcher can
+tell a live Feeder from a stale one without a process listing.
 
 Three rules carry it. Only cards the Ready source returns are appended, so a unit never launches
 before its foundation lands. A Task that halts twice is written into the Manifest as excluded
@@ -452,11 +455,24 @@ held by a file lock the operating system releases when the process exits. Everyt
 specific reaches it as data in a sidecar file named from the Manifest's stem, never as a Manifest
 table, because a pinned older Runner must still load whatever the Feeder writes.
 
+That protection covers only the Manifest. The sidecar itself carries the project facts and is not
+backward compatible the same way: a sidecar key an older pinned Runner does not recognise, such as
+`hooks.post_cycle` before issue #37, refuses that extract's Feeder to start and refuses `validate`
+run from the same extract, both with the config exit. A pinned extract has to be at least as new
+as every key the sidecar it feeds uses.
+
 ### Cycle
-One pass of the Feeder: check the stop file and the checkout, read the Ready source, append a
-Batch, launch one run, read its summary, and apply the halt rules. The stop file is checked only
-between Cycles, so asking a Feeder to stop never interrupts a Task, and restarting one means
-asking, waiting for it to leave, and starting the next. Nothing is killed.
+One pass of the Feeder: check the stop file and the checkout, run the `pre_cycle` hook when the
+sidecar names one, read the Ready source, append a Batch, launch one run, read its summary, apply
+the halt rules, then run the `post_cycle` hook when the sidecar names one. The stop file is
+checked only between Cycles, so asking a Feeder to stop never interrupts a Task, and restarting
+one means asking, waiting for it to leave, and starting the next. Nothing is killed.
+
+The `post_cycle` hook learns that Cycle's landed, halted, blocked, and skipped ids and the default
+branch's merge range from its environment. Blocking, the default, it is waited on and logged; with
+`post_cycle_hold` set, a nonzero exit holds the Feeder rather than starting the next Cycle or
+waiting, until the operator repairs the default branch and releases it. Detached, it is started
+and left to run, reaped at a later Cycle's start.
 
 ### Batch
 The cards one Cycle appends: the head of the ready list, as long as the room left, which is the

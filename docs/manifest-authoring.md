@@ -364,8 +364,9 @@ stem. For `queue.toml`:
 | `queue.order` | you | priority, one card id per line, highest first, `#` comments |
 | `queue.models` | you | model routing, `id model  # why` per line, read fresh each cycle |
 | `queue.feeder.stop` | you, or `feed --stop` | its presence makes the feeder leave after the cycle |
-| `queue.feeder.state.json` | the feeder | halt counts, wait counts, models marked exhausted, and a post cycle hold |
+| `queue.feeder.state.json` | the feeder | halt counts, wait counts, models marked exhausted, a post cycle hold, and a process record |
 | `queue.feeder.log` | the feeder | one line per decision |
+| `queue.feeder.events.jsonl` | the feeder | one JSON line per moment, for `feed --follow` |
 | `queue.feeder.lock` | the feeder | held while it runs; one feeder per manifest |
 | `queue.feeder.out` | `feed --detach` | the detached feeder's output and every run's |
 | `queue.feeder.hook.out` | the feeder | the post cycle hook's output, a header line per cycle |
@@ -412,6 +413,12 @@ post_cycle_timeout_seconds = 3600
 
 - A key the feeder does not know is an error. A typo that was ignored would run a default for a
   day.
+- That refusal reaches the sidecar and not the manifest. The manifest stays loadable by an older
+  pinned runner because project facts live in the sidecar instead of a manifest table; the
+  sidecar itself gets no such protection, so a key it carries that an older extract's runner does
+  not know, `hooks.post_cycle` before issue #37 for one, refuses that extract's `feed` with exit
+  1 and refuses `validate` run from the same extract the same way. Pin an extract at least as new
+  as every key the sidecar names.
 - `ready.command`, `hooks.pre_cycle`, and `hooks.post_cycle` are argument lists, never shell
   strings, the same rule as `gate.command`. All three run in the target repository. The ready
   command prints a JSON array of cards, each with `id` or `number`, `title`, `body` or
