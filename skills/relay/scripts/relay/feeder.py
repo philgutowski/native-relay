@@ -189,6 +189,17 @@ def paths_for(manifest_path):
                  hook_out=stem + ".feeder.hook.out")
 
 
+def listed_ids(paths):
+    """The task ids the manifest currently lists, read the same plain way `cycle` reads them
+    (issue #46). `cmd_feed` calls this before it detaches or asks a live feeder to leave, so a
+    `--retry-blocked` id can be checked without touching a lock, a stop file, or a config."""
+    if not os.path.exists(paths.manifest):
+        return []
+    with open(paths.manifest, encoding="utf-8") as handle:
+        text = handle.read()
+    return manifestedit.task_ids(text)
+
+
 @dataclass(frozen=True)
 class Config:
     """The sidecar's settings. Every default is the value the Cratekit script ran on."""

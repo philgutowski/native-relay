@@ -561,8 +561,10 @@ waited out like a cycle of halts. In a cycle the whole cycle wait takes, it wait
 holds its place in the batch, and then relaunches on its own model with `--retry-blocked`, so
 the cycle after the wait runs the dead tasks first and appends fresh cards only into the room
 they leave. In a cycle where something landed, one with no free fallback stays blocked. To relaunch one blocked task by hand, `feed <manifest> --restart
---detach --retry-blocked <id>` queues it for the next cycle, never `run` beside a live feeder. An
-id the manifest does not list stops the feeder with exit 1.
+--detach --retry-blocked <id>` queues it for the next cycle, never `run` beside a live feeder. Every
+`--retry-blocked` id is checked against the manifest before the restart, before anything detaches
+and before a running feeder is asked to leave; an id the manifest does not list is refused at the
+terminal with exit 1, and the running feeder is left untouched.
 
 Start a feeder from a pinned extract of a commit when the operator has one, never from a
 checkout somebody is editing. It launches the runner from its own tree at every cycle.
