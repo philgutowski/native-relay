@@ -539,9 +539,12 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
             cfg.store.update_integration_lease(result.integration_lease)
         return result
 
-    return_to = closeout.return_to_for(cfg.manifest, cfg.store.get(item.task.id) or {})
+    record = cfg.store.get(item.task.id) or {}
+    return_to = closeout.return_to_for(cfg.manifest, record)
+    unknown = closeout.baseline_unknown(cfg.manifest, record)
     _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"],
-                  return_to=return_to, guarded_push=guarded_closeout_push)
+                  return_to=return_to, baseline_unknown=unknown,
+                  guarded_push=guarded_closeout_push)
     if cfg.manifest.tracker.adapter == "jira":
         ok, reason = cfg.adapter._triple_comment(
             item.expected_card, "Relay triple blocked: %s" %
@@ -562,7 +565,7 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
     finding = closeout.confirm_blocked_comment(cfg.adapter, item.task.id, item.baseline_comment_id)
     if finding:
         item.findings.append(finding)
-    if return_to:
+    if return_to or unknown:
         finding = closeout.confirm_card_returned(cfg.adapter, cfg.manifest, item.task.id, return_to)
         if finding:
             item.findings.append(finding)
@@ -673,7 +676,8 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
             item.worker = made.worker
             capability = backends.build(task.backend).CAPABILITY
             store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline,
-                         baseline_tracker_status=card.get("status"),
+                         baseline_tracker_status=closeout.launch_baseline(
+                             manifest, store.get(task.id) or {}, card.get("status")),
                          baseline_comment_id=item.baseline_comment_id, branch=branch,
                          brief_sha256=item.brief_sha, findings=[], backend=task.backend,
                          model=task.model, halt_class=None, halt_stage=None,
@@ -1422,8 +1426,12 @@ def _begin_task(cfg, task):
     # and wins over the fresh record, so a leftover key would name a previous attempt's sha or
     # branch inside a well formed sentence. The host snapshots clear for the same reason: an
     # attempt that never reaches its own launch must not print the last one's host line.
+    # Issue #51: a relaunch reads the in review status its last attempt left behind, and
+    # `launch_baseline` keeps the status the card read before that attempt instead.
+    baseline_status = closeout.launch_baseline(manifest, store.get(task.id) or {},
+                                               card_status.get("status"))
     store.upsert(task.id, status=contracts.STATUS_RUNNING, baseline_sha=baseline_sha,
-                 baseline_tracker_status=card_status.get("status"),
+                 baseline_tracker_status=baseline_status,
                  baseline_comment_id=baseline_comment_id, branch=branch,
                  brief_sha256=brief_sha, halt_class=None, halt_stage=None,
                  halt_message=None, halt_evidence=None, envelope_verdict=None,
@@ -1944,13 +1952,18 @@ def _blocked_route(ctx, halt_class):
     # Stale cards, R1: the task process moved the card to in review at its first step, and a
     # blocked task leaves nobody on it. The Closeout is told where the card came from; the
     # runner reads it back below and never moves it itself.
-    return_to = closeout.return_to_for(ctx.manifest, ctx.store.get(ctx.task.id) or {})
-    _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"], return_to=return_to)
+    # Issue #51: with no baseline the Closeout is told the card may be in review with nowhere
+    # known to go, and the read back below still runs, so a card left there is a check by hand.
+    record = ctx.store.get(ctx.task.id) or {}
+    return_to = closeout.return_to_for(ctx.manifest, record)
+    unknown = closeout.baseline_unknown(ctx.manifest, record)
+    _run_closeout(ctx, closeout.OUTCOME_BLOCKED, branch=stranded["branch"], return_to=return_to,
+                  baseline_unknown=unknown)
 
     finding = closeout.confirm_blocked_comment(ctx.adapter, ctx.task.id, ctx.baseline_comment_id)
     if finding:
         ctx.findings.append(finding)
-    if return_to:
+    if return_to or unknown:
         finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, ctx.task.id, return_to)
         if finding:
             ctx.findings.append(finding)
@@ -1981,7 +1994,8 @@ def _blocked_route(ctx, halt_class):
 
 
 def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None, gate=None,
-                  halt_class=None, cause_line=None, return_to=None, guarded_push=None):
+                  halt_class=None, cause_line=None, return_to=None, baseline_unknown=False,
+                  guarded_push=None):
     """Launch the closeout, then bound what it committed before anything is pushed (R53).
 
     The order matters: the check runs against the local head before the push, so a commit
@@ -2004,7 +2018,7 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         commit_range=commit_range, gate=gate,
         wall_seconds=ctx.launched.wall_seconds, active_seconds=ctx.launched.active_seconds,
         halt_class=halt_class, cause_line=cause_line, return_to=return_to,
-        timeout_seconds=ctx.overrides.get("closeout_seconds"),
+        baseline_unknown=baseline_unknown, timeout_seconds=ctx.overrides.get("closeout_seconds"),
         home=ctx.home, base_env=ctx.base_env, stream=ctx.stream, heartbeat=ctx.store.heartbeat,
         on_release=ctx.store.release, **ctx.launch_kwargs)
     ctx.findings.extend(result.findings)
@@ -2118,9 +2132,11 @@ def _note_halt(ctx, halt):
         # reference, which is exactly the halt-after-landing case the docstring above names:
         # that card is closed, and moving it back would undo a landing.
         return_to = closeout.return_to_for(ctx.manifest, record)
+        unknown = closeout.baseline_unknown(ctx.manifest, record)
         _run_closeout(ctx, closeout.OUTCOME_HALTED, landing_ref=record.get("landing_ref"),
-                     halt_class=halt.halt_class, cause_line=halt.message, return_to=return_to)
-        if return_to:
+                     halt_class=halt.halt_class, cause_line=halt.message, return_to=return_to,
+                     baseline_unknown=unknown)
+        if return_to or unknown:
             finding = closeout.confirm_card_returned(ctx.adapter, ctx.manifest, halt.task_id,
                                                      return_to)
             if finding:

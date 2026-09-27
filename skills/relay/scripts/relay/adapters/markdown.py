@@ -166,9 +166,10 @@ class MarkdownAdapter:
     def closeout_allowed_tools(self, backend=None):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None, backend=None):
-        """`return_to` is accepted for the interface and ignored: a markdown tracker has only an
-        open box and a checked one, and the task process never moves it."""
+    def closeout_instructions(self, outcome, return_to=None, backend=None, baseline_unknown=False):
+        """`return_to` and `baseline_unknown` are accepted for the interface and ignored: a
+        markdown tracker has only an open box and a checked one, and the task process never
+        moves it."""
         if outcome == OUTCOME_LANDED:
             # Under shipping.push = false the runner pushes nothing, so the instruction does not
             # promise that it will.

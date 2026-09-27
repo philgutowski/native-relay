@@ -12,7 +12,8 @@ import json
 import hashlib
 import subprocess
 
-from . import NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, reference_hit, skipped
+from . import (NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, reference_hit, skipped,
+               unknown_baseline_move)
 
 # gh project item-list stops at 30 items unless told otherwise; a board past 30 made every
 # later card read as absent from the board (2026-08-29).
@@ -75,6 +76,7 @@ class GitHubAdapter:
         self._owner = manifest.tracker.owner
         self._project_number = manifest.tracker.project_number
         self._status_field = manifest.tracker.status_field
+        self._in_review = manifest.tracker.in_review_status
         self._run = run or make_run(manifest.project.repo)
         self._repository = None
 
@@ -459,11 +461,13 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
     def closeout_allowed_tools(self, backend=None):
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None, backend=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None, baseline_unknown=False):
         """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
         supplied for a blocked or halted outcome when the runner wants the card returned there.
         The task process moved the item to the in review status at its first step, so without
-        the return every blocked or halted card sits in progress with nobody on it."""
+        the return every blocked or halted card sits in progress with nobody on it.
+        `baseline_unknown` (issue #51) is an item with no `return_to` because its status was
+        never read, where "do not move its project item" alone would leave it stranded."""
         # `gh project item-edit` needs the project's node id, which neither field-list nor
         # item-list returns; `gh project view` does. Both list commands default to a 30 row
         # page (2026-08-29, PROJECT_ITEM_LIMIT above), so both carry the same explicit limit.
@@ -492,12 +496,15 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
                 "to add the issue to the project."
                 % (self._status_field, self._owner, self._project_number, ids)
             )
-        move = ("Do not close the issue and do not move its project item" if not return_to else
-                "Do not close the issue. Move its project item back to `%s`, the status it "
-                "read before this run, for owner `%s` and project number `%s`, since no "
-                "process is working on it now. %s Use `gh project item-edit` with the board's "
-                "Status field"
-                % (return_to, self._owner, self._project_number, ids))
+        if baseline_unknown and not return_to:
+            move = "Do not close the issue. " + unknown_baseline_move(self._in_review, "project item")
+        else:
+            move = ("Do not close the issue and do not move its project item" if not return_to else
+                    "Do not close the issue. Move its project item back to `%s`, the status it "
+                    "read before this run, for owner `%s` and project number `%s`, since no "
+                    "process is working on it now. %s Use `gh project item-edit` with the board's "
+                    "Status field"
+                    % (return_to, self._owner, self._project_number, ids))
         if outcome == OUTCOME_HALTED:
             return ("Add one comment naming the halt class and the cause line below with `gh issue "
                     "comment`. %s: a halted task is not finished." % move)

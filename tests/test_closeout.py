@@ -666,6 +666,71 @@ class ReturnTo(CloseoutCase):
         self.render("landed")
         self.assertIn(("closeout_instructions", "landed", None), self.adapter.calls)
 
+    def test_the_brief_carries_an_unknown_baseline_to_the_adapter(self):
+        self.assertIn("Its baseline was never read.", self.render("blocked", baseline_unknown=True))
+        self.assertNotIn("Its baseline was never read.", self.render("blocked"))
+
+
+class BaselineUnknown(CloseoutCase):
+    """Issue #51: a status never read is the one refusal of `return_to_for` whose card may not
+    be where "keeps its current status" says it is."""
+
+    def test_no_baseline_status_is_unknown(self):
+        self.assertTrue(closeout.baseline_unknown(self.manifest, {}))
+        self.assertTrue(closeout.baseline_unknown(self.manifest,
+                                                  {"baseline_tracker_status": None}))
+
+    def test_a_read_baseline_is_known_even_when_it_is_the_in_review_status(self):
+        in_review = self.manifest.tracker.in_review_status
+        for baseline in ("Todo", in_review):
+            self.assertFalse(closeout.baseline_unknown(
+                self.manifest, {"baseline_tracker_status": baseline}), baseline)
+
+    def test_a_landing_reference_refuses_before_the_unknown_baseline(self):
+        self.assertFalse(closeout.baseline_unknown(self.manifest, {"landing_ref": "a" * 40}))
+
+
+class LaunchBaseline(CloseoutCase):
+    """Issue #51: what a launch records as the card's baseline, given what it just read and the
+    record an earlier launch left."""
+
+    def in_review(self):
+        return self.manifest.tracker.in_review_status
+
+    def earlier(self, status):
+        return {"baseline_sha": "b" * 40, "baseline_tracker_status": status}
+
+    def test_a_first_launch_records_what_it_read(self):
+        for status in ("Todo", self.in_review(), None):
+            self.assertEqual(closeout.launch_baseline(self.manifest, {}, status), status)
+
+    def test_a_relaunch_reading_the_in_review_status_keeps_the_earlier_baseline(self):
+        self.assertEqual(closeout.launch_baseline(self.manifest, self.earlier("Todo"),
+                                                  self.in_review().upper()), "Todo")
+
+    def test_a_relaunch_whose_status_read_failed_keeps_the_earlier_baseline(self):
+        self.assertEqual(closeout.launch_baseline(self.manifest, self.earlier("Todo"), None),
+                         "Todo")
+
+    def test_a_card_the_operator_moved_between_runs_records_where_they_put_it(self):
+        self.assertEqual(closeout.launch_baseline(self.manifest, self.earlier("Todo"), "Backlog"),
+                         "Backlog")
+
+    def test_an_earlier_staged_baseline_takes_the_new_read(self):
+        """The operator staged the card in review for the first launch, so the in review read
+        now is theirs too, and a different read is a move they made since."""
+        for status in (self.in_review(), "Todo"):
+            self.assertEqual(closeout.launch_baseline(
+                self.manifest, self.earlier(self.in_review()), status), status)
+
+    def test_an_earlier_unknown_baseline_stays_unknown_on_an_in_review_read(self):
+        """The first launch never read the status and its Task may have moved the card, so an
+        in review read now is no evidence the operator staged it."""
+        self.assertIsNone(closeout.launch_baseline(self.manifest, self.earlier(None),
+                                                   self.in_review()))
+        self.assertEqual(closeout.launch_baseline(self.manifest, self.earlier(None), "Todo"),
+                         "Todo")
+
 
 class ConfirmCardReturned(CloseoutCase):
     """Stale cards, R4: the read after the Closeout. Same shape as `confirm_blocked_comment`."""

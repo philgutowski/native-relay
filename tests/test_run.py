@@ -2520,6 +2520,10 @@ class BoardReads:
     def status(self, task_id):
         if self._unreadable(task_id):
             return adapters.skipped("the board refused the read")
+        # Issue #51: the card reads and its status does not, the way a GitHub board read can
+        # fail after the issue read succeeded. `read` still answers, with no status.
+        if os.path.exists(self._file(task_id, "nostatus")):
+            return adapters.skipped("the board refused the status read")
         with open(self._file(task_id, "status")) as handle:
             name = handle.read().strip()
         return {"status": name, "terminal": name.lower() in self._done, "reference": None,
@@ -2596,8 +2600,10 @@ in_review_status = "in review"
 BOARD_TASKS = '[[tasks]]\nid = "T-1"\nmodel = "sonnet"\neffort = "low"\n'
 
 # The Task's start step, then the branch. The Closeout's moves come after the comment it makes.
+# The `rm` ends a status read staged to fail at launch (issue #51) and is a no op otherwise.
 TASK_MOVES_CARD_SH = """set -e
 printf '%s' > "$RELAY_BOARD/%s.status"
+rm -f "$RELAY_BOARD/%s.nostatus"
 """
 CLOSEOUT_COMMENTS_SH = """set -e
 echo "%s" >> "$RELAY_BOARD/%s.comments"
@@ -2652,9 +2658,16 @@ class _BoardRoutes:
         with open(os.path.join(self.board_dir, task_id + ".status")) as handle:
             return handle.read()
 
-    def task_moves_card(self, fixture, task_id="T-1"):
-        start = TASK_MOVES_CARD_SH % (self.IN_REVIEW, task_id)
-        self.queue_entry(fixture, start + task_branch_sh(task_id))
+    def task_moves_card(self, fixture, task_id="T-1", branch=True):
+        """`branch=False` is a Task that blocked before it committed anything, the one a
+        relaunch can take up again: a branch with commits past the baseline is refused (R48)."""
+        start = TASK_MOVES_CARD_SH % (self.IN_REVIEW, task_id, task_id)
+        self.queue_entry(fixture, start + (task_branch_sh(task_id) if branch else ""))
+
+    def status_unreadable_until_the_task_starts(self, task_id="T-1"):
+        """The status read fails at launch. The Task's start step removes the file that makes it
+        fail (TASK_MOVES_CARD_SH), so every read after the launch answers."""
+        open(os.path.join(self.board_dir, task_id + ".nostatus"), "w").close()
 
     def closeout(self, comment, move_to=None, unreadable=False, task_id="T-1"):
         script = CLOSEOUT_COMMENTS_SH % (comment, task_id)
@@ -2664,9 +2677,10 @@ class _BoardRoutes:
             script += 'touch "$RELAY_BOARD/%s.unreadable"\n' % task_id
         self.queue_entry("closeout_skipped.jsonl", script)
 
-    def go_board(self, expect=runner.EXIT_OK):
+    def go_board(self, expect=runner.EXIT_OK, **kwargs):
         seen = []
-        outcome = self.go(adapter=self.adapter, notifier=seen.append, stream=self.lines.append)
+        outcome = self.go(adapter=self.adapter, notifier=seen.append, stream=self.lines.append,
+                          **kwargs)
         self.assertEqual(outcome.exit_code, expect, outcome.message)
         return seen
 
@@ -2754,6 +2768,88 @@ class _BoardRoutes:
         self.assertIn("Landed at %s, but the run then halted." % record["landing_ref"], halted)
         self.assertNotIn("`%s`" % self.BASELINE, halted)
         self.assertNotIn("back to", halted.lower())
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+
+    def assert_told_status_unknown(self, text):
+        """Issue #51: nowhere known to return the card, and nothing claiming it kept a status."""
+        self.assertIn("could not read", text)
+        self.assertIn("`%s`" % self.IN_REVIEW, text)
+        self.assertIn("by hand", text)
+        self.assertNotIn("`%s`" % self.BASELINE, text)
+        for phrase in STAY_PUT:
+            self.assertNotIn(phrase, text.lower())
+
+    def test_a_blocked_card_whose_status_was_never_read_is_not_told_it_kept_it(self):
+        """Issue #51, state 1. The read answered and the status read did not, so the record has
+        no baseline. The Task still moved the card at its start step, so the Closeout is told the
+        runner does not know where it came from, and the runner reads the card back and lists it
+        as a check by hand."""
+        self.status_unreadable_until_the_task_starts()
+        self.task_moves_card("blocked.jsonl")
+        self.closeout("blocked on the design question")
+        seen = self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        self.assertIsNone(record["baseline_tracker_status"])
+        self.assert_told_status_unknown(self.brief(".closeout"))
+        self.assertEqual(self.card(), self.IN_REVIEW)
+        mine = self.findings(contracts.CARD_LEFT_IN_REVIEW)
+        self.assertEqual([(f["card_status"], f["return_to"]) for f in mine],
+                         [(self.IN_REVIEW, closeout.UNKNOWN_RETURN)])
+        checks = [check for check in summary_module.build(self.manifest, self.store())
+                  ["pending_checks"] if check["kind"] == "card_left_in_review"]
+        self.assertEqual(len(checks), 1, checks)
+        self.assertIn("move T-1 to its todo status by hand", checks[0]["text"])
+        self.assertIn("1 stale card(s)", seen[-1])
+
+    def test_a_halted_card_whose_status_was_never_read_is_not_told_it_kept_it(self):
+        self.write_board_manifest(continue_past=True,
+                                  gate=["bash", "-c", GATE_REFUSES_SH % "src/t_1.py"])
+        self.status_unreadable_until_the_task_starts()
+        self.task_moves_card("success.jsonl")
+        self.closeout("halted on the gate")
+        self.go_board()
+        record = self.store().get("T-1")
+        self.assertEqual(record["halt_class"], contracts.HALT_GATE_REFUSED)
+        self.assert_told_status_unknown(self.brief(".closeout"))
+        self.assertEqual([f["card_status"] for f in self.findings(contracts.CARD_LEFT_IN_REVIEW)],
+                         [self.IN_REVIEW])
+
+    def test_a_relaunched_card_left_in_review_is_still_returned_to_where_it_started(self):
+        """Issue #51, state 2. The first attempt blocked and its Closeout left the card in
+        review. The relaunch reads the in review status, and recording that as the baseline
+        would make the leftover look like the operator's staging, so the card could never go
+        back. The record keeps the status the first launch read."""
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked on the design question")
+        self.go_board()
+        self.assertEqual(self.card(), self.IN_REVIEW)
+        self.assertEqual(len(self.findings(contracts.CARD_LEFT_IN_REVIEW)), 1)
+
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again", move_to=self.BASELINE)
+        self.go_board(retry_blocked=True)
+        record = self.store().get("T-1")
+        self.assertEqual(record["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(record["baseline_tracker_status"], self.BASELINE)
+        self.assert_told_to_return(self.brief(".closeout"))
+        self.assertEqual(self.card(), self.BASELINE)
+        self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
+        self.assertEqual(self.store().audit()["count"], 0)
+
+    def test_a_relaunched_card_the_operator_moved_goes_back_to_where_they_put_it(self):
+        """The other half of the relaunch rule: a status other than in review at relaunch is the
+        operator's move since the last attempt, and it wins over the first launch's read."""
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked on the design question")
+        self.go_board()
+        self.set_card("T-1", "Backlog")
+        self.task_moves_card("blocked.jsonl", branch=False)
+        self.closeout("blocked again", move_to="Backlog")
+        self.go_board(retry_blocked=True)
+        self.assertEqual(self.store().get("T-1")["baseline_tracker_status"], "Backlog")
+        self.assertIn("`Backlog`", self.brief(".closeout"))
+        self.assertEqual(self.card(), "Backlog")
         self.assertEqual(self.findings(contracts.CARD_LEFT_IN_REVIEW), [])
 
     def test_a_card_unreadable_after_the_closeout_is_a_finding_and_never_a_halt(self):

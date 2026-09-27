@@ -143,7 +143,7 @@ def learnings_dir(manifest):
 def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, backend,
            landing_ref=None, branch=None, commit_range=None, gate=None,
            wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None,
-           return_to=None):
+           return_to=None, baseline_unknown=False):
     """The closeout brief. Deterministic from its inputs, like the task brief, and it never
     receives the task process transcript (R27), only the digest the runner composed from it.
 
@@ -158,7 +158,9 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
     failing final verify), naming it keeps the comment from reading as an undifferentiated halt
     on a card the runner already moved to a terminal status. `return_to` (stale cards,
     2026-09-08) is the status the runner wants a blocked or halted card returned to, or None;
-    the adapter renders the move sentence, so the brief and the adapter cannot disagree."""
+    the adapter renders the move sentence, so the brief and the adapter cannot disagree.
+    `baseline_unknown` (issue #51) says the None came from a status never read, rather than
+    from a refusal that leaves the card where it truly belongs."""
     task_id = card.get("id")
     envelope = (digest or {}).get("envelope") or {}
     landing_line = ""
@@ -197,7 +199,8 @@ def render(manifest, card, outcome, digest, comments, adapter, allowed_paths, ba
             "Do not write, transition, or comment on Jira: the triple coordinator records this "
             "outcome after this documentation pass."
             if manifest.execution.mode == "triple" and manifest.tracker.adapter == "jira"
-            else adapter.closeout_instructions(outcome, return_to=return_to, backend=backend)
+            else adapter.closeout_instructions(outcome, return_to=return_to, backend=backend,
+                                               baseline_unknown=baseline_unknown)
         ),
         "learnings_dir": learnings_dir(manifest),
         "allowed_paths": _bullets(allowed_paths),
@@ -255,7 +258,7 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
         backend, task_model=None,
         landing_ref=None, branch=None, commit_range=None, gate=None,
         wall_seconds=None, active_seconds=None, halt_class=None, cause_line=None,
-        timeout_seconds=None, return_to=None,
+        timeout_seconds=None, return_to=None, baseline_unknown=False,
         **launch_kwargs):
     """Render, launch, and read the ending. Returns what happened; it changes no git state and
     writes nothing to the tracker itself. The caller runs the scope check and the push.
@@ -267,7 +270,7 @@ def run(manifest, card, outcome, digest, comments, adapter, store, allowed_paths
                   landing_ref=landing_ref, branch=branch, commit_range=commit_range,
                   gate=gate, wall_seconds=wall_seconds,
                   active_seconds=active_seconds, halt_class=halt_class, cause_line=cause_line,
-                  return_to=return_to)
+                  return_to=return_to, baseline_unknown=baseline_unknown)
     brief_path = store.path("briefs", task_id + ".closeout.md")
     with open(brief_path, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -330,16 +333,55 @@ def return_to_for(manifest, record):
     in_review = manifest.tracker.in_review_status
     if not baseline or record.get("landing_ref"):
         return None
-    if in_review and str(baseline).lower() == str(in_review).lower():
+    if _same(baseline, in_review):
         return None
     return baseline
+
+
+def baseline_unknown(manifest, record):
+    """Issue #51: the first refusal of `return_to_for` on its own. The card was read but its
+    status was not, so the runner has nowhere known to return it, and the Task's start step may
+    still have moved it to the in review status. A Closeout told the card "keeps its current
+    status" is then told something false, so it is told this instead, and the runner reads the
+    card back afterwards. A landing reference refuses first, as it does in `return_to_for`."""
+    return not record.get("baseline_tracker_status") and not record.get("landing_ref")
+
+
+def launch_baseline(manifest, record, status):
+    """The baseline a launch records, given the status it just read (issue #51). A relaunch of a
+    card a blocked or halted attempt left in review reads the in review status, and recording
+    that would make `return_to_for` take the leftover for an operator's staging and never return
+    the card. So on a record an earlier launch already read, an empty read, or one that reads in
+    review, keeps that launch's baseline unless it read in review too. The earlier baseline may
+    itself be empty, and then the card stays unknown rather than turning into a staged one. Any
+    other read wins: a card the operator moved between runs goes back to where they put it, not
+    where it first stood. `baseline_sha` marks an earlier launch, because only the two launch
+    writes set it and they always set it."""
+    in_review = manifest.tracker.in_review_status
+    earlier = record.get("baseline_tracker_status")
+    if not record.get("baseline_sha") or _same(earlier, in_review):
+        return status
+    if not status or _same(status, in_review):
+        return earlier
+    return status
+
+
+def _same(a, b):
+    return bool(a) and bool(b) and str(a).lower() == str(b).lower()
+
+
+# What the runner tells the operator to return a card to when it never read where the card
+# stood; the audit's own sentence uses the same words.
+UNKNOWN_RETURN = "its todo status"
 
 
 def confirm_card_returned(adapter, manifest, task_id, return_to):
     """R4 of the stale cards plan: after a Closeout told to return the card, read it back. A
     finding when it still reads the in review status, or when the read failed, so the summary
     lists the card to move by hand. Never a halt: the run continues, and the runner never moves
-    the card itself."""
+    the card itself. A None `return_to` is a card whose baseline was never read (issue #51), and
+    the finding names `UNKNOWN_RETURN` in its place."""
+    return_to = return_to or UNKNOWN_RETURN
     in_review = manifest.tracker.in_review_status
     try:
         card = adapter.status(task_id) or {}
@@ -353,7 +395,7 @@ def confirm_card_returned(adapter, manifest, task_id, return_to):
                 "evidence": "the tracker could not be read to confirm the return: %s"
                             % card["skipped"]}
     status = card.get("status")
-    if in_review and status and str(status).lower() == str(in_review).lower():
+    if _same(status, in_review):
         return {"class": contracts.CARD_LEFT_IN_REVIEW, "task": task_id,
                 "card_status": status, "return_to": return_to,
                 "evidence": "the card reads %s after the closeout" % status}
