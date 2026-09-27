@@ -165,7 +165,7 @@ class BoardLag(unittest.TestCase):
 
 
 class ConfirmBoardTerminal(unittest.TestCase):
-    """The read after a landed Closeout, the same shape as `confirm_card_returned`."""
+    """The read after a landed Closeout, the same shape as `closeout.read_back`."""
 
     def confirm(self, run):
         return closeout.confirm_board_terminal(_adapter(run), _manifest(), "12")

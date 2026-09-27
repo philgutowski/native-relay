@@ -673,8 +673,11 @@ def cmd_lease(args, env, out):
     store = _store_for(manifest, env)
     lease = store.lease()
     if args.break_lease:
-        store.break_lease()
+        marked = store.break_lease()
         out.write("lease broken; it was %s\n" % (json.dumps(lease, sort_keys=True) if lease else "free"))
+        if marked:
+            out.write("%d record(s) in flight marked %s: %s\n"
+                      % (len(marked), contracts.HALT_RUNNER_CRASHED, ", ".join(marked)))
         return EXIT_OK
     if not lease:
         out.write("lease: free\n")

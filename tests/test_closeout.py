@@ -749,12 +749,53 @@ class LaunchBaseline(CloseoutCase):
         self.assertEqual(self.launch(self.earlier(None), "Todo", self.stale()), "Todo")
 
 
+class LaunchBaselineFromTheRunnersOwnRead(LaunchBaseline):
+    """Issue #64: `card_in_review_by_run` answers the relaunch rule, and the audit and the crash
+    marker count only on a record written before the field existed."""
+
+    def test_a_card_the_runner_left_in_review_keeps_the_earlier_baseline_with_no_audit(self):
+        """A broken lease, an interrupt, a triple run, an unreadable audit: no evidence at run
+        end, and the record's own flag is enough."""
+        left = self.earlier("Todo", card_in_review_by_run=True)
+        for audit in (None, {"count": 0, "findings": []}):
+            self.assertEqual(self.launch(left, self.in_review(), audit), "Todo")
+
+    def test_a_card_the_runner_saw_returned_is_staged_whatever_an_older_audit_says(self):
+        returned = self.earlier("Todo", card_in_review_by_run=False,
+                                halt_class=contracts.HALT_RUNNER_CRASHED)
+        self.assertEqual(self.launch(returned, self.in_review(), self.stale()), self.in_review())
+
+    def test_the_flag_does_not_stop_the_operators_move_winning(self):
+        left = self.earlier("Todo", card_in_review_by_run=True)
+        self.assertEqual(self.launch(left, "Backlog"), "Backlog")
+        self.assertEqual(self.launch(left, None), "Todo")
+
+
+class ReadBack(CloseoutCase):
+    """Issue #64: the read back says whether it saw the card out of review, and only a status
+    that answered counts."""
+
+    def read(self, status, return_to="Todo"):
+        adapter = FakeAdapter(statuses={"T-1": status})
+        return closeout.read_back(adapter, self.manifest, "T-1", return_to)
+
+    def test_a_returned_card_is_out_of_review(self):
+        self.assertEqual(self.read({"status": "Todo"}), (None, True))
+
+    def test_a_card_in_review_or_unreadable_is_not(self):
+        finding, out = self.read({"status": self.manifest.tracker.in_review_status})
+        self.assertEqual((finding["class"], out), (contracts.CARD_LEFT_IN_REVIEW, False))
+        for return_to in ("Todo", None):
+            self.assertFalse(self.read(adapters.skipped("refused"), return_to)[1])
+            self.assertFalse(self.read({"status": None}, return_to)[1])
+
+
 class ConfirmUnknownReturn(CloseoutCase):
     """Issue #51: the read back after a Closeout told the baseline was never read."""
 
     def confirm(self, status):
         adapter = FakeAdapter(statuses={"T-1": status})
-        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", None)
+        return closeout.read_back(adapter, self.manifest, "T-1", None)[0]
 
     def test_a_card_left_in_review_names_the_todo_status(self):
         finding = self.confirm({"status": self.manifest.tracker.in_review_status})
@@ -775,7 +816,7 @@ class ConfirmCardReturned(CloseoutCase):
 
     def confirm(self, statuses):
         adapter = FakeAdapter(statuses=statuses)
-        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", "Todo")
+        return closeout.read_back(adapter, self.manifest, "T-1", "Todo")[0]
 
     def test_a_card_back_at_its_status_confirms(self):
         self.assertIsNone(self.confirm({"T-1": {"status": "Todo"}}))
@@ -797,6 +838,6 @@ class ConfirmCardReturned(CloseoutCase):
             def status(self, task_id):
                 raise RuntimeError("down")
 
-        finding = closeout.confirm_card_returned(Exploding(), self.manifest, "T-1", "Todo")
+        finding, _out = closeout.read_back(Exploding(), self.manifest, "T-1", "Todo")
         self.assertEqual(finding["class"], contracts.CARD_LEFT_IN_REVIEW)
         self.assertIn("down", finding["evidence"])

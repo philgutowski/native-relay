@@ -141,7 +141,21 @@ a repair, because the runner never moves a card:
 Behind the audit, a Closeout for a blocked or halted task returns the card to the status it read
 before the run, since the task process moved it to in review at its first step and nobody is on
 it any more. When the card still reads in review after that Closeout, the record carries a
-`card_left_in_review` finding and the summary lists the card to move by hand. After a landed
+`card_left_in_review` finding and the summary lists the card to move by hand. The same finding
+fires when the status before the run is unknown, because the launch read of it failed: the
+Closeout is told it has nowhere known to send the card, and a card still in review afterwards is
+listed to move to its todo status by hand.
+
+The status before the run survives a relaunch. A card a blocked, halted, or dead attempt left in
+review reads in review when the task launches again, and the record keeps the status the earlier
+launch read instead, so the card still goes back there. The runner knows it left the card only
+from its own reads: every launch marks the record, since the task moves the card at its first
+step, and only a read of the card that finds it out of review clears the mark: the read back
+after a Closeout, or the audit at the end of a run, which also covers a card moved by hand. So
+a broken lease, an interrupted run, a timeout, and a triple run all keep the baseline without any
+audit, and a card the runner saw returned that the operator then put in review on purpose is left
+where they put it. A status other than in review at the relaunch is the operator's move and wins.
+After a landed
 Closeout on GitHub with a `status_field`, the runner reads the project item the same way, and an
 item on the declared project that does not read that status attaches a `board_item_not_terminal`
 finding naming the status to move it to.
@@ -407,9 +421,9 @@ The classes and what they mean for the operator:
 | `timeout` | the task ran past its bound and was killed with its whole process group | raise the timeout or split the task, then resume |
 | `unclean_exit` | the process left a dirty tree, claimed to finish and left nothing to merge, or a Task branch from an earlier attempt is still in place (evidence check `no_task_branch`) | inspect the tree, clean it, resume. For a stranded branch that carries finished commits there are three moves, not two. Keep it and the card stays blocked, discard it and the work is gone, or tag it and delete it: pre flight reads `refs/heads` only, so `git tag -a stranded/<branch> <branch> -m stranded && git branch -D <branch>` keeps every commit and frees the card, and if the tag name is taken the tag fails and the delete must not run. Rebuilding from the card's brief is often cheaper than resuming a branch whose recorded findings have gone stale |
 | `review_skipped` (a finding, never a halt) | on Claude, the task claimed complete without a `/code-review` Skill call in its transcript; it landed if the gate passed. On grok the skip is undetectable, so this finding is not attached and the digest lists `review_skipped` as not checked | review the diff of the landing commit by hand |
-| `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review | move the card back by hand to the status the line names |
+| `card_left_in_review` (a finding, never a halt) | the closeout was told to return a blocked or halted card to its pre run status and the card still reads in review, or the status before the run was never read and the card reads in review after the closeout | move the card back by hand to the status the line names, or to its todo status when the line says the status before the run is unknown |
 | `board_item_not_terminal` (a finding, never a halt) | GitHub only: the task landed and its issue is closed, but its item on the declared project does not read the manifest's `status_field`, or could not be read | move the item by hand to the status the line names |
-| `runner_crashed` | a stale lease was reclaimed while a record was in flight | nothing usually; the next run re-verifies it |
+| `runner_crashed` | a record was in flight when its runner stopped driving it: a stale lease was reclaimed, the operator ran `lease --break`, or the run left with no terminal record, an interrupt from the keyboard most often. The evidence's `cause` says which (`lease_reclaimed`, `lease_broken`, `interrupted`, `exited_without_terminal`) | nothing usually; the next run re-verifies it, and a relaunch keeps the card's status from before the run |
 | `unexpected_error` | the run loop hit something it did not anticipate: a defect, a library error, a task process that could not be launched, or a manifest naming an unimplemented shipping mode | read the error text in the cause line and the runner log; the fault is in the runner or the manifest, not the task, so fix that before resuming |
 | `ci_undecided` | reserved for `pr_terminal` mode, which `validate` refuses; no run can reach it today | not applicable |
 

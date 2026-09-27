@@ -66,6 +66,10 @@ triple route has one in `TripleCoordinator`. Each fails on the code before this 
 
 ## The rule that is not visible in the code
 
+Superseded in part by issue #64: the audit and crash marker below are now a fallback for old
+records only, and `card_in_review_by_run` decides. See
+`an-in-review-read-at-a-relaunch-is-ambiguous-and-only-the-runners-own-last-read-of-the-card-tells-leftover-from-staging.md`.
+
 An in review read at a relaunch is ambiguous. It is either the runner's leftover or the
 operator's staging, and `return_to_for` must not undo the second. The first version of the fix
 kept the earlier baseline on any in review read, which the review caught as overriding a

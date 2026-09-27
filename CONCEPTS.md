@@ -66,7 +66,10 @@ without anything outside the Runner watching a process.
 
 A Lease is renewed on a heartbeat rather than held for the length of the work, so it expires on
 its own if a Runner dies. A Lease past its expiry is stale and the next Runner reclaims it,
-marking any Task the dead Runner left in flight as halted. The expiry is deliberately shorter
+marking any Task the dead Runner left in flight as halted. Two other endings mark them the same
+way, since each leaves a Task in flight with nothing driving it: the operator breaking the Lease
+by hand, and a Runner leaving without a terminal record, an interrupt from the keyboard most
+often (issue #64). The expiry is deliberately shorter
 than any Task timeout, so a crashed Runner never blocks a repository for the length of a Task;
 the cost of that choice is that every long operation a Runner performs has to keep renewing, and
 one that does not is how a Runner ends up acting without the claim it thinks it holds.
@@ -291,7 +294,18 @@ its first step, so without the return every Task that did not land leaves a card
 with nobody on it. The Runner reads the card back afterwards and attaches a `card_left_in_review`
 finding when it did not move; it never moves the card itself. No return is asked for when the
 status before the run is unknown, when it was already the in review status, or when the record
-carries a landing reference, since that card was closed by a landing.
+carries a landing reference, since that card was closed by a landing. An unknown status still gets
+the read back: the Closeout is told the Task may have moved the card and there is nowhere known to
+send it, and a card still in review is a `card_left_in_review` finding to move by hand.
+
+That status is the baseline the record keeps across a relaunch (issues #51 and #64). A relaunch
+of a card an earlier attempt left in review reads in review, and recording that would read as the
+operator's staging, which is never undone, so the card would never go back. The Runner tells the
+two apart from its own reads, not from an audit: every launch marks the record, because the Task
+moves the card at its first step, and only a read of the card that finds it out of review clears
+the mark: the read back after a Closeout, or the run end audit. With the mark set, an in review read keeps the earlier baseline; with
+it clear, the operator put the card there and it stays. A status other than in review is the
+operator's move and wins either way.
 
 On GitHub a landed card has two truths, the issue's state and its project item's status, and a
 closed issue is terminal on its own (issue #43). So after a landed Closeout the Runner also reads
