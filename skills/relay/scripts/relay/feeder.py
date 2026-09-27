@@ -769,8 +769,23 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
         return bool(store) and store.status_word() == "running"
 
     def run_command(args, cwd, timeout):
-        return subprocess.run(list(args), cwd=cwd, env=env, capture_output=True, text=True,
-                              check=False, timeout=timeout, stdin=subprocess.DEVNULL)
+        # Its own process group, killed whole at the bound, for the reason `run_hook` gives
+        # below (issue #63). A ready command that is a shell wrapper otherwise leaves its
+        # children running in the repository, and one that holds the output pipe open keeps
+        # the read waiting past the bound.
+        with subprocess.Popen(list(args), cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=True) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except BaseException:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                proc.wait()
+                raise
+        return subprocess.CompletedProcess(list(args), proc.returncode, stdout, stderr)
 
     def run_hook(args, cwd, extra_env, output_path, timeout):
         # Its own process group, and the whole group is killed on a timeout or an interrupt:
@@ -1699,16 +1714,18 @@ def read_ready(manifest, config, deps, timeout=COMMAND_TIMEOUT_SECONDS):
         return [], str(exc)
 
 
-# `status` is a question an operator is waiting on, not a cycle, so a ready command gets a minute
-# there rather than the loop's fifteen. An adapter read keeps its own network timeouts, which
-# this does not shorten.
+# `status --queue` is a question an operator is waiting on, not a cycle, so a ready command gets
+# a minute there rather than the loop's fifteen, and its whole process group ends at that bound.
+# An adapter read keeps its own network timeouts, which this does not shorten.
 STATUS_READY_TIMEOUT_SECONDS = 60
 
 
 def ready_queue(manifest, env, deps=None):
     """([(id, model)], None) for the ready cards the next cycles would take, or (None, sentence)
-    when that cannot be worked out (issue #50). Reads only: no lock, no state write, no pre
-    cycle hook, since `status` must be safe beside a live feeder.
+    when that cannot be worked out (issue #50). Relay writes nothing here: no lock, no state
+    write, no pre cycle hook. It does run the sidecar's ready command in the target repository,
+    or read the tracker, and what that command does beside a live run is the operator's, so
+    only `status --queue` calls this and plain `status` never does (issue #63).
 
     The filter is the loop's `select` and `scanned_ids`: not listed in the manifest (the cycle
     estimate prices those), not denied by id or label, not refused by the R41 scan. Then a card

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import _paths
-from relay import cli, contracts, manifest as manifest_module, summary, tail
+from relay import cli, contracts, manifest as manifest_module, progress, summary, tail
 from test_run import RunCase
 
 
@@ -878,9 +878,10 @@ class StatusBar(CliCase):
 
 
 class StatusQueue(CliCase):
-    """Issue #50: under a feeder `status` also prices the ready queue behind the cycle, on a line
-    of its own. The ready source here is the sidecar's command, a local Python one liner, so the
-    real read path runs without a tracker."""
+    """Issue #50: under a feeder `status --queue` also prices the ready queue behind the cycle, on
+    a line of its own. Issue #63: plain `status` never runs the ready source, and says the flag
+    exists instead. The ready source here is the sidecar's command, a local Python one liner, so
+    the real read path runs without a tracker."""
 
     READY = json.dumps([{"number": 7, "title": "seven", "labels": []},
                         {"number": 8, "title": "eight", "labels": [{"name": "attended"}]},
@@ -895,10 +896,23 @@ class StatusQueue(CliCase):
     def printing(self):
         return "import sys; sys.stdout.write(%r)" % self.READY
 
+    def marking(self, marker):
+        """A ready command that leaves a file behind, so a test can tell whether it ran."""
+        return "open(%r, 'w').write('ran'); %s" % (marker, self.printing())
+
+    def snapshot(self):
+        seen = {}
+        for root, dirs, files in os.walk(self.tmp.name):
+            dirs[:] = [name for name in dirs if name != ".git"]
+            for name in files:
+                path = os.path.join(root, name)
+                seen[path] = os.stat(path).st_mtime_ns
+        return seen
+
     def test_a_feeder_manifest_prints_the_queue_beside_the_cycle_estimate(self):
         self.complete_run()
         self.write_sidecar(self.printing(), '[deny]\nlabels = ["attended"]\n')
-        code, out = self.call("status", self.manifest_path)
+        code, out = self.call("status", self.manifest_path, "--queue")
         self.assertEqual(code, cli.EXIT_OK, out)
         lines = out.splitlines()
         queue = [line for line in lines if line.startswith("queue:")]
@@ -911,10 +925,30 @@ class StatusQueue(CliCase):
         self.assertIn("in this cycle", remaining)
         self.assertEqual(lines.index(queue[0]), lines.index(remaining) + 1)
 
+    def test_plain_status_starts_no_child_and_names_the_flag(self):
+        self.complete_run()
+        marker = os.path.join(self.tmp.name, "ready-command-ran")
+        self.write_sidecar(self.marking(marker))
+        with mock.patch.object(cli.feeder_module, "ready_queue",
+                               side_effect=AssertionError("plain status priced the queue")):
+            code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertFalse(os.path.exists(marker), "plain status ran the ready command")
+        queue = [line for line in out.splitlines() if line.startswith("queue:")]
+        self.assertEqual(queue, [progress.QUEUE_ASK], out)
+        self.assertIn("status --queue", queue[0])
+        # The real read path too, with nothing patched: still no child.
+        code, out = self.call("status", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertFalse(os.path.exists(marker), "plain status ran the ready command")
+        # And the flag is what runs it.
+        self.call("status", self.manifest_path, "--queue")
+        self.assertTrue(os.path.exists(marker))
+
     def test_with_nothing_landed_the_queue_has_no_estimate_either(self):
         self.seed_stale_reclaim_on_t1()
         self.write_sidecar(self.printing())
-        code, out = self.call("status", self.manifest_path)
+        code, out = self.call("status", self.manifest_path, "--queue")
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("queue: 3 ready card(s), no estimate yet, no landed task carries a duration",
                       out)
@@ -922,7 +956,7 @@ class StatusQueue(CliCase):
     def test_an_unreadable_ready_source_is_a_sentence_and_never_fails_status(self):
         self.complete_run()
         self.write_sidecar("import sys; sys.stderr.write('board offline'); sys.exit(3)")
-        code, out = self.call("status", self.manifest_path)
+        code, out = self.call("status", self.manifest_path, "--queue")
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("queue: no estimate, the ready source could not be read: it exited 3: "
                       "board offline", out)
@@ -931,46 +965,68 @@ class StatusQueue(CliCase):
     def test_output_that_is_not_json_is_a_sentence_too(self):
         self.complete_run()
         self.write_sidecar("print('not json')")
-        code, out = self.call("status", self.manifest_path)
+        code, out = self.call("status", self.manifest_path, "--queue")
         self.assertEqual(code, cli.EXIT_OK, out)
         self.assertIn("queue: no estimate, the ready source could not be read:", out)
 
-    def test_an_unexpected_error_pricing_the_queue_is_a_sentence_too(self):
+    def test_any_exception_pricing_the_queue_is_a_sentence_too(self):
+        """Issue #63: the catch is every exception, not a named list. RuntimeError sat outside
+        the list #50 named and took the rest of `status` down."""
         self.complete_run()
         self.write_sidecar(self.printing())
-        with mock.patch.object(cli.feeder_module, "ready_queue",
-                               side_effect=TypeError("an adapter returned None")):
-            code, out = self.call("status", self.manifest_path)
+        for error in (TypeError("an adapter returned None"), RuntimeError("nothing names this")):
+            with mock.patch.object(cli.feeder_module, "ready_queue", side_effect=error):
+                code, out = self.call("status", self.manifest_path, "--queue")
+            self.assertEqual(code, cli.EXIT_OK, out)
+            self.assertIn("queue: no estimate, the ready queue could not be priced: %s: %s"
+                          % (type(error).__name__, error), out)
+            self.assertIn("terminal record:", out)
+
+    def test_a_ready_command_whose_child_outlives_the_bound_is_ended_with_it(self):
+        """Issue #63: a wrapper whose own child holds the output pipe open. Killing only the
+        direct child left the grandchild running in the repository, and the read waiting on
+        the pipe past the bound until the grandchild let go of it."""
+        self.complete_run()
+        marker = os.path.join(self.tmp.name, "grandchild-lived")
+        grandchild = "import time; time.sleep(3); open(%r, 'w').write('x')" % marker
+        self.write_sidecar("import subprocess, sys, time; subprocess.Popen([sys.executable, "
+                           "'-c', %r]); time.sleep(30)" % grandchild)
+        started = time.monotonic()
+        with mock.patch.object(cli.feeder_module, "STATUS_READY_TIMEOUT_SECONDS", 1):
+            code, out = self.call("status", self.manifest_path, "--queue")
+        self.assertLess(time.monotonic() - started, 3, "the read waited past its bound")
         self.assertEqual(code, cli.EXIT_OK, out)
-        self.assertIn("queue: no estimate, the ready queue could not be priced: TypeError: an "
-                      "adapter returned None", out)
-        self.assertIn("terminal record:", out)
+        self.assertIn("queue: no estimate, the ready source could not be read:", out)
+        # Past the grandchild's own sleep: had only the direct child been killed, it would have
+        # written by now.
+        time.sleep(4)
+        self.assertFalse(os.path.exists(marker), "the ready command's child outlived the bound")
 
     def test_without_a_sidecar_there_is_no_queue_line(self):
         self.complete_run()
         _, out = self.call("status", self.manifest_path)
         self.assertNotIn("queue:", out)
+        _, out = self.call("status", self.manifest_path, "--queue")
+        self.assertIn("queue: no estimate, no feeder sidecar sits beside this manifest", out)
+
+    def test_the_flag_before_any_state_says_so(self):
+        self.write_sidecar(self.printing())
+        code, out = self.call("status", self.manifest_path, "--queue")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("no state for", out)
+        self.assertIn("queue: no estimate, no run has written state for this manifest yet", out)
 
     def test_status_takes_no_lease_and_writes_nothing(self):
         self.complete_run()
         self.write_sidecar(self.printing())
         holder = self.store()
         self.assertTrue(holder.acquire().ok)
-
-        def snapshot():
-            seen = {}
-            for root, dirs, files in os.walk(self.tmp.name):
-                dirs[:] = [name for name in dirs if name != ".git"]
-                for name in files:
-                    path = os.path.join(root, name)
-                    seen[path] = os.stat(path).st_mtime_ns
-            return seen
-
-        before = snapshot()
-        code, out = self.call("status", self.manifest_path)
-        self.assertEqual(code, cli.EXIT_OK, out)
-        self.assertIn("queue: roughly", out)
-        self.assertEqual(snapshot(), before)
+        before = self.snapshot()
+        for argv in ((), ("--queue",)):
+            code, out = self.call("status", self.manifest_path, *argv)
+            self.assertEqual(code, cli.EXIT_OK, out)
+            self.assertIn("queue: roughly" if argv else progress.QUEUE_ASK, out)
+            self.assertEqual(self.snapshot(), before)
         holder.release()
 
 

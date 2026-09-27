@@ -308,12 +308,19 @@ reads the same in a terminal, in a session's tool output, and in `runner.log`. I
 
 Under a feeder the manifest's unsettled tasks are only the current cycle, so the estimate on each of
 these lines reads `roughly 1h 2m left in this cycle`. It prices the cycle's cards, not the ready
-queue behind them. `status` prices that queue on a line of its own, `queue: roughly 21h 4m for 37
-ready card(s) beyond this cycle`, reading the ready source the feeder reads and applying its deny
-set. Each card is priced at the mean landed duration of the model it would be routed to, or at the
-mean of every landed task when that model has none. It cannot count cards that are not ready yet or
-residuals nobody has filed, and says so. A ready source that cannot be read prints a sentence on
+queue behind them. `status --queue` prices that queue on a line of its own, `queue: roughly 21h 4m
+for 37 ready card(s) beyond this cycle`, reading the ready source the feeder reads and applying its
+deny set. Each card is priced at the mean landed duration of the model it would be routed to, or at
+the mean of every landed task when that model has none. It cannot count cards that are not ready
+yet or residuals nobody has filed, and says so. A read that fails in any way prints a sentence on
 that line and never fails `status`.
+
+The flag is what makes that read happen, because it is not read only. It runs the sidecar's ready
+command in the target repository, or reads the tracker, at that moment and beside whatever Task
+process is building there, so a command that fetches or writes a cache file does so beside the live
+run. The command gets a minute, and its whole process group ends at that bound. Plain `status`
+under a feeder prints `queue: not read` and names the flag instead, and the pre cycle hook runs
+from neither form.
 
 A board stays honest across a run. The task process moves a card to the in review status at its
 first step, and a Closeout for a blocked or halted task returns it to the status it read before
@@ -326,7 +333,9 @@ card that was reopened, a closed card nothing landed for, and a card that could 
 `status` is the one screen answer to how far along a run is: the same bar, the landed, running,
 halted, and todo counts, the elapsed per task and in total, and a rough estimate of what is left drawn from
 the mean of the tasks that have already landed. It says it has no estimate rather than guessing
-when nothing has landed yet. Like `tail` it takes no lease, so it is safe against a live run.
+when nothing has landed yet. Like `tail` it takes no lease, and plain `status` reads state only,
+running no command and reading no tracker, so it is safe to poll against a live run. `--queue` is
+the one form that reaches outside the state directory, as above.
 
 `tail` is how you watch a run that is already going. It follows each task's output in order and
 prints it decoded, one line per event, instead of the stream json that lands in `runner.log`. It

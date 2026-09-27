@@ -104,6 +104,9 @@ def build_parser():
 
     status = verbs.add_parser("status", help="print the run status without taking the lease")
     status.add_argument("manifest")
+    status.add_argument("--queue", action="store_true",
+                        help="under a feeder, also price the ready queue behind the cycle; runs "
+                             "the feeder's ready command in the target repo, or reads the tracker")
 
     tail_verb = verbs.add_parser("tail", help="follow the running task's activity, decoded")
     tail_verb.add_argument("manifest")
@@ -413,24 +416,32 @@ def _detach(args, manifest, env, out, verb="run"):
 
 
 def cmd_status(args, env, out):
-    """Reads state and nothing else. It never acquires the lease, so an operator can ask what a
-    live run is doing without disturbing it.
+    """Plain `status` reads state and nothing else: the state directory, the manifest, and the
+    feeder files beside it. It never acquires the lease, runs no command, and reads no tracker,
+    so an operator can ask what a live run is doing without disturbing it.
 
     It answers two questions now (issue #44). Where the run is, which is the cursor, the lease,
     and the terminal record it always printed. And how far along it is, which is the counts, the
     elapsed, and the rough remaining estimate `progress` derives from the record stamps.
 
-    Under a feeder it also reads the ready source, to price the queue behind the cycle (issue
-    #50). That is a read too: it still writes nothing and takes no lease.
+    `status --queue` also prices the ready queue behind a feeder's cycle (issue #50). That runs
+    the sidecar's ready command in the target repository, or reads the tracker, beside whatever
+    is building there, so it is asked for and never implied (issue #63). Plain `status` under a
+    feeder says the flag exists instead. Relay still writes nothing and takes no lease either way.
     """
     manifest, failure = _load(args.manifest, out, feeder_ok=True)
     if failure:
         return failure
+    queue = getattr(args, "queue", False)
     store = _store_for(manifest, env)
     raw = store.read()
     feeder_line = _feeder_line(args.manifest)
     if raw is None:
         out.write("no state for %s yet\n" % args.manifest)
+        if queue:
+            out.write(progress.queue_line(reason="no run has written state for this manifest "
+                                                 "yet, so there is no cycle to price behind")
+                      + "\n")
         if feeder_line:
             out.write(feeder_line + "\n")
         return EXIT_OK
@@ -445,8 +456,14 @@ def cmd_status(args, env, out):
     out.write("cursor: %d of %d task(s)\n" % (cursor, len(manifest.tasks)))
     for line in progress.lines(view):
         out.write(line + "\n")
-    if view["scope"] == progress.SCOPE_CYCLE:
+    if view["scope"] != progress.SCOPE_CYCLE:
+        if queue:
+            out.write(progress.queue_line(reason="no feeder sidecar sits beside this manifest, "
+                                                 "so there is no ready queue behind it") + "\n")
+    elif queue:
         out.write(_queue_line(manifest, view, env) + "\n")
+    else:
+        out.write(progress.QUEUE_ASK + "\n")
     # The state directory is keyed on the manifest's real path, so editing the manifest in place
     # keeps the directory and everything the previous run left in it. Say so rather than clamping
     # the number: the cursor and the terminal record are true facts, about a run this manifest no
@@ -489,16 +506,17 @@ def cmd_status(args, env, out):
 
 
 def _queue_line(manifest, view, env):
-    """The `queue:` line under a feeder (issue #50): the ready queue behind this cycle, priced
-    from the same landed durations. It reads the tracker, so it is the one part of `status` that
-    can fail on something outside the state directory, and a failure is a sentence on this line,
-    never an exit code."""
+    """The `queue:` line under `status --queue` (issue #50): the ready queue behind this cycle,
+    priced from the same landed durations. It runs the ready command or reads the tracker, so it
+    is the one part of `status` that can fail on something outside the state directory, and a
+    failure is a sentence on this line, never an exit code."""
     try:
         cards, reason = feeder_module.ready_queue(manifest, env)
-    except (ValueError, TypeError, AttributeError, KeyError, OSError,
-            subprocess.SubprocessError, adapters.ConfigurationError) as exc:
-        # An adapter or a state file shaped in a way nothing above names. The rest of `status`
-        # is the answer the operator came for, so this line never takes it down.
+    except Exception as exc:
+        # Every exception, not a named list (issue #63): an adapter or a state file shaped in a
+        # way nothing names still lands here. The rest of `status` is the answer the operator
+        # came for, so this line never takes it down. An interrupt is not an Exception and
+        # still stops the command.
         reason = "the ready queue could not be priced: %s: %s" % (type(exc).__name__, exc)
     if reason is not None:
         return progress.queue_line(reason=reason)

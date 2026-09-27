@@ -53,7 +53,8 @@ python3 <runner> pair split <manifest>          # write claude and grok sibling 
 python3 <runner> pair validate <pair>           # check a pair file and both members
 python3 <runner> dispatch <pair>                # run both backends at once, merging in the pair's order
 python3 <runner> dispatch <pair> --follow       # detach, then follow the dispatch here
-python3 <runner> status <manifest>              # what the run is doing and how much is left; never takes the lease
+python3 <runner> status <manifest>              # what the run is doing and how much is left; reads state only, never takes the lease
+python3 <runner> status <manifest> --queue      # the same, plus the ready queue behind a feeder's cycle; runs the ready source
 python3 <runner> tail <manifest>                # follow the tasks' activity decoded; never takes the lease
 python3 <runner> summary <manifest>             # the run summary as text
 python3 <runner> summary <manifest> --json      # the same summary as data
@@ -97,6 +98,16 @@ along it is, as the progress bar, the landed, running, halted, and todo counts, 
 task and in total, and a rough estimate of what is left drawn from the mean of the tasks that
 have landed. The estimate says it has none rather than guessing when no landed task carries a
 duration.
+
+Plain `status` reads the state directory, the manifest, and the feeder files beside it, and nothing
+else: it runs no command and reads no tracker, so it is safe to poll beside a live run. Under a
+feeder it prints `queue: not read` and names the flag. `status --queue` adds the ready queue behind
+the cycle, which runs the feeder sidecar's ready command in the target repository, or reads the
+tracker, at that moment and beside whatever is building there. Whatever that command fetches or
+writes lands beside the live Task process, and a dirty tree changes how its exit is classified,
+so ask for it deliberately. The command gets a minute, and its whole process group ends at that
+bound. A read that fails in any way is a sentence on the `queue:` line and never fails `status`.
+The pre cycle hook never runs from either form.
 
 Every launched task's record also carries `host_at_start` and `host_at_end`, the host's one minute
 load average, free and inactive memory, memory held by the macOS compressor, and cumulative swap

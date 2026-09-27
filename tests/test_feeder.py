@@ -1887,6 +1887,30 @@ class PostCycle(FeederCase):
         time.sleep(3)
         self.assertFalse(os.path.exists(marker))
 
+    def test_the_real_command_runner_kills_what_the_command_started_too(self):
+        """Issue #63: the ready command and the pre cycle hook go through `run_command`. A
+        wrapper's child that holds the output pipe must not keep the read past its bound, nor
+        live on in the repository after it."""
+        deps = feeder.build_deps(feeder.Config(), self.base_env())
+        marker = os.path.join(self.tmp.name, "grandchild-lived")
+        grandchild = "import time; time.sleep(2); open(%r, 'w').write('x')" % marker
+        script = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r]); "
+                  "time.sleep(30)" % grandchild)
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            deps.run_command(("python3", "-c", script), self.repo, 0.5)
+        self.assertLess(time.monotonic() - started, 2)
+        time.sleep(3)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_the_real_command_runner_returns_what_the_command_printed(self):
+        deps = feeder.build_deps(feeder.Config(), self.base_env())
+        done = deps.run_command(("python3", "-c", "import os, sys; print(os.getcwd()); "
+                                 "sys.stderr.write('warn'); sys.exit(4)"), self.repo, 30)
+        self.assertEqual(done.returncode, 4)
+        self.assertEqual(os.path.realpath(done.stdout.strip()), os.path.realpath(self.repo))
+        self.assertEqual(done.stderr, "warn")
+
 
 class RealRunner(FeederCase):
     def test_one_cycle_through_the_real_runner_over_the_stub(self):
