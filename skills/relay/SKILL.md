@@ -540,9 +540,9 @@ branch, the ready source is not configured, the runner refused the manifest, the
 a run scoped class (nothing is counted against the task then), a task that halted twice could
 not be excluded, every ready card was refused with the model it is routed to, or the ready
 source could not be read three cycles in a row with nothing left to run. 2 every task has died
-quickly for `limit_waits_max` waits in a row (16 by default, eight hours), which is not a usage
-limit or one that outlasts the waits, so read the summary; or a blocking post cycle hook failed
-with `post_cycle_hold` on. 3 another feeder already holds this manifest.
+quickly for `limit_waits_max` waits (16 by default, eight hours), with no landing between them,
+which is not a usage limit or one that outlasts the waits, so read the summary; or a blocking
+post cycle hook failed with `post_cycle_hold` on. 3 another feeder already holds this manifest.
 
 Three things the feeder tells the operator that a summary alone would not. A task it excluded
 after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest
@@ -558,12 +558,9 @@ marked exhausted for `fallback_hours` (5 by default), the task is moved to opus 
 and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
 mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
 where nothing landed, leaves the whole cycle wait in charge. It is off unless the sidecar says so.
-One task is bounded too: every usage limit wait it dies into is counted against it, a move or a
-restart never resets that count, and past `limit_waits_max` the feeder gives it up, reporting a
-blocked one blocked and excluding a halted one with its reason. Without that, two models that
-fall back to each other would relaunch a task every half hour for ever, since the first mark
-expires during the waits and the move that follows resets the whole cycle count. A landing, an
-exit 2, or `--retry-blocked` for that task clears its count.
+A cycle whose quick deaths all moved leaves the count of waits where it was; only a landing or a
+slow death resets it. So two models that fall back to each other still reach exit 2 when a task
+keeps dying quickly on both, rather than moving it back and forth every time a mark expires.
 
 A limit death is sometimes recorded `blocked` with class `no_envelope` rather than halted: the
 process printed only the CLI's limit message and exited in seconds. The fallback covers that too.

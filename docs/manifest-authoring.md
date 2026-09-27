@@ -468,6 +468,11 @@ post_cycle_timeout_seconds = 3600
   not itself die quickly that cycle, following a chain one model at a time and never coming
   back to a model it has passed. When every task died quickly, nothing landed, and any of
   those deaths had no such fallback, the whole cycle is waited out as before.
+- `limit_waits_max` counts waits with no landing between them. Only a landing or a slow death
+  resets the count; a cycle whose quick deaths all moved to a fallback leaves it where it was.
+  With two models that fall back to each other, the first model's mark expires during the
+  waits and the task moves back, and that move no longer starts the count again, so a task
+  that keeps dying quickly on both reaches exit 2, and a blocked one is reported blocked.
 - A limit death can also be recorded `blocked`, class `no_envelope`, when the process printed
   only the CLI's limit message. On a model with a fallback, the feeder reads such a record the
   same way when it died within `quick_death_seconds` and its stdout log does not say otherwise:
@@ -481,15 +486,6 @@ post_cycle_timeout_seconds = 3600
   relaunches on its own model with `--retry-blocked <id>`. In a cycle where something landed,
   one with no free fallback stays blocked. `feed <manifest>
   --retry-blocked <id>` queues one blocked task by hand the same way.
-- `limit_waits_max` bounds one task as well as the whole cycle wait. Every usage limit wait a
-  task dies into is counted against it in the state file, and neither a move nor a restart
-  resets that count the way they reset the waits in a row. Past `limit_waits_max` the task is
-  given up: a blocked one is reported blocked and not retried, a halted one is excluded with its
-  reason. Two models that fall back to each other need this, because the first model's mark
-  expires during the waits, a move becomes possible again, and the waits in a row never reach
-  their bound. Moves are not counted, since each one marks the model it leaves; counting them
-  would give a task up one wait before the exit 2 stop that asks for a person. A landing, an
-  exit 2, or `feed --retry-blocked` for that task clears its count.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart` reloads them on whatever tree the feeder already runs from; add `--pin` to also
   re-extract the current default branch commit into a fresh pinned tree and hand the feeder over

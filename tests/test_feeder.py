@@ -519,7 +519,7 @@ class BlockedLimit(FeederCase):
         self.assertIn("['2'] blocked on a usage limit and will be retried after the wait",
                       self.log_text())
 
-    def test_blocked_task_limit_waits_whose_fallback_is_exhausted_are_waited_out(self):
+    def test_blocked_limit_deaths_whose_fallback_is_exhausted_are_waited_out(self):
         # Issue #45. opus is marked, so fable's deaths have no free fallback. Before the fix
         # nothing halted, no wait ran, every task was reported blocked, fable stayed unmarked,
         # and the next cycle appended 4 and 5 on fable to die the same way.
@@ -570,88 +570,38 @@ class BlockedLimit(FeederCase):
         def ninety_minutes_pass():
             self.clock = self.clock + timedelta(minutes=90)
         self.before_run = ninety_minutes_pass
-        self.plans = [{"1": death()} for _ in range(8)]
+        self.plans = [{"1": death()} for _ in range(10)]
         code = self.feed(feeder.Config(model_fallback={"fable": "opus", "opus": "fable"},
                                        limit_waits_max=4))
-        # Moved to opus, waited on three times there; at the fifth run fable's mark is gone and
-        # the task moves back, which resets the waits in a row. Before issue #54 that went on
-        # for ever. Now its fifth wait in all, at the seventh run, gives it up.
-        self.assertEqual(code, 0)
+        # Moved to opus and waited on three times there. At the fifth run fable's mark is gone
+        # and the task moves back. That move used to reset the waits, so this went on for ever;
+        # now it leaves the count at three, and the second wait on fable runs it out.
+        self.assertEqual(code, 2)
         self.assertEqual([ran["1"] for ran in self.ran_on],
                          ["fable"] + ["opus"] * 4 + ["fable"] * 2)
         self.assertEqual(self.sleeps, [1800] * 4)
         self.assertIn("fable was marked exhausted at 2026-09-19T10:20:00, over 5h ago",
                       self.log_text())
-        self.assertIn("1 has died quickly into 5 usage limit waits, past limit_waits_max 4",
+        self.assertEqual(len(re.findall("reading that as (fable|opus)'s usage limit",
+                                        self.log_text())), 2)
+        self.assertIn("every task has died quickly for 4 waits, with no landing between them. "
+                      "Not a usage limit, or one that outlasts the waits. Read the summary.",
                       self.log_text())
-        self.assertEqual(self.state()["task_limit_waits"], {})
         self.assertEqual(self.state()["retry_blocked"], {})
         self.assertEqual(self.state()["halts"], {})
-        # Nothing landed, so giving the task up leaves the waits in a row where they were.
-        self.assertEqual(self.state()["limit_waits"], 2)
-        self.assertEqual(self.models(), {"1": "fable"})
-        self.assertIn("the queue is empty, leaving", self.log_text())
 
     def test_under_mutual_fallback_a_blocked_quick_death_is_reported_after_the_bound(self):
-        # No envelope and no result line: the shape that is not a limit at all.
+        # No envelope and no result line: the shape that may not be a limit at all.
         self.mutual_fallback_past_the_first_mark(lambda: self.blocked(4, log=""))
         self.assertEqual(self.retries, [[]] + [["1"]] * 6)
         hits = [note for note in self.notes if "1 blocked; a later run will not retry it" in note]
         self.assertEqual(len(hits), 1, self.notes)
-        self.assertNotIn("1", manifestedit.excluded_ids(self.text()))
 
-    def test_under_mutual_fallback_a_halted_quick_death_is_excluded_after_the_bound(self):
+    def test_under_mutual_fallback_a_halted_quick_death_runs_out_the_waits(self):
         self.mutual_fallback_past_the_first_mark(lambda: halted(8))
-        tasks = {task.id: task for task in mf.load(self.manifest_path).tasks}
-        self.assertTrue(tasks["1"].excluded)
-        self.assertIn("excluded by the feeder after 5 usage limit waits, last class "
-                      "unclean_exit", tasks["1"].reason)
-        self.assertTrue(mf.validate(mf.load(self.manifest_path)).ok)
-        self.assertTrue(any("1 excluded after 5 usage limit waits" in note
-                            for note in self.notes), self.notes)
-
-    def test_a_one_way_fallback_on_a_long_limit_still_stops_with_2_and_excludes_nothing(self):
-        # The move is not counted, so the whole cycle stop comes first, as it did before #54.
-        self.adapter.ready_cards = [card(1)]
-        self.write(self.paths.routing, "1 fable\n")
-        self.plans = [{"1": halted(8)} for _ in range(6)]
-        code = self.feed(feeder.Config(model_fallback={"fable": "opus"}, limit_waits_max=2))
-        self.assertEqual(code, 2)
-        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "opus", "opus"])
         self.assertEqual(manifestedit.excluded_ids(self.text()), set())
-        # A person is asked to look, and whoever starts it again gives it a fresh bound.
-        self.assertEqual(self.state()["task_limit_waits"], {})
 
-    def test_a_task_past_its_bound_is_given_up_while_the_rest_still_wait(self):
-        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "1"\nmodel = "sonnet"\n'
-                   'effort = "high"\n\n[[tasks]]\nid = "2"\nmodel = "sonnet"\neffort = "high"\n')
-        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
-                                                     task_limit_waits={"1": 4, "9": 3})))
-        self.adapter.ready_cards = []
-        self.plans = [{"1": halted(8), "2": halted(9)}, {}]
-        self.feed(feeder.Config(limit_waits_max=4))
-        self.assertEqual(self.sleeps, [1800])
-        self.assertEqual(manifestedit.excluded_ids(self.text()), {"1"})
-        self.assertEqual(self.records["2"]["status"], "landed")
-        # 2's count went with its landing, 1's with its exclusion, and 9 is not in the manifest.
-        self.assertEqual(self.state()["task_limit_waits"], {})
-
-    def test_a_retry_asked_for_by_hand_starts_a_fresh_bound(self):
-        self.write(self.manifest_path, self.head + '[[tasks]]\nid = "7"\nmodel = "opus"\n'
-                                                   'effort = "high"\n')
-        self.adapter.ready_cards = []
-        self.records["7"] = {"id": "7", "status": "blocked", "started_at": "old"}
-        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
-                                                     task_limit_waits={"7": 3})))
-        self.plans = [{"7": {"status": "blocked", "wall_seconds": 900,
-                             "class": "blocked_envelope"}}]
-        self.out = io.StringIO()
-        feeder.Feeder(self.paths, feeder.Config(), self.deps(), self.base_env(), self.out,
-                      once=True, retry_blocked=("7",)).run()
-        self.assertEqual(self.retries, [["7"]])
-        self.assertEqual(self.state()["task_limit_waits"], {})
-
-    def test_a_real_limit_that_clears_inside_the_bound_lands_and_its_count_goes(self):
+    def test_a_real_limit_that_clears_inside_the_waits_lands_and_resets_them(self):
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")
         self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)},
@@ -661,23 +611,24 @@ class BlockedLimit(FeederCase):
         self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "opus", "opus"])
         self.assertEqual(self.sleeps, [1800, 1800])
         self.assertEqual(self.records["1"]["status"], "landed")
-        self.assertEqual(self.state()["task_limit_waits"], {})
+        self.assertEqual(self.state()["limit_waits"], 0)
         self.assertNotIn("blocked; a later run will not retry it", self.log_text())
 
-    def test_the_count_survives_a_move_and_a_restart_and_only_a_landing_clears_it(self):
+    def test_a_cycle_whose_deaths_all_moved_leaves_the_waits_where_they_were(self):
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), limit_waits=3)))
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")
-        config = feeder.Config(model_fallback={"fable": "opus", "opus": "fable"})
-        self.plans = [{"1": halted(8)}, {"1": halted(9)}]
-        self.feed(config)
-        # One move, not counted, one wait, and then the stop file: a new feeder resets the
-        # waits in a row and starts from that count.
-        self.assertEqual(self.state()["task_limit_waits"], {"1": 1})
+        self.plans = [{"1": halted(8)}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        self.assertEqual(self.models(), {"1": "opus"})
+        self.assertEqual(self.state()["limit_waits"], 3)
+        # A slow death beside it would have said the waits were not a usage limit.
         os.remove(self.paths.stop)
-        self.plans = [{"1": halted(7)}]
-        self.feed(config)
-        self.assertEqual(self.state()["task_limit_waits"], {"1": 2})
-        self.assertEqual(self.state()["limit_waits"], 1)
+        self.write(self.paths.routing, "2 fable\n")
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.plans = [{"1": halted(5000), "2": halted(8)}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        self.assertEqual(self.state()["limit_waits"], 0)
 
     def test_a_blocked_death_with_no_free_fallback_holds_a_movable_halt_to_the_wait(self):
         # 1 halted on fable, whose fallback sonnet is free; 2 blocked on opus, whose fallback
@@ -697,7 +648,7 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.state()["exhausted"], {"haiku": "2026-09-19T08:00:00"})
         self.assertEqual(self.state()["halts"], {})
 
-    def test_blocked_task_limit_waits_with_no_free_fallback_run_out_the_waits_and_stop(self):
+    def test_blocked_limit_deaths_with_no_free_fallback_run_out_the_waits_and_stop(self):
         self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
                                                      exhausted={"opus": "2026-09-19T08:00:00"})))
         self.adapter.ready_cards = [card(1)]
