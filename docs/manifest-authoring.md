@@ -339,10 +339,15 @@ meant for `relay feed` is written exactly as above with two differences.
 A feeder launches the runner from its own tree at every cycle, so start it pinned to a commit,
 `feed <manifest> --pin`, rather than from a checkout you may still edit: an edit made there can
 reach the next task the runner launches, even one in the same batch, since the runner reads brief
-templates while a batch is in flight. `feed <manifest> --pin` extracts the default branch's
-commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>` and starts the
-feeder from it, taking over a live one with restart semantics; `--pin --dry-run` says what it
-would extract and writes nothing. A feeder started from a checkout instead prints the checkout
+templates while a batch is in flight. From a git work tree, `feed <manifest> --pin` extracts the
+default branch's commit, never HEAD, to `~/.relay/extracts/native-relay-<first 12 sha characters>`,
+reusing an extract whose sha is unchanged rather than remaking it, and starts the feeder from it,
+taking over a live one with restart semantics; from an existing extract or a plugin install copy
+`--pin` is a plain restart and extracts nothing. From a git work tree, `--pin --dry-run` says what
+would be extracted, then also runs the ordinary dry run of the next cycle with this checkout's
+code, noted, and writes nothing itself; from an existing extract or a plugin install copy, `--pin`
+combined with `--dry-run` says nothing about pinning and is silently a no-op. A feeder started
+from a checkout instead prints the checkout
 warning, naming the tree it runs from, at launch and in its log: relaunch it with `--pin` before
 trusting the next cycle.
 
@@ -532,9 +537,11 @@ post_cycle_timeout_seconds = 3600
   reason `model_held` rather than leave, and that wait neither adds to nor resets the count of
   usage limit waits.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
-  --restart` reloads them on whatever tree the feeder already runs from; add `--pin` to also
-  re-extract the current default branch commit into a fresh pinned tree and hand the feeder over
-  to it, since a restart with no `--pin` keeps running from a checkout when it was never pinned.
+  --restart` reloads them on whatever tree the feeder already runs from; a restart with no
+  `--pin` keeps running from a checkout when it was never pinned. Add `--pin`, run from a git work
+  tree, to also re-extract the current default branch commit (reusing an extract whose sha is
+  unchanged rather than remaking it) into a pinned tree and hand the feeder over to it; from an
+  existing extract or a plugin install copy `--pin` is a plain restart and extracts nothing.
   The order and routing files are read at every cycle and need no restart.
 
 Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, a queue held
