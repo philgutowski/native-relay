@@ -402,6 +402,17 @@ The same rule runs per model when the sidecar names a fallback for one: a quick 
 model marks it exhausted for a while and moves its Task to the fallback, uncounted, even when
 Tasks on other models landed in the same Cycle.
 
+A limit death is not always a halt. A Task process that printed only the CLI's limit message
+and exited in seconds has no return envelope, so the Runner records it blocked, and a blocked
+record is one no later run relaunches unasked. On a model with a fallback the Feeder reads such
+a record as a limit death too, when it died quickly and its log does not say otherwise, and it
+counts beside the halts as a quick death for both rules. When a fallback is free the Task moves
+there. When none is, because the fallback is itself exhausted or died in the same Cycle, and
+nothing landed, the Cycle is waited out as a whole. Either way the blocked Task is queued for
+a retry: the next run relaunches it by id with `--retry-blocked`, and no other blocked record
+with it. A queued retry holds its place in the batch like a halted Task, so the Cycle after a
+wait relaunches the dead Tasks rather than appending fresh cards on the model that just died.
+
 The Feeder is the one piece of runner code that writes a Manifest. Every write is a text edit
 that is parsed back and compared with the change intended, validated by the manifest module from
 a temporary file, and only then renamed over the Manifest, so no reader ever sees a half written

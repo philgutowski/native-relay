@@ -32,14 +32,18 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     `model_limit_moves` is the heuristic, named like the other. A fallback is only taken when
     it leads to a model that is not exhausted and did not itself die quickly this cycle, so a
     chain of fallbacks never loops. A cycle where every task died quickly, nothing landed, and
-    some halt has no such fallback is still waited out as a whole.
+    some quick death has no such fallback is still waited out as a whole.
 
     A limit death is not always a halt (issue #39). A process that printed only the CLI's limit
     message and exited is recorded `blocked` with class `no_envelope`, and a blocked record is
     one the runner never relaunches unasked. `blocked_by_usage_limit` reads such a record, on a
     model that has a fallback, as that model's limit too, confirmed by the log's `result` line
     when it has one. It is moved like a halt, and the feeder then passes `--retry-blocked ID`
-    for it alone to the next run, so no other blocked record is revived with it.
+    for it alone to the next run, so no other blocked record is revived with it. It is a quick
+    death for the whole cycle rule too (issue #45): a cycle whose deaths are all of this kind,
+    with no fallback free, is waited out like a cycle of halts, and each such record is queued
+    for the same retry after the wait. Without that it fell through to an ordinary blocked
+    report, left its model unmarked, and the next cycle appended fresh cards on the dead model.
 
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes three
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
@@ -363,12 +367,13 @@ def died_quickly(task, config):
             and task["wall_seconds"] < config.quick_death_seconds)
 
 
-def looks_like_usage_limit(halted, landed, config):
-    """The heuristic of rule 3, and only a heuristic. True when something halted, nothing
-    landed, and every halt died quickly in the sense of `died_quickly`."""
-    if not halted or landed:
+def looks_like_usage_limit(dead, landed, config):
+    """The heuristic of rule 3, and only a heuristic. True when something died, nothing landed,
+    and every death was quick in the sense of `died_quickly`. `dead` is the halted tasks and
+    the blocked ones `blocked_by_usage_limit` chose, which are quick by construction."""
+    if not dead or landed:
         return False
-    return all(died_quickly(task, config) for task in halted)
+    return all(died_quickly(task, config) for task in dead)
 
 
 def result_event(log_text):
@@ -432,7 +437,8 @@ def model_limit_moves(halted, models, config, exhausted):
     `models` is {id: model} for those tasks and `exhausted` the models already marked. A
     model that died quickly this cycle is treated as exhausted too when it is looked at as a
     fallback, so two models that fall back to each other and both died never send their
-    tasks back and forth; neither is moved, and the whole cycle rule decides."""
+    tasks back and forth; neither is moved, and the whole cycle rule decides, for blocked limit
+    deaths as much as for halts."""
     quick = [task for task in halted if died_quickly(task, config)]
     dying = {models.get(task["id"]) for task in quick} & set(config.model_fallback)
     unavailable = set(exhausted) | dying
@@ -842,13 +848,13 @@ class Feeder:
                                           % (data.get("halt_task"), data.get("halt_class")))
         dead = halted + limited
         moves = model_limit_moves(dead, self._models(dead), config, self.exhausted_models())
-        halted_ids = {task["id"] for task in halted}
-        halted_moves = [move for move in moves if move[0]["id"] in halted_ids]
-        if looks_like_usage_limit(halted, landed, config) and len(halted_moves) < len(halted):
-            # Some quick death has no fallback to take, so the whole cycle rule decides. When
+        if looks_like_usage_limit(dead, landed, config) and len(moves) < len(dead):
+            # Some quick death, halted or a blocked limit death, has no fallback to take, so the
+            # whole cycle rule decides (issue #45: a cycle of blocked deaths alone counts). When
             # every one has, the moves below replace the wait. A blocked limit death waits with
-            # the halts and then relaunches where it was, as they do, unless the waits have run
-            # out and the feeder is declaring these deaths not a usage limit after all.
+            # the rest and then relaunches where it was, queued for a retry that holds its room
+            # in the batch, unless the waits have run out and the feeder is declaring these
+            # deaths not a usage limit after all.
             if self.strike("limit_waits", config.limit_waits_max):
                 for task in limited:
                     self.report_blocked(task)
@@ -862,9 +868,9 @@ class Feeder:
                 self.log("%s blocked on a usage limit and will be retried after the wait with "
                          "--retry-blocked" % sorted(limited_ids))
             self.save_state()
-            self.log("every halted task died inside %ds, reading that as a usage limit, waiting "
-                     "%ds; these halts are not counted" % (config.quick_death_seconds,
-                                                           config.limit_wait_seconds))
+            self.log("every task that died this cycle died inside %ds, reading that as a usage "
+                     "limit, waiting %ds; these deaths are not counted"
+                     % (config.quick_death_seconds, config.limit_wait_seconds))
             return self.wait(config.limit_wait_seconds)
         self.state["limit_waits"] = 0
         moved = self.fall_back(moves, limited_ids)

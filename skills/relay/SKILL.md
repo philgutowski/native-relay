@@ -524,8 +524,11 @@ The feeder reads the task's stdout log, where a `result` line with `api_error_st
 the limit and a `result` line with any other outcome, a 404 for a model the account cannot reach
 for one, rules it out; with no `result` line the time rule decides alone. A blocked task it moves
 is relaunched by passing `--retry-blocked <id>` for it alone to the next run, so no older blocked
-task is revived with it. In a cycle the whole cycle wait takes, it waits with the halts and then
-relaunches on its own model. To relaunch one blocked task by hand, `feed <manifest> --restart
+task is revived with it. It counts as a quick death for the whole cycle wait as well, so a cycle
+whose deaths are all blocked limit deaths with no free fallback, and where nothing landed, is
+waited out like a cycle of halts. In a cycle the whole cycle wait takes, it waits with the rest,
+holds its place in the batch, and then relaunches on its own model with `--retry-blocked`, so no
+fresh card is appended on the model that just died. To relaunch one blocked task by hand, `feed <manifest> --restart
 --detach --retry-blocked <id>` queues it for the next cycle, never `run` beside a live feeder. An
 id the manifest does not list stops the feeder with exit 1.
 
