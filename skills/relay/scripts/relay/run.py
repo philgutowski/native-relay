@@ -76,6 +76,10 @@ class _Run:
     # Dispatch only (issue #71). Flights still alive when the coordinator gave up waiting for
     # them, as `{task, process_group}`. Named in the terminal record, never marked crashed.
     surviving_flights: list = field(default_factory=list)
+    # Whether a launch on the main thread releases the lease from its interrupt handler. Serial
+    # `run` does. Dispatch does not (issue #79): its builds in flight are still alive when the
+    # Closeout's handler runs, so the release waits for `_concurrent_loop` to stop them first.
+    release_on_interrupt: bool = True
 
 
 @dataclass
@@ -1124,7 +1128,8 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
         for line in scheduler.render(schedule).splitlines():
             stream(line)
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
-                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule)
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule,
+                  release_on_interrupt=False)
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
@@ -1673,19 +1678,26 @@ def _spawn_flight(cfg, begun, dest):
     stopping = threading.Event()
 
     def on_started(_pid, group_id):
+        # No group id means the process was gone before its group could be read (issue #79).
+        # Nothing is left to signal, so the flight stays groupless and `_flight_exited` goes by
+        # its thread instead.
+        if group_id is None:
+            return
         # The group first and the check second, the reverse of `_stop_flights`, so one of the
         # two always sees the other and a late start is never missed.
         pgid_box.append(group_id)
-        if stopping.is_set() and group_id:
+        if stopping.is_set():
             _signal_group(group_id, signal.SIGKILL)
 
     def worker():
         try:
+            # No release callback (issue #79). Only `dispatch` releases, after every flight is
+            # stopped; a thread cannot install the handler that would call it anyway.
             launched = launch.launch(
                 cfg.manifest, begun.task, begun.brief_text, begun.log_path,
                 cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
                 home=cfg.home, base_env=cfg.base_env, stream=None,
-                heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=dest,
+                heartbeat=cfg.store.heartbeat, on_release=None, cwd=dest,
                 on_started=on_started, **cfg.launch_kwargs)
             result_box.append(("ok", launched))
         except Exception as exc:
@@ -1839,7 +1851,9 @@ def _concurrent_loop(cfg, announce):
     Issue #71. Anything leaving the loop by an exception, an interrupt from the keyboard most
     often, ends every build in flight first and abandons it the way a halt that does not continue
     past does, so dispatch's own handlers mark records and release the lease only once no Task
-    process is left behind them. A build that would not die is kept on `cfg.surviving_flights`
+    process is left behind them. That holds for an interrupt landing in the Closeout on the main
+    thread too: its handler ends the Closeout and raises, and releases nothing (issue #79). A
+    build that would not die is kept on `cfg.surviving_flights`
     for the terminal record. A build already finished and waiting its merge is left alone: its
     process has exited, and its branch is completed work the next pre flight will name, not a
     half built one to discard."""
@@ -2229,7 +2243,7 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         halt_class=halt_class, cause_line=cause_line, return_to=return_to,
         baseline_unknown=baseline_unknown, timeout_seconds=ctx.overrides.get("closeout_seconds"),
         home=ctx.home, base_env=ctx.base_env, stream=ctx.stream, heartbeat=ctx.store.heartbeat,
-        on_release=ctx.store.release, **ctx.launch_kwargs)
+        on_release=ctx.store.release if ctx.release_on_interrupt else None, **ctx.launch_kwargs)
     ctx.findings.extend(result.findings)
     ctx.store.upsert(ctx.task.id, closeout=result.result, findings=ctx.findings)
 

@@ -6,7 +6,6 @@ import _paths
 import _repo
 from relay import contracts, gitread, manifest as mf, pair, run as runner, state
 from test_run import CLOSE_SH, COMMENT_SH, HELPER, MANIFEST, RunCase, task_branch_sh
-
 GROK_COMPLETE = os.path.join(_paths.FIXTURES_DIR, "backends", "grok",
                              "session-transcript-complete.jsonl")
 
@@ -37,6 +36,23 @@ model = "grok-4.6"
 effort = "low"
 backend = "grok"
 reason = "mechanical work, a good use of the grok account"
+'''
+
+# Two tasks a parallel schedule puts in one wave: disjoint declared paths, no shared text.
+PARALLEL_PAIR = '''
+[[tasks]]
+id = "T-1"
+model = "sonnet"
+effort = "low"
+declared_paths = ["src/t_1.py"]
+
+[[tasks]]
+id = "T-2"
+model = "grok-4.6"
+effort = "low"
+backend = "grok"
+reason = "mechanical work, a good use of the grok account"
+declared_paths = ["src/t_2.py"]
 '''
 
 TRACKER_FOUR = """# Tasks
@@ -263,6 +279,98 @@ class DispatchEndToEnd(DispatchCase):
         self.assertEqual(terminal["run_status"], contracts.RUN_CRASHED)
         self.assertEqual(terminal["surviving_flights"],
                          [{"task": "T-1", "process_group": group}])
+
+    def test_an_interrupt_during_a_closeout_stops_the_build_before_the_lease_goes(self):
+        """Issue #79. T-1's Closeout runs on the main thread while T-2 builds in a worktree, and
+        the interrupt lands in the Closeout's own signal handler. That handler used to release
+        the lease before raising, so the lease sat free while T-2's Task process was alive and
+        its record read running. Now no build is alive at any release, and T-2 is pending."""
+        import signal
+        from unittest import mock
+        head, _, _ = MANIFEST.partition("[[tasks]]")
+        with open(self.manifest_path, "w") as handle:
+            handle.write(head.replace("__REPO__", self.repo) + PARALLEL_PAIR)
+        self.manifest = mf.load(self.manifest_path)
+        # No RELAY_STUB_CHILD here: the knob reaches every stub, and T-1's own grandchild would
+        # hold its stdout open so its build never finished and the Closeout never started. T-2's
+        # sleeping stub is a live process group on its own.
+        self.task_success("T-1")
+        self.queue_entry("closeout_skipped.jsonl", CLOSE_SH % ("T-1", "T-1"), sleep=60,
+                         backend="claude")
+        self.grok_success("T-2", sleep=60)
+
+        flights = []
+        real_spawn = runner._spawn_flight
+
+        def spawn(cfg, begun, dest):
+            flight = real_spawn(cfg, begun, dest)
+            flights.append(flight)
+            return flight
+
+        def cleanup():
+            for flight in flights:
+                for group in flight.pgid:
+                    if group:
+                        _kill_group_quietly(group)
+        self.addCleanup(cleanup)
+
+        sent = []
+
+        def stream(_line):
+            # Only a launch on the main thread installs its handler, and under dispatch that is
+            # the Closeout's. Sent once the handler is in place, so it is the one that runs.
+            handler = signal.getsignal(signal.SIGINT)
+            if not sent and "launch.<locals>.handle" in getattr(handler, "__qualname__", ""):
+                sent.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+
+        alive_at_release = []
+        real_release = state.StateStore.release
+
+        def release(store, *args, **kwargs):
+            alive_at_release.append([_group_alive(flight.pgid[0]) for flight in flights
+                                     if flight.begun.task.id == "T-2" and flight.pgid])
+            return real_release(store, *args, **kwargs)
+
+        with mock.patch.object(runner, "_spawn_flight", side_effect=spawn), \
+                mock.patch.object(state.StateStore, "release", release):
+            with self.assertRaises(KeyboardInterrupt):
+                # Bounded so a regression fails in a minute rather than the manifest's eleven.
+                self.go_dispatch(stream=stream, policy="parallel",
+                                 timeout_overrides={"task_seconds": 45, "closeout_seconds": 45})
+        self.assertEqual(sent, [True])
+        self.assertEqual([flight.begun.task.id for flight in flights], ["T-1", "T-2"])
+        self.assertTrue(alive_at_release)
+        self.assertEqual(alive_at_release, [[False]] * len(alive_at_release))
+        records = self.store().records()
+        self.assertEqual(records["T-2"]["status"], contracts.STATUS_PENDING)
+        self.assertFalse(os.path.isdir(self.store().path("worktrees", "T-2")))
+        self.assertFalse(gitread.branch_exists(self.repo, "relay/T-2"))
+        self.assertEqual(records["T-1"]["halt_class"], contracts.HALT_RUNNER_CRASHED)
+        self.assertIsNone(self.store().lease())
+
+    def test_a_flight_whose_process_exited_at_once_is_stopped_without_raising(self):
+        """Issue #79. Launch reports no group id when the child is gone before it could be read.
+        The flight then has no group to signal or probe, and the stop must not raise on it."""
+        import types
+        from unittest import mock
+
+        def launched(*_args, on_started=None, **_kwargs):
+            on_started(4242, None)
+            return types.SimpleNamespace(launch_error=None)
+
+        cfg = types.SimpleNamespace(
+            manifest=None, overrides={"task_seconds": 1}, home=None, base_env=None,
+            store=types.SimpleNamespace(heartbeat=None, release=None),
+            launch_kwargs={"sigkill_grace_seconds": 0}, stream=None)
+        begun = types.SimpleNamespace(task=types.SimpleNamespace(id="T-1"), brief_text="",
+                                      log_path="unused.log")
+        with mock.patch.object(runner.launch, "launch", side_effect=launched):
+            flight = runner._spawn_flight(cfg, begun, None)
+            flight.thread.join(timeout=5)
+        self.assertEqual(runner._stop_flights(cfg, [flight]), [])
+        self.assertEqual(runner._named_flights([flight]),
+                         [{"task": "T-1", "process_group": None}])
 
     def test_an_interrupt_after_a_halts_abort_keeps_the_survivor_the_halt_named(self):
         """Issue #71, from the code review. The halt's abort named T-2 and took it out of the
