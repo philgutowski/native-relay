@@ -485,6 +485,10 @@ BOARD_ITEM_NOT_TERMINAL = "board_item_not_terminal"
 # record, so they are not in LINE_CLASSES and have no HALT_LINES template: `audit.build` writes
 # each finding's sentence itself, and `summary` copies it into the pending checks as it is.
 AUDIT_STALE_IN_REVIEW = "card_stale_in_review"
+# Where the operator is told to move a card whose status before the run was never read (issue
+# #51): the audit's stale card sentence, the card_left_in_review finding, and the Closeout's own
+# move sentence all name it, so the three cannot drift apart.
+UNKNOWN_RETURN = "its todo status"
 AUDIT_REOPENED = "card_reopened"
 AUDIT_CLOSED_UNLANDED = "card_closed_unlanded"
 AUDIT_UNREADABLE = "card_unreadable"

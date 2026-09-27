@@ -14,7 +14,7 @@ from unittest import mock
 import _paths
 import _repo
 from _fakes import FakeAdapter
-from relay import classify, closeout, contracts, launch, manifest as mf, run as runner, state
+from relay import adapters, classify, closeout, contracts, launch, manifest as mf, run as runner, state
 from relay.adapters import jira as jira_adapter
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
@@ -665,6 +665,109 @@ class ReturnTo(CloseoutCase):
     def test_a_landed_brief_asks_for_no_move(self):
         self.render("landed")
         self.assertIn(("closeout_instructions", "landed", None), self.adapter.calls)
+
+    def test_the_brief_carries_an_unknown_baseline_to_the_adapter(self):
+        self.assertIn("Its baseline was never read.", self.render("blocked", baseline_unknown=True))
+        self.assertNotIn("Its baseline was never read.", self.render("blocked"))
+
+
+class BaselineUnknown(CloseoutCase):
+    """Issue #51: a status never read is the one refusal of `return_to_for` whose card may not
+    be where "keeps its current status" says it is."""
+
+    def test_no_baseline_status_is_unknown(self):
+        self.assertTrue(closeout.baseline_unknown(self.manifest, {}))
+        self.assertTrue(closeout.baseline_unknown(self.manifest,
+                                                  {"baseline_tracker_status": None}))
+
+    def test_a_read_baseline_is_known_even_when_it_is_the_in_review_status(self):
+        in_review = self.manifest.tracker.in_review_status
+        for baseline in ("Todo", in_review):
+            self.assertFalse(closeout.baseline_unknown(
+                self.manifest, {"baseline_tracker_status": baseline}), baseline)
+
+    def test_a_landing_reference_refuses_before_the_unknown_baseline(self):
+        self.assertFalse(closeout.baseline_unknown(self.manifest, {"landing_ref": "a" * 40}))
+
+
+class LaunchBaseline(CloseoutCase):
+    """Issue #51: what a launch records as the card's baseline, given what it just read, the
+    record an earlier launch left, and the last run end audit."""
+
+    def in_review(self):
+        return self.manifest.tracker.in_review_status
+
+    def earlier(self, status, **fields):
+        return dict({"id": "T-1", "baseline_sha": "b" * 40, "baseline_tracker_status": status},
+                    **fields)
+
+    def stale(self, task_id="T-1"):
+        """A last audit naming the card stale in review: the runner left it there."""
+        return {"count": 1, "findings": [{"class": contracts.AUDIT_STALE_IN_REVIEW,
+                                          "task": task_id}]}
+
+    def launch(self, record, status, audit=None):
+        return closeout.launch_baseline(self.manifest, record, status, audit)
+
+    def test_a_first_launch_records_what_it_read(self):
+        for status in ("Todo", self.in_review(), None):
+            self.assertEqual(self.launch({"id": "T-1"}, status, self.stale()), status)
+
+    def test_a_relaunch_of_a_card_the_runner_left_in_review_keeps_the_earlier_baseline(self):
+        self.assertEqual(self.launch(self.earlier("Todo"), self.in_review().upper(),
+                                     self.stale()), "Todo")
+
+    def test_a_crashed_runners_card_counts_as_left_in_review(self):
+        """No Closeout ran after a crash, and no audit either."""
+        crashed = self.earlier("Todo", halt_class=contracts.HALT_RUNNER_CRASHED)
+        self.assertEqual(self.launch(crashed, self.in_review()), "Todo")
+
+    def test_an_in_review_read_with_no_evidence_is_the_operator_staging_it_again(self):
+        """The last Closeout returned the card and the audit found nothing, so the operator put
+        it in review since, and `return_to_for` leaves staging alone."""
+        for audit in (None, {"count": 0, "findings": []}, self.stale("T-2")):
+            self.assertEqual(self.launch(self.earlier("Todo"), self.in_review(), audit),
+                             self.in_review(), audit)
+
+    def test_a_relaunch_whose_status_read_failed_keeps_the_earlier_baseline(self):
+        self.assertEqual(self.launch(self.earlier("Todo"), None), "Todo")
+
+    def test_a_card_the_operator_moved_between_runs_records_where_they_put_it(self):
+        self.assertEqual(self.launch(self.earlier("Todo"), "Backlog", self.stale()), "Backlog")
+
+    def test_an_earlier_staged_baseline_takes_the_new_read(self):
+        """The operator staged the card in review for the first launch, so the in review read
+        now is theirs too, and a different read is a move they made since."""
+        for status in (self.in_review(), "Todo"):
+            self.assertEqual(self.launch(self.earlier(self.in_review()), status, self.stale()),
+                             status)
+
+    def test_an_earlier_unknown_baseline_stays_unknown_on_a_leftover_in_review_read(self):
+        """The first launch never read the status and its Task moved the card, so an in review
+        read now is no evidence the operator staged it."""
+        self.assertIsNone(self.launch(self.earlier(None), self.in_review(), self.stale()))
+        self.assertEqual(self.launch(self.earlier(None), "Todo", self.stale()), "Todo")
+
+
+class ConfirmUnknownReturn(CloseoutCase):
+    """Issue #51: the read back after a Closeout told the baseline was never read."""
+
+    def confirm(self, status):
+        adapter = FakeAdapter(statuses={"T-1": status})
+        return closeout.confirm_card_returned(adapter, self.manifest, "T-1", None)
+
+    def test_a_card_left_in_review_names_the_todo_status(self):
+        finding = self.confirm({"status": self.manifest.tracker.in_review_status})
+        self.assertEqual((finding["class"], finding["return_to"]),
+                         (contracts.CARD_LEFT_IN_REVIEW, contracts.UNKNOWN_RETURN))
+
+    def test_an_unreadable_card_is_no_finding(self):
+        """The launch read of the same board already failed; the audit reports the card."""
+        self.assertIsNone(self.confirm(adapters.skipped("the board refused the read")))
+
+    def test_a_card_out_of_review_is_no_finding(self):
+        self.assertIsNone(self.confirm({"status": "Todo"}))
+
 
 
 class ConfirmCardReturned(CloseoutCase):

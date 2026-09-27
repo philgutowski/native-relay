@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 from . import (ConfigurationError, NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED,
-               reference_hit, skipped)
+               reference_hit, skipped, unknown_baseline_move)
 
 ISSUE_FIELDS = "summary,description,status,comment,project"
 # The issue endpoint is the one the plan pins. Enhanced search is the current Jira Cloud path for
@@ -93,6 +93,7 @@ class JiraAdapter:
         self._site = (tracker.site or "").rstrip("/")
         self._project_key = tracker.project_key
         self._done = tuple(str(name).lower() for name in tracker.done_statuses)
+        self._in_review = tracker.in_review_status
         token = env.get(tracker.token_env)
         email = env.get(tracker.email_env)
         if not token:
@@ -333,26 +334,32 @@ class JiraAdapter:
             return GROK_CLOSEOUT_TOOLS
         return CLOSEOUT_TOOLS
 
-    def closeout_instructions(self, outcome, return_to=None, backend=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None, baseline_unknown=False):
         """`return_to` (stale cards, 2026-09-08) is the status the card read before this run,
         supplied for a blocked or halted outcome when the runner wants the card returned there.
         The task process transitioned the card to the in review status at its first step, so
-        without the return every blocked or halted card sits in progress with nobody on it."""
+        without the return every blocked or halted card sits in progress with nobody on it.
+        `baseline_unknown` (issue #51) is a card with no `return_to` because its status was never
+        read, where "keeps its current status" would be false."""
         if outcome == OUTCOME_LANDED:
             text = ("Transition the card to its terminal status, then add one comment naming the "
                     "landing reference below. Use the Jira tools on your allowlist and nothing else.")
-        elif outcome == OUTCOME_HALTED:
-            move = ("Do not transition the card: a halted task keeps its current status."
-                    if not return_to else
-                    "Transition the card back to `%s`, the status it read before this run, since "
-                    "no process is working on it now; a halted task is not finished." % return_to)
-            text = "Add one comment naming the halt class and the cause line below. %s" % move
         else:
-            move = ("Do not transition the card: a blocked task keeps its current status so the "
-                    "board still shows it as open." if not return_to else
-                    "Transition the card back to `%s`, the status it read before this run, since "
-                    "no process is working on it now; a blocked task stays open." % return_to)
-            text = "Add one comment carrying the blocker digest below. %s" % move
+            halted = outcome == OUTCOME_HALTED
+            if return_to:
+                move = ("Transition the card back to `%s`, the status it read before this run, "
+                        "since no process is working on it now; %s." % (return_to, (
+                            "a halted task is not finished" if halted
+                            else "a blocked task stays open")))
+            elif baseline_unknown:
+                move = unknown_baseline_move(self._in_review, "card") + "."
+            elif halted:
+                move = "Do not transition the card: a halted task keeps its current status."
+            else:
+                move = ("Do not transition the card: a blocked task keeps its current status so "
+                        "the board still shows it as open.")
+            text = ("Add one comment naming the halt class and the cause line below. %s" if halted
+                    else "Add one comment carrying the blocker digest below. %s") % move
         tail = (" Pass %s as cloudId on every Atlassian call. Never call "
                 "getAccessibleAtlassianResources." % self._site)
         if backend == "grok":

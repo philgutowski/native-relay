@@ -231,7 +231,9 @@ return ("Add one comment carrying the blocker digest below with `gh issue commen
    misconfigured board, before the run recorded any `baseline_tracker_status`. `return_to_for`
    returns `None` because there is no known prior status to send the card to; the run-end audit's
    `card_stale_in_review` finding (`audit.py:74-82`) is what eventually surfaces this card to the
-   operator instead.
+   operator instead. Since issue #51 this refusal is no longer silent: the Closeout is told the
+   status was never read rather than that the card keeps it, and the runner reads the card back.
+   See `docs/solutions/logic-errors/the-card-baseline-was-rewritten-at-every-launch-and-read-after-the-coordinators-own-start-move-so-a-card-left-in-review-could-never-go-back.md`.
 
 **Verification status, stated precisely.** The full suite passes, but no live run against a real
 GitHub or Jira board has yet exercised a real Closeout process actually returning a card. This

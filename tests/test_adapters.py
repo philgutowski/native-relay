@@ -276,7 +276,9 @@ class StartStepAgreesWithCloseout(AdapterCase):
         extra = ({"halt_class": "gate_refused", "cause_line": "gate refused relay/T-1"}
                  if outcome == adapters.OUTCOME_HALTED else {})
         return closeout.render(manifest, self.CARD, outcome, {}, [], adapter, [], "claude",
-                               return_to=return_to, **extra)
+                               return_to=return_to,
+                               baseline_unknown=closeout.baseline_unknown(manifest, record),
+                               **extra)
 
     def manifests(self):
         """Each adapter beside the manifest it was built from. Only the instruction methods
@@ -330,6 +332,26 @@ class StartStepAgreesWithCloseout(AdapterCase):
                 with self.subTest(adapter=name, outcome=outcome):
                     text = self.closeout_text(manifest, adapter, outcome, after)
                     self.assertNotIn("back to", text.lower())
+
+    def test_a_card_whose_status_was_never_read_is_not_said_to_keep_it(self):
+        """Issue #51. The card was read and its status was not, so the runner has nowhere to
+        send it, and the Task's start step may still have moved it. The Closeout is told that,
+        rather than a stay put sentence that is false whenever the start step ran."""
+        moved = 0
+        for name, manifest, adapter in self.manifests():
+            after = self.card_after_task(manifest)
+            if after is None:
+                continue
+            moved += 1
+            for outcome in (adapters.OUTCOME_BLOCKED, adapters.OUTCOME_HALTED):
+                with self.subTest(adapter=name, outcome=outcome):
+                    text = self.closeout_text(manifest, adapter, outcome, None)
+                    self.assertIn("`%s`" % after, text)
+                    self.assertIn("could not read", text)
+                    self.assertIn("by hand", text)
+                    for phrase in STAY_PUT:
+                        self.assertNotIn(phrase, text.lower())
+        self.assertEqual(moved, 2)
 
 
 class _JsonOpener:

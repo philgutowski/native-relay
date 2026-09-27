@@ -19,7 +19,8 @@ The interface, with the shapes each method returns:
     closing_reference(id, ref)    -> the comment id naming ref, else None
     write_tool_patterns()         -> {"tools": (...), "bash": (...), "paths": (...)}
     closeout_allowed_tools(backend=None) -> (tool name, ...) explicit, never a wildcard
-    closeout_instructions(outcome, backend=None) -> the duty one text for the closeout brief
+    closeout_instructions(outcome, return_to=None, backend=None, baseline_unknown=False)
+                                  -> the duty one text for the closeout brief
 
 `ready` is the feeder's read (feeder plan, KTD3): the cards that can start now, by the tracker's
 own account. `source` is the `[ready]` table of the feeder's sidecar file, so what ready means is
@@ -39,6 +40,8 @@ wrapper for markdown.
 """
 
 import re
+
+from .. import contracts
 
 NETWORK_TIMEOUT_SECONDS = 30
 
@@ -81,6 +84,20 @@ def reference_hit(body, ref):
 def skipped(reason):
     """The status shape for a read that could not be completed."""
     return {"status": None, "terminal": False, "reference": None, "skipped": str(reason)}
+
+
+def unknown_baseline_move(in_review, thing):
+    """The Closeout's move sentence for a blocked or halted card whose status the runner never
+    read before the run (issue #51). "Keeps its current status" is false here whenever the Task's
+    start step ran, and there is no known status to return the card to, so the Closeout is told
+    both halves and asked to hand the move to the operator rather than guess one. The runner reads
+    the card back afterwards and lists it as a check by hand if it still reads in review."""
+    status = "`%s`" % in_review if in_review else "its in review status"
+    return ("The runner could not read this %s's status before this run, so it has no status "
+            "to return it to, and this run's task process may have moved it to %s at its first "
+            "step with no process working on it now. Leave the %s where it is rather than guess a "
+            "status, and say in your comment that it needs moving back to %s by hand"
+            % (thing, status, thing, contracts.UNKNOWN_RETURN))
 
 
 def board_lag(adapter, task_id):

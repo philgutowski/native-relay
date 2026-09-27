@@ -91,11 +91,13 @@ class FakeAdapter:
     def closeout_allowed_tools(self, backend=None):
         return tuple(self._closeout_tools)
 
-    def closeout_instructions(self, outcome, return_to=None, backend=None):
+    def closeout_instructions(self, outcome, return_to=None, backend=None, baseline_unknown=False):
         self.calls.append(("closeout_instructions", outcome, return_to))
         text = self._instructions.get(outcome, "record the %s outcome on the card" % outcome)
         if return_to:
             text += " Return the card to `%s` first." % return_to
+        if baseline_unknown:
+            text += " Its baseline was never read."
         return text
 
 
