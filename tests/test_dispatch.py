@@ -264,6 +264,48 @@ class DispatchEndToEnd(DispatchCase):
         self.assertEqual(terminal["surviving_flights"],
                          [{"task": "T-1", "process_group": group}])
 
+    def test_an_interrupt_after_a_halts_abort_keeps_the_survivor_the_halt_named(self):
+        """Issue #71, from the code review. The halt's abort named T-2 and took it out of the
+        slots. An interrupt landing before the terminal write aborts again with nothing left in
+        the slots, and must not forget T-2, or the finally marks its live record crashed."""
+        import threading
+        import types
+        from unittest import mock
+        release = threading.Event()
+        self.addCleanup(release.set)
+        stuck = threading.Thread(target=release.wait, daemon=True)
+        stuck.start()
+        flight = runner._Flight(begun=types.SimpleNamespace(task=types.SimpleNamespace(id="T-2"),
+                                                            branch="relay/T-2"),
+                                worktree=None, thread=stuck, pgid=[], box=[])
+        cfg = types.SimpleNamespace(launch_kwargs={"sigkill_grace_seconds": 0}, stream=None,
+                                    surviving_flights=[])
+        with mock.patch.object(runner, "_abandon_build") as abandon, \
+                mock.patch.object(runner, "FLIGHT_EXIT_SECONDS", 0.2):
+            runner._abort_siblings(cfg, {"T-2": flight}, {}, "T-1")
+            runner._abort_siblings(cfg, {}, {}, None)
+        abandon.assert_not_called()
+        self.assertEqual(cfg.surviving_flights, [{"task": "T-2", "process_group": None}])
+
+    def test_an_interrupt_leaves_a_finished_build_waiting_its_merge(self):
+        """Issue #71, from the code review. A build parked behind an earlier merge has exited
+        and its branch is completed work. The interrupt ends flights, not finished builds."""
+        import types
+        from unittest import mock
+        cfg = types.SimpleNamespace(launch_kwargs={}, stream=None, surviving_flights=[])
+        begun = types.SimpleNamespace(task=types.SimpleNamespace(id="T-2"), branch="relay/T-2")
+
+        def drive(_cfg, _announce, _slots, waiting):
+            waiting["T-2"] = (begun, None)
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(runner, "_concurrent_drive", side_effect=drive), \
+                mock.patch.object(runner, "_abandon_build") as abandon:
+            with self.assertRaises(KeyboardInterrupt):
+                runner._concurrent_loop(cfg, None)
+        abandon.assert_not_called()
+        self.assertEqual(cfg.surviving_flights, [])
+
     def test_dispatch_of_a_pair_file_uses_the_pair_path_for_state(self):
         self.land_all_four()
         loaded = pair.split(self.manifest, out_dir=self.tmp.name)

@@ -1364,6 +1364,9 @@ class _Flight:
     thread: object
     pgid: list
     box: list
+    # Issue #71. Set once the coordinator has begun ending this build, so a process whose launch
+    # reaches Popen only afterwards is killed as it starts rather than left running untracked.
+    stopping: object = field(default_factory=threading.Event)
 
 
 def retries_blocked(retry_blocked, task_id):
@@ -1643,9 +1646,14 @@ def _snapshot_and_remove(cfg, dest):
 def _spawn_flight(cfg, begun, dest):
     pgid_box = []
     result_box = []
+    stopping = threading.Event()
 
     def on_started(_pid, group_id):
+        # The group first and the check second, the reverse of `_stop_flights`, so one of the
+        # two always sees the other and a late start is never missed.
         pgid_box.append(group_id)
+        if stopping.is_set() and group_id:
+            _signal_group(group_id, signal.SIGKILL)
 
     def worker():
         try:
@@ -1661,7 +1669,8 @@ def _spawn_flight(cfg, begun, dest):
 
     thread = threading.Thread(target=worker, name="relay-build-%s" % begun.task.id, daemon=True)
     thread.start()
-    return _Flight(begun=begun, worktree=dest, thread=thread, pgid=pgid_box, box=result_box)
+    return _Flight(begun=begun, worktree=dest, thread=thread, pgid=pgid_box, box=result_box,
+                   stopping=stopping)
 
 
 def _wait_any_flight(slots, timeout=0.1):
@@ -1698,13 +1707,12 @@ def _signal_group(pgid, signum):
 
 
 def _flight_exited(flight):
-    """The build thread has returned, which means its launch reaped the Task process, and no
-    descendant is left in the group. A flight whose thread ended before any group existed never
-    started a process."""
-    if flight.thread.is_alive():
-        return False
+    """No process is left in the flight's group. A flight with no group yet has exited only once
+    its thread has returned without starting one. The thread is not waited on once the group is
+    empty: a descendant that left the group can hold the pipe open and keep the launch's reader
+    waiting long past the bound, and nothing of this build is running in the meantime."""
     if not flight.pgid:
-        return True
+        return not flight.thread.is_alive()
     try:
         os.killpg(flight.pgid[0], 0)
     except ProcessLookupError:
@@ -1721,7 +1729,15 @@ def _stop_flights(cfg, flights):
     session, so nothing else passes a stop on to them. Every group gets SIGTERM together, then
     SIGKILL once the grace has passed, and a flight whose process starts during the wait is
     signalled when its group appears. Returns the flights still alive at the bound."""
+    for flight in flights:
+        flight.stopping.set()
     grace = cfg.launch_kwargs.get("sigkill_grace_seconds", launch.SIGKILL_GRACE_SECONDS)
+    if flights and cfg.stream is not None:
+        # Said before the wait, which can run the whole grace, so a silent pause does not draw a
+        # second interrupt that would leave the stop half done.
+        cfg.stream("stopping %d build(s): %s; up to %ds"
+                   % (len(flights), ", ".join(f.begun.task.id for f in flights),
+                      round(grace + FLIGHT_EXIT_SECONDS)))
     kill_at = time.monotonic() + grace
     give_up_at = kill_at + FLIGHT_EXIT_SECONDS
     sent = {}
@@ -1747,9 +1763,13 @@ def _abort_siblings(cfg, slots, waiting, keep_id):
     partway through leaves none unnamed. `keep_id` of None drops every build, which is an
     interrupted dispatch."""
     flights = [flight for flight in slots.values() if flight.begun.task.id != keep_id]
-    cfg.surviving_flights = _named_flights(flights)
+    # A survivor an earlier abort named has already left `slots`, so it is carried rather than
+    # lost when a halt's abort is followed by the interrupt's.
+    earlier = [entry for entry in cfg.surviving_flights
+               if entry["task"] not in {flight.begun.task.id for flight in flights}]
+    cfg.surviving_flights = earlier + _named_flights(flights)
     survivors = _stop_flights(cfg, flights)
-    cfg.surviving_flights = _named_flights(survivors)
+    cfg.surviving_flights = earlier + _named_flights(survivors)
     surviving_ids = {flight.begun.task.id for flight in survivors}
     for task_id, flight in list(slots.items()):
         if task_id == keep_id:
@@ -1763,7 +1783,7 @@ def _abort_siblings(cfg, slots, waiting, keep_id):
         _abandon_build(cfg, task_id, begun.branch)
         del waiting[task_id]
     if cfg.stream is not None:
-        for entry in cfg.surviving_flights:
+        for entry in _named_flights(survivors):
             cfg.stream("%s: its Task process group %s was still alive after the stop; left "
                        "running with its worktree" % (entry["task"], entry["process_group"]))
 
@@ -1793,16 +1813,19 @@ def _concurrent_loop(cfg, announce):
     """Launch ready schedule waves, then merge strictly in manifest order.
 
     Issue #71. Anything leaving the loop by an exception, an interrupt from the keyboard most
-    often, ends every build first, the way a halt that does not continue past does, so dispatch's
-    own handlers mark records and release the lease only once no Task process is left behind
-    them. A build that would not die is kept on `cfg.surviving_flights` for the terminal record."""
+    often, ends every build in flight first and abandons it the way a halt that does not continue
+    past does, so dispatch's own handlers mark records and release the lease only once no Task
+    process is left behind them. A build that would not die is kept on `cfg.surviving_flights`
+    for the terminal record. A build already finished and waiting its merge is left alone: its
+    process has exited, and its branch is completed work the next pre flight will name, not a
+    half built one to discard."""
     slots = {}
     waiting = {}
     try:
         return _concurrent_drive(cfg, announce, slots, waiting)
     except BaseException:
         try:
-            _abort_siblings(cfg, slots, waiting, None)
+            _abort_siblings(cfg, slots, {}, None)
         except Exception:
             # Best effort, like every write on the way out: the exception already leaving is
             # the one to keep.
