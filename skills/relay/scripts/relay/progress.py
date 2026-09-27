@@ -98,8 +98,11 @@ def _scope(manifest):
 
 def _left(data):
     """The phrase for the estimate, naming what it covers when that is a feeder's cycle."""
-    text = "roughly %s left" % duration(data["estimate_seconds"])
-    return text + " in this cycle" if data.get("scope") == SCOPE_CYCLE else text
+    return "roughly %s left%s" % (duration(data["estimate_seconds"]), _in_scope(data))
+
+
+def _in_scope(data):
+    return " in this cycle" if data.get("scope") == SCOPE_CYCLE else ""
 
 
 def build(manifest, store, now=time.time, raw=None, live=True):
@@ -268,9 +271,8 @@ def lines(data):
     if data["estimate_seconds"] is None:
         out.append("remaining: no estimate yet, no landed task carries a duration")
     else:
-        scope = " in this cycle" if data.get("scope") == SCOPE_CYCLE else ""
         out.append("remaining: roughly %s%s, from the mean of %d landed task(s)"
-                   % (duration(data["estimate_seconds"]), scope, data["landed_sample"]))
+                   % (duration(data["estimate_seconds"]), _in_scope(data), data["landed_sample"]))
     return out
 
 
