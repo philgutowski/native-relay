@@ -90,7 +90,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 
-from . import (adapters, contracts, gitread, manifest as manifest_module, manifestedit,
+from . import (adapters, brief, contracts, gitread, manifest as manifest_module, manifestedit,
                run as run_module, state as state_module, summary as summary_module)
 
 EXIT_OK = 0
@@ -412,16 +412,40 @@ def normalize_cards(payload):
     return cards
 
 
-def select(cards, listed, config, rank, unsettled_count):
+def scan_reason(card):
+    """None when `card` is clean, else the sentence the R41 scan (`brief.scan`) gives for it.
+    Read at append time, this sees only the title and description the ready source returned;
+    a card's comments and its rendered brief are read at launch, where the runner's own scan
+    (`run.py`'s `_one_task`) stays the backstop for both (issue #41)."""
+    hits = brief.scan(card, "")
+    return brief.exclusion_reason(hits) if hits else None
+
+
+def scanned_ids(cards):
+    """{id: reason} for every card in `cards` the R41 scan refuses, computed once per cycle so
+    `select`, the dry run, the skip report, and the idle check all read the same verdict rather
+    than each calling `scan_reason` again over the same text."""
+    reasons = {}
+    for card in cards:
+        reason = scan_reason(card)
+        if reason:
+            reasons[card["id"]] = reason
+    return reasons
+
+
+def select(cards, listed, config, rank, unsettled_count, scanned):
     """(fresh, batch). Fresh is every ready card a session may take that the manifest does not
-    list yet, in order file order and then by id. The batch is the head of it, as long as the
-    room left: the batch size minus the tasks the next run will already launch."""
+    list yet, in order file order and then by id, including one the R41 scan would refuse.
+    `scanned` is `scanned_ids`'s result, and the batch is the head of the ones outside it, as
+    long as the room left: the batch size minus the tasks the next run will already launch. A
+    card the scan refuses holds no room, so the next clean card in order fills its slot instead."""
     fresh = [card for card in cards
              if card["id"] not in listed and card["id"] not in config.denied_ids
              and not any(label in config.denied_labels for label in card.get("labels") or ())]
     fresh.sort(key=lambda card: (rank.get(card["id"], UNRANKED), natural_key(card["id"])))
     room = max(0, config.batch - unsettled_count)
-    return fresh, fresh[:room]
+    eligible = [card for card in fresh if card["id"] not in scanned]
+    return fresh, eligible[:room]
 
 
 def died_quickly(task, config):
@@ -887,8 +911,9 @@ class Feeder:
                      and (records.get(task_id, {}).get("status") not in SETTLED
                           or task_id in retry_ids)]
         cards, readable = self.ready_cards(manifest)
+        scanned = scanned_ids(cards)
         fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
-                              len(unsettled))
+                              len(unsettled), scanned)
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
         exhausted = self.exhausted_models()
         entries = []
@@ -906,15 +931,27 @@ class Feeder:
                     [(entry["id"], entry["model"]) for entry in entries]))
         if self.dry_run:
             for card in fresh[:DRY_RUN_LINES]:
-                self.out.write("   would offer %s on %s: %s\n" % (
-                    card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
+                reason = scanned.get(card["id"])
+                if reason:
+                    self.out.write("   would skip %s: %s\n" % (card["id"], reason))
+                else:
+                    self.out.write("   would offer %s on %s: %s\n" % (
+                        card["id"], self.route(card, routing, exhausted)[0], card["title"][:90]))
             return EXIT_OK
+
+        for card in fresh:
+            reason = scanned.get(card["id"])
+            if reason:
+                self.report_once("scan_skip:" + card["id"], "%s would be skipped at launch and "
+                                 "is left out of the batch: %s" % (card["id"], reason))
 
         appended = self.append(text, entries)
         if appended:
             self.state["idle_waits"] = self.state["unreadable_waits"] = 0
         elif not unsettled:
-            return self.idle(readable, [card["id"] for card in fresh])
+            # A card the scan refuses never reached model routing, so it is not evidence of a
+            # routing problem (issue #41); only a card that got that far belongs in this check.
+            return self.idle(readable, [card["id"] for card in fresh if card["id"] not in scanned])
 
         self.state["cycles"] += 1
         self.state.get("process", {})["cycle"] = self.state["cycles"]

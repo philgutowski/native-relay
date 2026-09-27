@@ -196,6 +196,28 @@ class Selection(FeederCase):
         self.assertEqual(self.models(), {"41": "fable"})
         self.assertNotIn(("ready", {}), self.adapter.calls)
 
+    def test_a_card_the_path_scan_refuses_holds_no_room_and_is_logged(self):
+        # Issue #41: the feeder never called the scan, so a card the runner would skip at
+        # launch still held a batch slot and looked offered in the dry run.
+        self.adapter.ready_cards = [card(1), card(2, description="edit .claude/skills/x"),
+                                    card(3)]
+        self.plans = [{}]
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.runs[0], ["1", "3"])
+        self.assertIn("2 would be skipped at launch and is left out of the batch",
+                      self.log_text())
+        self.assertIn(".claude/skills/x", self.log_text())
+        self.assertTrue(any("2 would be skipped at launch" in note for note in self.notes))
+
+    def test_dry_run_shows_a_scanned_card_as_would_skip_not_would_offer(self):
+        self.adapter.ready_cards = [card(1), card(2, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(dry_run=True), 0)
+        out = self.out.getvalue()
+        self.assertIn("would offer 1 on opus", out)
+        self.assertIn("would skip 2:", out)
+        self.assertIn(".claude/skills/x", out)
+        self.assertNotIn("would offer 2", out)
+
     def test_an_unreadable_ready_source_offers_nothing_and_does_not_crash(self):
         self.adapter.ready_reason = "gh exited 1: HTTP 502"
         self.assertEqual(self.feed(), 1)
@@ -787,6 +809,16 @@ class Exits(FeederCase):
         self.assertNotIn("the queue is empty", self.log_text())
         self.assertIn("every ready card was refused with the model it is routed to, and nothing "
                       "is left to run: 1", self.log_text())
+
+    def test_a_scan_refused_card_alone_reads_as_an_empty_queue_not_all_refused(self):
+        # Issue #41: a card the scan refuses never reached model routing, so it must not read
+        # as the "change the routing" case meant for a genuine model refusal.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.runs, [])
+        self.assertIn("the queue is empty, leaving", self.log_text())
+        self.assertNotIn("Change the routing", self.log_text())
+        self.assertIn("1 would be skipped at launch", self.log_text())
 
     def test_a_ready_source_that_is_not_configured_is_refused_before_a_cycle(self):
         github = SimpleNamespace(tracker=SimpleNamespace(adapter="github"))
