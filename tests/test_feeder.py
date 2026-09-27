@@ -150,10 +150,12 @@ class FeederCase(RunCase):
                                   check=False).returncode
 
     def _start_hook(self, args, cwd, extra_env, output_path):
-        """The detached hook, recorded and never started: nothing here may outlive a case. Its
-        `poll` answers from `detached_exits`, one per poll, and None, still running, after."""
+        """The detached hook, recorded and never started: nothing here may outlive a case. Each
+        hook takes the next list from `detached_exits` as its own, and its `poll` answers from
+        that list, one per poll, and None, still running, after."""
         self.hooks = getattr(self, "hooks", []) + [("detached", list(args), cwd, dict(extra_env))]
-        exits = getattr(self, "detached_exits", [])
+        queue = getattr(self, "detached_exits", [])
+        exits = queue.pop(0) if queue else []
         return SimpleNamespace(pid=4242, poll=lambda: exits.pop(0) if exits else None)
 
     def feed(self, config=None, **kwargs):
@@ -1922,6 +1924,18 @@ class PostCycle(FeederCase):
         finally:
             held.close()
         self.assertEqual(len(self.runs), 1)
+        # Each refusal that would have started a feeder is in its log, where a cron line's
+        # output is not; the dry run writes nothing, as ever.
+        self.assertEqual(self.log_text().count("refused: a post cycle hold is set"), 4)
+
+    def test_a_hold_that_is_not_a_record_is_refused_not_read(self):
+        state = dict(feeder.new_state(), hold=True)
+        self.write(self.paths.state, json.dumps(state))
+        for flags in (("--once",), ("--status",), ("--release",)):
+            code, text = self.call(*flags)
+            self.assertEqual(code, 1, flags)
+            self.assertIn("holds a hold that is not a JSON object or null", text)
+        self.assertEqual(self.runs, [])
 
     def test_release_clears_the_hold_and_the_next_feeder_runs(self):
         self.hold_once()
@@ -1938,6 +1952,21 @@ class PostCycle(FeederCase):
         code, text = self.call("--once")
         self.assertEqual(code, 0, text)
         self.assertEqual(len(self.runs), 2)
+
+    def test_a_release_that_cannot_be_logged_is_still_a_release(self):
+        self.hold_once()
+        with mock.patch.object(feeder, "append_log", side_effect=OSError("disk full")):
+            code, text = self.call("--release")
+        self.assertEqual(code, 0, text)
+        self.assertIn("released the post cycle hold from cycle 1", text)
+        self.assertIn("the release is done but could not be written", text)
+        self.assertIsNone(feeder.read_state(self.paths)["hold"])
+        self.hold_once()
+        with mock.patch.object(feeder, "write_state", side_effect=OSError("read only")):
+            code, text = self.call("--release")
+        self.assertEqual(code, 1)
+        self.assertIn("the hold could not be released, it is still set: read only", text)
+        self.assertIsNotNone(feeder.read_state(self.paths)["hold"])
 
     def test_release_with_nothing_held_beside_a_live_feeder_or_beside_another_flag(self):
         code, text = self.call("--release")
@@ -1965,9 +1994,15 @@ class PostCycle(FeederCase):
         self.hold_once()
         code, text = self.call("--status")
         self.assertEqual(code, 0)
+        self.assertEqual(text.count("hold: a post cycle hold is set: the hook exited 3 after "
+                                    "cycle 1"), 1)
+        # Said once in full here; the brief form is for `status`, which has no line of its own.
+        self.assertNotIn("held since", text)
+        args = cli.build_parser().parse_args(["status", self.manifest_path])
+        out = io.StringIO()
+        cli.cmd_status(args, self.base_env(), out)
         self.assertIn("held since 2026-09-19T08:50:00 by a failed post cycle hook, release "
-                      "with feed --release", text)
-        self.assertIn("hold: a post cycle hold is set: the hook exited 3 after cycle 1", text)
+                      "with feed %s --release" % self.paths.manifest, out.getvalue())
         code, text = self.call("--status", "--json")
         self.assertEqual(json.loads(text)["hold"]["failure"], "exited 3")
         self.call("--release")
@@ -1990,7 +2025,7 @@ class PostCycle(FeederCase):
         self.assertEqual(len(self.runs), 1)
 
     def test_a_finished_detached_hook_is_reaped_and_its_exit_logged(self):
-        self.detached_exits = [None, 5]
+        self.detached_exits = [[None, 5], []]
         self.plans = [{}, {}]
         config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_mode="detached")
         self.assertEqual(self.feed(config), 0)

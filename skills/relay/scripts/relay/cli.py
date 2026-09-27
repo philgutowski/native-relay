@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from . import (adapters, audit as audit_module, brief as brief_module, contracts, gitread,
                feeder as feeder_module, manifest as manifest_module, notify, pair as pair_module,
@@ -814,25 +815,23 @@ def cmd_feed(args, env, out, deps=None):
     if args.as_json and not args.feed_status:
         out.write("--json goes with --status only\n")
         return EXIT_CONFIG
+    # Every flag that starts, stops, or changes a feeder, in the order a refusal names them.
+    acting = [flag for flag, on in (
+        ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
+        ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
+        ("--notify", args.notify), ("--retry-blocked", args.retry_blocked),
+        ("--release", args.release)) if on]
     if watching:
         # A watcher's flags read only. Beside a flag that starts, stops, or changes a feeder,
         # one of the two would be silently dropped, so the pair is refused instead.
-        clash = [flag for flag, on in (
-            ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
-            ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
-            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked),
-            ("--release", args.release)) if on]
-        if clash:
-            out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(clash))
+        if acting:
+            out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(acting))
             return EXIT_CONFIG
     if args.release:
         # Its own act, like `--stop`. Beside a flag that starts a feeder it would be a release
         # and a start in one step, which is the step this verb exists to keep apart: a person
         # repairs the default branch between the two.
-        clash = [flag for flag, on in (
-            ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
-            ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
-            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked)) if on]
+        clash = [flag for flag in acting if flag != "--release"]
         if clash:
             out.write("--release starts nothing; drop %s and start the feeder after it\n"
                       % ", ".join(clash))
@@ -878,10 +877,19 @@ def cmd_feed(args, env, out, deps=None):
     try:
         hold = feeder_module.read_state(paths).get("hold")
     except feeder_module.ConfigError as exc:
-        out.write("%s. It holds the halt counts, so fix or remove it by hand.\n" % exc)
+        out.write("%s. %s\n" % (exc, feeder_module.STATE_HINT))
         return EXIT_CONFIG
     if hold:
-        out.write("refused: %s\n" % feeder_module.hold_sentence(paths, hold))
+        message = "refused: %s" % feeder_module.hold_sentence(paths.manifest, hold)
+        out.write(message + "\n")
+        if not args.dry_run:
+            # The feeder log too: a cron `--once` meeting the hold has nobody reading its
+            # output. A log that cannot be written leaves the refusal standing.
+            try:
+                feeder_module.append_log(paths, feeder_module.log_line(
+                    (deps.now if deps else datetime.now)(), message))
+            except OSError:
+                pass
         return EXIT_HALTED
     warning = feeder_module.checkout_warning()
     if warning and args.pin:
@@ -932,21 +940,22 @@ def cmd_feed(args, env, out, deps=None):
 
 def _release_hold(paths, out):
     """`feed --release` (issue #53): clear the hold a failed post cycle hook left in the state
-    file. Under the feeder lock, so no feeder saves its own copy of the state over this write; a
-    feeder that holds the lock is running, and a running feeder holds no hold, since it refuses
-    to start a cycle while one is set. Starts nothing."""
+    file. Under the feeder lock, so no feeder saves its own copy of the state over this write.
+    A feeder holding the lock is refused, whether it is cycling or is still on its way out
+    after saving a hold, since the release must not race its last saves. Starts nothing."""
     lock = feeder_module.acquire_lock(paths)
     if lock is None:
-        out.write("a feeder holds %s, so it is running and nothing is held; nothing released\n"
-                  % paths.lock)
+        out.write("a feeder holds %s; nothing released. A feeder that has just held is still "
+                  "leaving, so read feed %s --status and try again once it has left\n"
+                  % (paths.lock, paths.manifest))
         return EXIT_LEASE
     try:
-        hold = feeder_module.release_hold(paths)
+        hold, unlogged = feeder_module.release_hold(paths)
     except feeder_module.ConfigError as exc:
-        out.write("%s. It holds the halt counts, so fix or remove it by hand.\n" % exc)
+        out.write("%s. %s\n" % (exc, feeder_module.STATE_HINT))
         return EXIT_CONFIG
     except OSError as exc:
-        out.write("the hold could not be released: %s\n" % exc)
+        out.write("the hold could not be released, it is still set: %s\n" % exc)
         return EXIT_CONFIG
     finally:
         lock.close()
@@ -954,9 +963,12 @@ def _release_hold(paths, out):
         out.write("no post cycle hold is set for %s; nothing released\n" % paths.manifest)
         return EXIT_OK
     out.write("released the post cycle hold from cycle %s: the hook %s at %s, merge range %s\n"
-              "start the feeder again with: relay feed %s\n"
               % (hold.get("cycle"), hold.get("failure"), hold.get("at"),
-                 feeder_module.merge_words(hold), paths.manifest))
+                 feeder_module.merge_words(hold)))
+    if unlogged:
+        out.write("note: the release is done but could not be written to %s: %s\n"
+                  % (paths.log, unlogged))
+    out.write("start the feeder again with: relay feed %s\n" % paths.manifest)
     return EXIT_OK
 
 
