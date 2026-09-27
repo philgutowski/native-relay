@@ -67,6 +67,7 @@ python3 <runner> feed <manifest> --dry-run --detach  # refused: a dry run never 
 python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
+python3 <runner> feed <manifest> --release      # clear a failed post cycle hook's hold once the default branch is repaired; starts nothing
 python3 <runner> feed <manifest> --restart --detach --notify  # ask, wait for it to leave, take its place
 python3 <runner> feed <manifest> --restart --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle
 python3 <runner> feed <manifest> --pin          # extract the default branch's commit and start the feeder from there instead of this checkout, taking over a live one with restart semantics
@@ -569,7 +570,10 @@ not be excluded, every ready card was refused with the model it is routed to, or
 source could not be read three cycles in a row with nothing left to run. 2 every task has died
 quickly for `limit_waits_max` waits (16 by default, eight hours), with only fallback moves
 between them, which is not a usage limit or one that outlasts the waits, so read the summary; or a blocking
-post cycle hook failed with `post_cycle_hold` on. 3 another feeder already holds this manifest.
+post cycle hook failed with `post_cycle_hold` on. That hold is saved in the state file, and
+every later start, `--restart`, `--pin`, `--detach`, `--dry-run`, or a cron `--once`, is refused
+with 2 until the operator repairs the default branch and runs `feed <manifest> --release`;
+`feed --status` shows it. 3 another feeder already holds this manifest.
 
 Three things the feeder tells the operator that a summary alone would not. A task it excluded
 after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest

@@ -364,7 +364,7 @@ stem. For `queue.toml`:
 | `queue.order` | you | priority, one card id per line, highest first, `#` comments |
 | `queue.models` | you | model routing, `id model  # why` per line, read fresh each cycle |
 | `queue.feeder.stop` | you, or `feed --stop` | its presence makes the feeder leave after the cycle |
-| `queue.feeder.state.json` | the feeder | halt counts, wait counts, and models marked exhausted |
+| `queue.feeder.state.json` | the feeder | halt counts, wait counts, models marked exhausted, and a post cycle hold |
 | `queue.feeder.log` | the feeder | one line per decision |
 | `queue.feeder.lock` | the feeder | held while it runs; one feeder per manifest |
 | `queue.feeder.out` | `feed --detach` | the detached feeder's output and every run's |
@@ -440,11 +440,19 @@ post_cycle_timeout_seconds = 3600
   process group, so a gate it started does not outlive it. Use it for work the next cycle
   should wait on: the full gate on the merged default branch, a push on a cadence. A blocking
   hook must leave the checkout on its default branch and clean, or the next cycle stops there.
-- A hold is the feeder's exit, not a lock. A feeder started again, by hand, by `--restart`,
-  or by a cron line running `--once`, runs its next cycle whatever the last hook said, so
-  repair the default branch before starting it again.
+- A hold outlives the feeder. It is written to the state file, with the hook's failure, the
+  cycle, the time, and the merge range, even when the cycle's own rules already stopped the
+  feeder. While it is set, every start is refused with exit 2 before it acts: by hand, by
+  `--restart` or `--pin` (the live feeder is never asked to leave), by `--detach` (no child
+  starts), by `--dry-run`, and by a cron line running `--once`, which logs each refusal and
+  notifies only the hold itself. `feed <manifest> --status` shows it. Repair the default
+  branch, then `feed <manifest> --release`, which clears the hold and starts nothing; start the
+  feeder after it. Turning `post_cycle_hold` off in the sidecar does not release a hold already
+  set. `--release` is refused beside a live feeder (exit 3) and beside any other flag.
 - `post_cycle_mode = "detached"` starts the hook in its own session and does not wait; the log
-  records its pid, and `post_cycle_hold` is refused beside it. Use it for work that takes a
+  records its pid, and `post_cycle_hold` is refused beside it. The feeder polls each hook it
+  started at the start of every later cycle and logs the exit code of one that has finished; a
+  hook still running when the feeder leaves goes on. Use it for work that takes a
   person or a browser. It runs beside the next cycle, so it must not touch the checkout the
   runner merges into; give it a worktree of its own.
 - With GitHub and no `ready.labels`, or Jira and no `ready.jql`, the feeder offers nothing. It
@@ -505,9 +513,10 @@ post_cycle_timeout_seconds = 3600
   The order and routing files are read at every cycle and need no restart.
 
 Exit codes of `feed`: 0 it left on its own terms (the stop file, an empty queue, `--once`,
-`--dry-run`), 1 the manifest, the sidecar, the ready source, or the checkout needs a person,
-including a ready source that could not be read three cycles in a row with nothing left to
-run, 2 every task died quickly for the whole usage limit allowance, 3 another feeder holds
+`--dry-run`, `--release`), 1 the manifest, the sidecar, the ready source, or the checkout needs
+a person, including a ready source that could not be read three cycles in a row with nothing
+left to run, 2 every task died quickly for the whole usage limit allowance, or a blocking post
+cycle hook failed with `post_cycle_hold` on, or its hold is still set, 3 another feeder holds
 this manifest.
 
 ## 12. Exit codes of a run

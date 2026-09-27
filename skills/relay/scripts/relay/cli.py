@@ -171,6 +171,10 @@ def build_parser():
     feed_verb.add_argument("--restart", action="store_true",
                            help="ask the running feeder to leave, wait for it, then take its "
                                 "place; nothing is killed")
+    feed_verb.add_argument("--release", action="store_true",
+                           help="clear the hold a failed post cycle hook left, once the default "
+                                "branch is repaired; no feeder starts a cycle while it is set. "
+                                "Starts nothing itself")
     feed_verb.add_argument("--pin", action="store_true",
                            help="extract the default branch's commit, never HEAD, under "
                                 "~/.relay/extracts and start the feeder from that extract with "
@@ -798,10 +802,10 @@ def cmd_dispatch(args, env, out):
 
 def cmd_feed(args, env, out, deps=None):
     """The feeder (feeder plan). Exit codes keep the contract every verb has: 0 the feeder left
-    on its own terms (the stop file, an empty queue, `--once`, `--dry-run`), 1 the manifest,
-    the sidecar, the ready source, or the checkout needs a person, 2 every task died quickly
-    for the whole usage limit allowance or a held post cycle hook failed, 3 another feeder
-    holds this manifest.
+    on its own terms (the stop file, an empty queue, `--once`, `--dry-run`, `--release`), 1 the
+    manifest, the sidecar, the ready source, or the checkout needs a person, 2 every task died
+    quickly for the whole usage limit allowance, or a held post cycle hook failed, or its hold
+    is still set, 3 another feeder holds this manifest.
 
     `deps` is the suite's way in; an operator never passes it.
     """
@@ -816,9 +820,22 @@ def cmd_feed(args, env, out, deps=None):
         clash = [flag for flag, on in (
             ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
             ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
-            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked)) if on]
+            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked),
+            ("--release", args.release)) if on]
         if clash:
             out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(clash))
+            return EXIT_CONFIG
+    if args.release:
+        # Its own act, like `--stop`. Beside a flag that starts a feeder it would be a release
+        # and a start in one step, which is the step this verb exists to keep apart: a person
+        # repairs the default branch between the two.
+        clash = [flag for flag, on in (
+            ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
+            ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
+            ("--notify", args.notify), ("--retry-blocked", args.retry_blocked)) if on]
+        if clash:
+            out.write("--release starts nothing; drop %s and start the feeder after it\n"
+                      % ", ".join(clash))
             return EXIT_CONFIG
     if args.dry_run and args.detach:
         # A dry run reads only and a detach starts a child that outlives this process. Carrying
@@ -837,6 +854,8 @@ def cmd_feed(args, env, out, deps=None):
         # whose feeder is not running.
         out.write("manifest not found: %s\n" % paths.manifest)
         return EXIT_CONFIG
+    if args.release:
+        return _release_hold(paths, out)
     if args.retry_blocked:
         # Before detaching and before a restart asks a live feeder to leave (issue #46): the id
         # was checked only inside `cycle()`, which runs after both of those, so a typo took down
@@ -852,6 +871,18 @@ def cmd_feed(args, env, out, deps=None):
             return EXIT_CONFIG
     if watching:
         return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
+    # Before a detach, a pin, or a restart asks a live feeder to leave (issue #53): a start that
+    # would only refuse inside its first cycle must not take down a running feeder or leave a
+    # detached child to say so where nobody reads it. The loop checks again, for the hold a
+    # feeder leaves in the middle of a restart's handover.
+    try:
+        hold = feeder_module.read_state(paths).get("hold")
+    except feeder_module.ConfigError as exc:
+        out.write("%s. It holds the halt counts, so fix or remove it by hand.\n" % exc)
+        return EXIT_CONFIG
+    if hold:
+        out.write("refused: %s\n" % feeder_module.hold_sentence(paths, hold))
+        return EXIT_HALTED
     warning = feeder_module.checkout_warning()
     if warning and args.pin:
         pin = _pin_plan(paths, env, out)
@@ -897,6 +928,36 @@ def cmd_feed(args, env, out, deps=None):
         return loop.run()
     finally:
         lock.close()
+
+
+def _release_hold(paths, out):
+    """`feed --release` (issue #53): clear the hold a failed post cycle hook left in the state
+    file. Under the feeder lock, so no feeder saves its own copy of the state over this write; a
+    feeder that holds the lock is running, and a running feeder holds no hold, since it refuses
+    to start a cycle while one is set. Starts nothing."""
+    lock = feeder_module.acquire_lock(paths)
+    if lock is None:
+        out.write("a feeder holds %s, so it is running and nothing is held; nothing released\n"
+                  % paths.lock)
+        return EXIT_LEASE
+    try:
+        hold = feeder_module.release_hold(paths)
+    except feeder_module.ConfigError as exc:
+        out.write("%s. It holds the halt counts, so fix or remove it by hand.\n" % exc)
+        return EXIT_CONFIG
+    except OSError as exc:
+        out.write("the hold could not be released: %s\n" % exc)
+        return EXIT_CONFIG
+    finally:
+        lock.close()
+    if hold is None:
+        out.write("no post cycle hold is set for %s; nothing released\n" % paths.manifest)
+        return EXIT_OK
+    out.write("released the post cycle hold from cycle %s: the hook %s at %s, merge range %s\n"
+              "start the feeder again with: relay feed %s\n"
+              % (hold.get("cycle"), hold.get("failure"), hold.get("at"),
+                 feeder_module.merge_words(hold), paths.manifest))
+    return EXIT_OK
 
 
 def _watch_feeder(args, paths, out, sleep):
