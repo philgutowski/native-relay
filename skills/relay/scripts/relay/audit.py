@@ -107,7 +107,7 @@ def build(manifest, store, adapter, env=None, live=False, records=None, observed
                 "%s landed at %s but its card reads %s; it was reopened or the close did not "
                 "stick. Check the card by hand."
                 % (task_id, (record.get("landing_ref") or "an unrecorded reference")[:12],
-                   status), status, record_status))
+                   status or "no status"), status, record_status))
         elif record_status == contracts.STATUS_LANDED:
             finding = _item_lag(adapter, task_id, status, record_status, cache=board_cache)
             if finding:
