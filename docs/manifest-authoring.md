@@ -484,9 +484,19 @@ post_cycle_timeout_seconds = 3600
   quick death for the whole cycle rule as well, so a cycle of blocked limit deaths with no free
   fallback, a fallback already marked or two models that fall back to each other and both died,
   is waited out. It waits too, holds its place in the batch ahead of fresh cards, and
-  relaunches on its own model with `--retry-blocked <id>`. In a cycle where something landed,
-  one with no free fallback stays blocked. `feed <manifest>
-  --retry-blocked <id>` queues one blocked task by hand the same way.
+  relaunches on its own model with `--retry-blocked <id>`. On a model with no fallback entry, or
+  with `fallback = {}`, a blocked record is read this way only when its log's `result` line says
+  429, and the time rule alone leaves it blocked. `feed <manifest> --retry-blocked <id>` queues
+  one blocked task by hand the same way.
+- In a cycle where something landed or a death was slow, a limit death with no free fallback
+  holds its model back. The model is marked exhausted for `fallback_hours`, and while none of
+  its fallbacks is free, a card routed to it is left out of the manifest and its batch slot goes
+  to the next card, with one log line per cycle naming the held cards. A blocked one is queued
+  for a retry that waits for its model's mark to expire. A halted one is still counted toward
+  `max_halts`, because the runner relaunches a halted task on every run. When held cards and
+  waiting retries are all that is left, the feeder waits `limit_wait_seconds` with the event
+  reason `model_held` rather than leave, and that wait neither adds to nor resets the count of
+  usage limit waits.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart` reloads them on whatever tree the feeder already runs from; add `--pin` to also
   re-extract the current default branch commit into a fresh pinned tree and hand the feeder over

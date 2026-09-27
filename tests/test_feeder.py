@@ -496,13 +496,28 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.models(), {"1": "fable", "2": "fable"})
         self.assertEqual(self.state()["exhausted"], {})
 
-    def test_off_by_default_a_blocked_limit_death_stays_blocked(self):
+    def test_with_the_fallback_off_a_429_blocked_death_is_waited_out(self):
+        # Issue #52. The same death recorded halted was waited out; recorded blocked it was an
+        # ordinary block, because the reading needed a fallback entry.
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")
-        self.plans = [{"1": self.blocked(4)}]
+        self.plans = [{"1": self.blocked(4)}, {}]
         self.feed()
-        self.assertEqual(self.models(), {"1": "fable"})
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.retries, [[], ["1"]])
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "fable"])
+        self.assertEqual(self.records["1"]["status"], "landed")
+        self.assertNotIn("1 blocked;", self.log_text())
+
+    def test_with_the_fallback_off_the_time_rule_alone_leaves_a_block_blocked(self):
+        # No result line to confirm a 429, and no fallback entry to act on the time rule.
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(4, log="")}]
+        self.feed()
+        self.assertEqual(self.sleeps, [])
         self.assertEqual(self.state()["retry_blocked"], {})
+        self.assertEqual(self.state()["exhausted"], {})
         self.assertIn("1 blocked;", self.log_text())
 
     def test_a_blocked_limit_death_in_a_whole_cycle_wait_retries_where_it_was(self):
@@ -672,16 +687,29 @@ class BlockedLimit(FeederCase):
         marks = [note for note in self.notes if "usage limit" in note]
         self.assertEqual(len(marks), 1, self.notes)
 
-    def test_a_retry_that_dies_on_its_fallback_too_moves_on_or_stays_blocked(self):
+    def test_a_retry_that_dies_on_its_fallback_too_moves_on_or_is_waited_out(self):
         config = feeder.Config(model_fallback={"fable": "opus", "opus": "sonnet"})
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")
-        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)}]
+        self.plans = [{"1": self.blocked(4)}, {"1": self.blocked(5)}, {"1": self.blocked(6)}, {}]
         self.feed(config)
-        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "sonnet"])
-        # sonnet has no fallback of its own, so the third death is an ordinary block.
-        self.assertEqual(self.state()["retry_blocked"], {})
-        self.assertIn("1 blocked; a later run will not retry it", self.log_text())
+        self.assertEqual([ran["1"] for ran in self.ran_on], ["fable", "opus", "sonnet", "sonnet"])
+        # sonnet has no fallback of its own, but its 429 confirms the limit (issue #52), so the
+        # third death is waited out and retried where it was rather than left blocked.
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.records["1"]["status"], "landed")
+        self.assertNotIn("1 blocked; a later run will not retry it", self.log_text())
+
+    def test_a_retry_whose_only_fallback_just_died_with_a_429_does_not_move_onto_it(self):
+        # opus has no fallback entry, but its 429 this cycle makes it no place to send fable's
+        # task. Nothing landed, so the whole cycle is waited out and neither moves.
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 fable\n2 opus\n")
+        self.plans = [{"1": self.blocked(4), "2": self.blocked(5)}, {}]
+        self.feed(self.CONFIG)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.models(), {"1": "fable", "2": "opus"})
+        self.assertEqual(self.retries, [[], ["1", "2"]])
 
     def test_a_retry_refused_before_launch_is_a_counted_halt_not_another_quick_death(self):
         # The retry's pre flight refused it: the record reads halted but keeps the blocked
@@ -774,6 +802,99 @@ class BlockedLimit(FeederCase):
         self.assertEqual(tail[0::2], ["--retry-blocked", "--retry-blocked"])
         self.assertEqual(sorted(tail[1::2]), ["12", "7"])
         self.assertNotIn("--retry-blocked", seen[1])
+
+
+class HeldModel(FeederCase):
+    """Issue #52. A limit death with no free fallback beside a landing holds its model back."""
+    # fable has no fallback entry; its 429 alone makes the reading.
+    CONFIG = feeder.Config(default_model="sonnet")
+    state = BlockedLimit.state
+    blocked = BlockedLimit.blocked
+
+    def deps(self):
+        # A wait passes time here, since a held model's mark is what ends the held wait.
+        deps = super().deps()
+
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            self.clock = self.clock + timedelta(seconds=seconds)
+        deps.sleep = sleep
+        return deps
+
+    def test_a_halted_death_beside_a_landing_marks_its_model_and_holds_its_cards(self):
+        # opus is marked, so fable's fallback is not free.
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     exhausted={"opus": "2026-09-19T08:00:00"})))
+        self.write(self.paths.routing, "2 fable\n4 fable\n5 fable\n")
+        self.plans = [{"2": halted(8)}, {"2": halted(9)}, {}]
+        self.feed(feeder.Config(default_model="sonnet", model_fallback={"fable": "opus"}))
+        self.assertEqual(self.ran_on[0], {"1": "sonnet", "2": "fable", "3": "sonnet"})
+        # The first death had landings beside it: counted, and fable is held. 4 and 5 are
+        # routed to fable and never appended on it. The second death had none, so the whole
+        # cycle rule waited it out uncounted, and it landed after the wait.
+        self.assertEqual(self.state()["halts"], {"2": 1})
+        self.assertEqual(self.state()["exhausted"]["fable"], "2026-09-19T08:50:00")
+        self.assertEqual(self.runs, [["1", "2", "3"]] * 3)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.records["2"]["status"], "landed")
+        self.assertIn("held back by a model's exhausted mark: cards ['4', '5']", self.log_text())
+        hits = [note for note in self.notes if "with no free fallback: fable marked" in note]
+        self.assertEqual(len(hits), 1, self.notes)
+        self.assertIn("2 died inside 600s on fable", hits[0])
+        self.assertIn("the halts of 2 are counted", hits[0])
+
+    def test_a_held_card_leaves_its_room_to_the_next_card_in_order(self):
+        self.adapter.ready_cards = [card(n) for n in range(1, 8)]
+        self.write(self.paths.routing, "2 fable\n4 fable\n")
+        self.plans = [{"2": self.blocked(4)}, {}]
+        self.feed(self.CONFIG)
+        # 2's retry is deferred and holds no room; 4 is held, so 5, 6 and 7 fill the batch.
+        self.assertEqual(self.runs[1], ["1", "2", "3", "5", "6", "7"])
+        self.assertEqual(self.retries, [[], []])
+        self.assertEqual(self.models()["2"], "fable")
+
+    def test_a_blocked_death_beside_a_landing_retries_only_when_the_mark_expires(self):
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        self.write(self.paths.routing, "2 fable\n3 fable\n")
+        self.plans = [{"2": self.blocked(4)}, {}]
+        self.feed(feeder.Config(default_model="sonnet", batch=2))
+        self.assertEqual(self.ran_on[0], {"1": "sonnet", "2": "fable"})
+        # Nothing is left to run while fable is held, so the feeder waits rather than leave or
+        # call 3 refused, until the mark made at 08:50 is five hours old. Then 2 is retried on
+        # fable and 3 is appended there.
+        self.assertEqual(self.sleeps, [1800] * 10)
+        self.assertEqual(self.retries, [[], ["2"]])
+        self.assertEqual(self.runs[1], ["1", "2", "3"])
+        self.assertEqual(self.ran_on[1], {"1": "sonnet", "2": "fable", "3": "fable"})
+        self.assertEqual(self.records["2"]["status"], "landed")
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["limit_waits"], 0)
+        self.assertIn("nothing to run until a held model's mark expires, waiting",
+                      self.log_text())
+        self.assertIn("2 read blocked and relaunch with --retry-blocked when the mark expires",
+                      self.log_text())
+        self.assertNotIn("2 blocked; a later run will not retry it", self.log_text())
+
+    def test_the_held_wait_neither_strikes_nor_resets_the_usage_limit_waits(self):
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), limit_waits=3, exhausted={"fable": "2026-09-19T08:30:00"})))
+        self.adapter.ready_cards = [card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.assertEqual(self.feed(self.CONFIG, once=True), 0)
+        self.assertEqual(self.runs, [])
+        self.assertEqual(self.state()["limit_waits"], 3)
+        self.assertIn("instead of waiting (model_held)", self.state()["process"]["left_message"])
+
+    def test_the_dry_run_names_a_held_card(self):
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"fable": "2026-09-19T08:30:00"})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.assertEqual(self.feed(self.CONFIG, dry_run=True), 0)
+        out = self.out.getvalue()
+        self.assertIn("would offer 1 on sonnet", out)
+        self.assertIn("would hold 2 on fable until its mark expires", out)
+        self.assertNotIn("would offer 2", out)
 
 
 class Exits(FeederCase):
