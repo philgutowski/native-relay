@@ -151,6 +151,17 @@ def show(repo, ref, path):
     return proc.stdout
 
 
+def work_tree_root(path):
+    """The top of the git work tree `path` sits inside, or ``None`` when it is not in one. An
+    extract made with `git archive` carries no `.git`, so it answers ``None``."""
+    try:
+        proc = run(path, ["rev-parse", "--show-toplevel"], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = (proc.stdout or "").strip()
+    return os.path.realpath(top) if proc.returncode == 0 and top else None
+
+
 def remotes(repo):
     text = run(repo, ["remote"]).stdout
     return [line.strip() for line in text.splitlines() if line.strip()]

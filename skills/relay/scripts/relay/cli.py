@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 
-from . import (adapters, audit as audit_module, brief as brief_module, contracts,
+from . import (adapters, audit as audit_module, brief as brief_module, contracts, gitread,
                feeder as feeder_module, manifest as manifest_module, notify, pair as pair_module,
                progress, run as run_module, state, summary, tail as tail_module, verify)
 
@@ -165,6 +165,10 @@ def build_parser():
     feed_verb.add_argument("--restart", action="store_true",
                            help="ask the running feeder to leave, wait for it, then take its "
                                 "place; nothing is killed")
+    feed_verb.add_argument("--pin", action="store_true",
+                           help="extract the current HEAD under ~/.relay/extracts and start the "
+                                "feeder from that extract with --restart semantics, so later "
+                                "edits to this checkout never reach a cycle; nothing is killed")
     feed_verb.add_argument("--detach", action="store_true",
                            help="start the feeder in its own session, logging beside the "
                                 "manifest, and return at once")
@@ -718,6 +722,11 @@ def cmd_feed(args, env, out, deps=None):
     if not os.path.isfile(paths.manifest):
         out.write("manifest not found: %s\n" % paths.manifest)
         return EXIT_CONFIG
+    warning = feeder_module.checkout_warning()
+    if warning and args.pin:
+        return _pin_feeder(args, env, out)
+    if warning:
+        out.write("warning: %s\n" % warning)
     try:
         config = feeder_module.load_config(paths.config)
         if args.detach:
@@ -745,6 +754,36 @@ def cmd_feed(args, env, out, deps=None):
         return loop.run()
     finally:
         lock.close()
+
+
+def _pin_feeder(args, env, out):
+    """`feed --pin`: cut an extract of this checkout's HEAD and run the same `feed` from it,
+    with `--restart` so a feeder already running for this manifest hands over after its current
+    cycle. The extract has no `.git`, so it starts without the checkout warning. Its output is
+    passed through line by line, and its exit code is ours."""
+    home = env.get("HOME") or os.path.expanduser("~")
+    try:
+        extract, dirty = feeder_module.pin_extract(feeder_module.runner_tree(), home)
+    except (gitread.GitError, OSError) as exc:
+        out.write("could not pin an extract: %s\n" % exc)
+        return EXIT_CONFIG
+    out.write("pinned extract: %s\n" % extract)
+    if dirty:
+        out.write("note: the checkout has uncommitted changes, the extract does not hold them "
+                  "(%s)\n" % dirty)
+    command = [sys.executable, "-u", os.path.join(extract, "skills", "relay", "scripts",
+                                                  "relay_cli.py"), "feed", args.manifest]
+    command += [flag for flag, on in (("--once", args.once), ("--dry-run", args.dry_run),
+                                      ("--restart", not args.dry_run),
+                                      ("--detach", args.detach), ("--notify", args.notify))
+                if on]
+    command += run_module.retry_blocked_argv(frozenset(args.retry_blocked))
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, env=env)
+    with proc:
+        for line in proc.stdout:
+            out.write(line)
+    return proc.returncode
 
 
 def _detach_feeder(args, paths, config, env, out):
