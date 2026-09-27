@@ -563,7 +563,11 @@ or `--pin`; the task in flight finishes and merges first.
 
 How it ends, by exit code: 0 it left on its own terms, the stop file or an empty queue
 (nothing ready, nothing left to run, no runner holding the lease; at once by default, or
-after `idle_waits_max` waits). 1 a person is needed: the checkout is dirty or off its default
+after `idle_waits_max` waits). A queue held entirely by cards the launch scan refuses waits the
+same way but leaves with its own reason, `empty_queue_scanned`, naming the cards, since only a
+reworded card releases them and a watcher must not read that as nothing ever being ready; such a
+card is named again at every feeder start and again whenever it scans clean and later trips the
+scan a second time. 1 a person is needed: the checkout is dirty or off its default
 branch, the ready source is not configured, the runner refused the manifest, the run halted with
 a run scoped class (nothing is counted against the task then), a task that halted twice could
 not be excluded, every ready card was refused with the model it is routed to, or the ready

@@ -191,7 +191,11 @@ minutes apart, for a board where a person releases cards through the day. A read
 cannot be read is not an empty queue: with nothing left to run the feeder waits and asks again,
 and stops with exit 1 after three failed reads in a row. Ready cards that validate refused are
 not an empty queue either; the feeder stops with exit 1 and names them, since only a routing
-change releases them.
+change releases them. Ready cards the launch scan refuses wait the same as an empty queue, but
+leave with their own reason, `empty_queue_scanned`, naming the cards, since a watcher reading
+`empty_queue` off the last event would otherwise conclude nothing was ever ready. A card still
+scanned out is named again at every feeder start, not only the first one, and again whenever it
+scans clean and later trips the scan a second time.
 
 **It answers for itself.** `feed <manifest> --status` says whether that manifest's feeder is
 running and what its last cycle did: what it appended, what landed, halted, blocked, or was
