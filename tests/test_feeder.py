@@ -150,9 +150,13 @@ class FeederCase(RunCase):
                                   check=False).returncode
 
     def _start_hook(self, args, cwd, extra_env, output_path):
-        """The detached hook, recorded and never started: nothing here may outlive a case."""
+        """The detached hook, recorded and never started: nothing here may outlive a case. Each
+        hook takes the next list from `detached_exits` as its own, and its `poll` answers from
+        that list, one per poll, and None, still running, after."""
         self.hooks = getattr(self, "hooks", []) + [("detached", list(args), cwd, dict(extra_env))]
-        return SimpleNamespace(pid=4242)
+        queue = getattr(self, "detached_exits", [])
+        exits = queue.pop(0) if queue else []
+        return SimpleNamespace(pid=4242, poll=lambda: exits.pop(0) if exits else None)
 
     def feed(self, config=None, **kwargs):
         self.out = io.StringIO()
@@ -1857,6 +1861,179 @@ class PostCycle(FeederCase):
         config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_hold=True)
         self.assertEqual(self.feed(config), 0)
         self.assertEqual(len(self.runs), 2)
+        self.assertIsNone(feeder.read_state(self.paths)["hold"])
+
+    # Issue #53: the hold is a record in the state file, not only the feeder's exit.
+    def call(self, *flags):
+        args = cli.build_parser().parse_args(["feed", self.manifest_path] + list(flags))
+        out = io.StringIO()
+        code = cli.cmd_feed(args, self.base_env(), out, deps=self.deps())
+        return code, out.getvalue()
+
+    def hold_once(self):
+        """One cycle whose hook fails with the hold on, and a second plan left unrun."""
+        self.plans = [{"2": halted(5000)}, {}]
+        config = feeder.Config(post_cycle_command=self.exits(3), post_cycle_hold=True)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        return config
+
+    def test_a_hold_is_recorded_in_the_state_file(self):
+        self.hold_once()
+        hold = feeder.read_state(self.paths)["hold"]
+        self.assertEqual(hold, {
+            "at": "2026-09-19T08:50:00", "cycle": 1, "failure": "exited 3",
+            "default_branch": "main", "hook_out": self.paths.hook_out,
+            "merge_base": self.branch_head(), "merge_head": self.branch_head(),
+            "merge_moved": False, "merge_range": ""})
+        self.assertIn("release the hold with `feed %s --release`" % self.paths.manifest,
+                      self.log_text())
+
+    def test_a_feeder_started_again_refuses_to_run_a_cycle_while_held(self):
+        config = self.hold_once()
+        notes = len(self.notes)
+        for once in (False, True):
+            self.assertEqual(self.feed(config, once=once), feeder.EXIT_HALTED)
+            self.assertEqual(len(self.runs), 1)
+            self.assertEqual(self.events()[-1]["reason"], "post_cycle_held")
+        self.assertEqual(self.log_text().count(
+            "stopping: a post cycle hold is set: the hook exited 3 after cycle 1 at "
+            "2026-09-19T08:50:00, merge range empty. Read %s" % self.paths.hook_out), 2)
+        # The hold notified once; a cron `--once` meeting it again every few minutes does not.
+        self.assertEqual(len(self.notes), notes)
+        # A sidecar with the hold turned off does not release it: only the verb does.
+        self.assertEqual(self.feed(feeder.Config()), feeder.EXIT_HALTED)
+        self.assertEqual(len(self.runs), 1)
+
+    def test_every_start_through_the_verb_refuses_before_it_acts(self):
+        self.hold_once()
+        for flags in (("--once",), ("--dry-run",), ("--detach",), ("--pin",)):
+            with mock.patch.object(cli, "_detach_feeder") as detach, \
+                    mock.patch.object(cli, "_pin_feeder") as pin:
+                code, text = self.call(*flags)
+            self.assertEqual(code, feeder.EXIT_HALTED, flags)
+            self.assertIn("refused: a post cycle hold is set: the hook exited 3 after cycle 1",
+                          text)
+            detach.assert_not_called()
+            pin.assert_not_called()
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--restart")
+            self.assertEqual(code, feeder.EXIT_HALTED)
+            # The live feeder was never asked to leave.
+            self.assertFalse(os.path.exists(self.paths.stop))
+        finally:
+            held.close()
+        self.assertEqual(len(self.runs), 1)
+        # Each refusal that would have started a feeder is in its log, where a cron line's
+        # output is not; the dry run writes nothing, as ever.
+        self.assertEqual(self.log_text().count("refused: a post cycle hold is set"), 4)
+
+    def test_a_hold_that_is_not_a_record_is_refused_not_read(self):
+        state = dict(feeder.new_state(), hold=True)
+        self.write(self.paths.state, json.dumps(state))
+        for flags in (("--once",), ("--status",), ("--release",)):
+            code, text = self.call(*flags)
+            self.assertEqual(code, 1, flags)
+            self.assertIn("holds a hold that is not a JSON object or null", text)
+        self.assertEqual(self.runs, [])
+
+    def test_release_clears_the_hold_and_the_next_feeder_runs(self):
+        self.hold_once()
+        code, text = self.call("--release")
+        self.assertEqual(code, 0, text)
+        self.assertIn("released the post cycle hold from cycle 1: the hook exited 3 at "
+                      "2026-09-19T08:50:00, merge range empty", text)
+        state = feeder.read_state(self.paths)
+        self.assertIsNone(state["hold"])
+        # Nothing else in the state file moved: the halt counts are the release's to keep.
+        self.assertEqual(state["halts"], {"2": 1})
+        self.assertIn("the post cycle hold from cycle 1 was released by the operator",
+                      self.log_text())
+        code, text = self.call("--once")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.runs), 2)
+
+    def test_a_release_that_cannot_be_logged_is_still_a_release(self):
+        self.hold_once()
+        with mock.patch.object(feeder, "append_log", side_effect=OSError("disk full")):
+            code, text = self.call("--release")
+        self.assertEqual(code, 0, text)
+        self.assertIn("released the post cycle hold from cycle 1", text)
+        self.assertIn("the release is done but could not be written", text)
+        self.assertIsNone(feeder.read_state(self.paths)["hold"])
+        self.hold_once()
+        with mock.patch.object(feeder, "write_state", side_effect=OSError("read only")):
+            code, text = self.call("--release")
+        self.assertEqual(code, 1)
+        self.assertIn("the hold could not be released, it is still set: read only", text)
+        self.assertIsNotNone(feeder.read_state(self.paths)["hold"])
+
+    def test_release_with_nothing_held_beside_a_live_feeder_or_beside_another_flag(self):
+        code, text = self.call("--release")
+        self.assertEqual(code, 0)
+        self.assertIn("no post cycle hold is set", text)
+        self.hold_once()
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--release")
+        finally:
+            held.close()
+        self.assertEqual(code, feeder.EXIT_LEASE)
+        self.assertIn("nothing released", text)
+        self.assertIsNotNone(feeder.read_state(self.paths)["hold"])
+        for flags, said in ((("--release", "--once"), "--release starts nothing; drop --once"),
+                            (("--release", "--detach", "--notify"), "drop --detach, --notify"),
+                            (("--status", "--release"), "only read; drop --release")):
+            code, text = self.call(*flags)
+            self.assertEqual(code, 1, flags)
+            self.assertIn(said, text)
+        self.assertIsNotNone(feeder.read_state(self.paths)["hold"])
+        self.assertEqual(len(self.runs), 1)
+
+    def test_status_shows_the_hold(self):
+        self.hold_once()
+        code, text = self.call("--status")
+        self.assertEqual(code, 0)
+        self.assertEqual(text.count("hold: a post cycle hold is set: the hook exited 3 after "
+                                    "cycle 1"), 1)
+        # Said once in full here; the brief form is for `status`, which has no line of its own.
+        self.assertNotIn("held since", text)
+        args = cli.build_parser().parse_args(["status", self.manifest_path])
+        out = io.StringIO()
+        cli.cmd_status(args, self.base_env(), out)
+        self.assertIn("held since 2026-09-19T08:50:00 by a failed post cycle hook, release "
+                      "with feed %s --release" % self.paths.manifest, out.getvalue())
+        code, text = self.call("--status", "--json")
+        self.assertEqual(json.loads(text)["hold"]["failure"], "exited 3")
+        self.call("--release")
+        code, text = self.call("--status")
+        self.assertNotIn("\nhold: ", text)
+        self.assertNotIn("held since", text)
+        self.assertIsNone(json.loads(self.call("--status", "--json")[1])["hold"])
+
+    def test_a_hold_is_recorded_when_the_rules_already_stopped_the_feeder(self):
+        """The rules' own stop stands, and the failed gate is still on record for the next
+        feeder: it failed whichever way this one left."""
+        self.plans = [{"1": halted(30), "2": halted(30), "3": halted(30)}, {}]
+        config = feeder.Config(post_cycle_command=self.exits(1), post_cycle_hold=True,
+                               limit_waits_max=0)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(self.events()[-1]["reason"], "limit_waits_exhausted")
+        self.assertEqual(feeder.read_state(self.paths)["hold"]["failure"], "exited 1")
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(self.events()[-1]["reason"], "post_cycle_held")
+        self.assertEqual(len(self.runs), 1)
+
+    def test_a_finished_detached_hook_is_reaped_and_its_exit_logged(self):
+        self.detached_exits = [[None, 5], []]
+        self.plans = [{}, {}]
+        config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_mode="detached")
+        self.assertEqual(self.feed(config), 0)
+        # Polled at the start of cycle 2 (still running) and of cycle 3 (exited 5); the hook
+        # cycle 2 started is still running when the stop file ends the feeder.
+        self.assertEqual(self.log_text().count("the detached post cycle hook from cycle"), 1)
+        self.assertIn("the detached post cycle hook from cycle 1, pid 4242, exited 5, output in "
+                      "%s" % self.paths.hook_out, self.log_text())
 
     def test_a_hook_that_times_out_or_cannot_run_is_a_failure(self):
         self.plans = [{}]
@@ -1865,6 +2042,7 @@ class PostCycle(FeederCase):
         self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
         self.assertIn("the post cycle hook timed out after 1s, holding the feeder", self.log_text())
         os.unlink(self.paths.stop)
+        feeder.release_hold(self.paths)
         self.plans = [{}]
         missing = os.path.join(self.tmp.name, "no-such-hook")
         self.assertEqual(self.feed(feeder.Config(post_cycle_command=(missing,))), 0)

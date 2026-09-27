@@ -140,6 +140,7 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --dry-run   # what wou
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --once      # one cycle, never waits
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave after the current cycle
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --release   # clear a failed post cycle hook's hold; starts nothing
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  # relaunch one blocked task next cycle
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle; --json for data

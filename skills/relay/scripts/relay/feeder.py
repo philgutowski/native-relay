@@ -75,7 +75,10 @@ The two hooks are the operator's, and what they do is theirs: `pre_cycle` runs b
 ready cards are read, for a board whose ready labels are derived, and `post_cycle` (issue #37)
 runs after each `relay run` the feeder settles, with the cycle's landed, halted, blocked, and
 skipped ids and the default branch's merge range in its environment. A blocking one is waited
-on and can hold the feeder on a nonzero exit; a detached one is started and left to run.
+on and can hold the feeder on a nonzero exit; a detached one is started and left to run, and
+reaped at a later cycle's start with its exit code logged. A hold is a record in the state file,
+not only the exit (issue #53): every later feeder refuses to start a cycle while it is set, by
+hand, by `--restart`, or by a cron line running `--once`, until `feed <manifest> --release`.
 
 A feeder answers for itself (issue #36). The state file carries a `process` record, its pid,
 host, start, runner tree, and current cycle, stamped with the exit and the reason when it
@@ -169,6 +172,8 @@ HOOK_BLOCKING = "blocking"
 HOOK_DETACHED = "detached"
 HOOK_MODES = (HOOK_BLOCKING, HOOK_DETACHED)
 HOLD_WORD = "post_cycle_held"
+# Said after any sentence that the state file could not be read, by every reader that refuses.
+STATE_HINT = "It holds the halt counts, so fix or remove it by hand."
 
 
 class ConfigError(ValueError):
@@ -887,9 +892,10 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
 def new_state():
     # `retry_blocked` is {id: the blocked record's started_at} for each blocked task the next
     # run is to relaunch. The stamp is how a retry the run never reached is told from one that
-    # ran: every launch restamps it.
+    # ran: every launch restamps it. `hold` is None, or the record a held post cycle hook left
+    # (issue #53), which only `release_hold` clears.
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
-            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}}
+            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}, "hold": None}
 
 
 def _torn_line(path):
@@ -921,13 +927,15 @@ class Feeder:
         # False until `run` has read the state file under the lock. A state file that could
         # not be read then holds the halt counts, so nothing may save over it.
         self.recording = False
+        # (Popen, cycle) for each detached post cycle hook not yet seen to finish. Polled at the
+        # start of each cycle, so a finished one is reaped on purpose and its exit is logged.
+        self.detached = []
 
     # Reporting.
     def log(self, message):
-        line = "%s %s" % (self.deps.now().isoformat(timespec="seconds"), message)
+        line = log_line(self.deps.now(), message)
         if not self.dry_run:
-            with open(self.paths.log, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            append_log(self.paths, line)
         self.out.write(line + "\n")
         if hasattr(self.out, "flush"):
             self.out.flush()
@@ -975,13 +983,12 @@ class Feeder:
         try:
             loaded.update(read_state(self.paths))
         except ConfigError as exc:
-            raise ConfigError("%s. It holds the halt counts, so fix or remove it by hand." % exc)
+            raise ConfigError("%s. %s" % (exc, STATE_HINT))
         return loaded
 
     def save_state(self):
         if not self.dry_run:
-            manifestedit.write_atomic(self.paths.state, json.dumps(self.state, indent=1,
-                                                                   sort_keys=True))
+            write_state(self.paths, self.state)
 
     # The loop.
     def run(self):
@@ -1077,11 +1084,20 @@ class Feeder:
     def cycle(self):
         """One pass. Returns an exit code to leave with, or None to go round again."""
         config, deps = self.config, self.deps
+        self.reap_detached()
         if os.path.exists(self.paths.stop):
             if RESTART_WORD in self._read(self.paths.stop).split():
                 return self.stop(EXIT_OK, "stop file present, a restart is taking over, leaving",
                                  RESTART_WORD)
             return self.stop(EXIT_OK, "stop file present, leaving", "stop_file")
+        if self.state.get("hold"):
+            # `cmd_feed` refuses before it starts a feeder, so this is mostly the one that took
+            # over by `--restart` from a feeder that held on its way out. Logged every time and
+            # not notified: the hold itself already was, and a cron `--once` would repeat it.
+            message = "stopping: " + hold_sentence(self.paths.manifest, self.state["hold"])
+            self.leave_reason = (HOLD_WORD, message)
+            self.log(message)
+            return EXIT_HALTED
         try:
             manifest = manifest_module.load(self.paths.manifest, allow_no_tasks=True)
         except manifest_module.ManifestError as exc:
@@ -1250,7 +1266,8 @@ class Feeder:
         the rules ask for is only returned here, and taken after the hook, so a usage limit
         wait never delays it. A cycle the rules stop still runs it. A hold the hook asks for
         replaces what would have come next, going round or a wait; a stop the rules already
-        made stands, and the hold is in the log and in the `post_cycle` event."""
+        made stands, and the hold is in the log and in the `post_cycle` event. Either way the
+        hold is in the state file too, and blocks every later start until `release_hold`."""
         data = self.deps.read_summary(manifest)
         after = {task["id"]: task for task in data.get("tasks", [])}
         mine = [after[task_id] for task_id in cycle_ids if task_id in after]
@@ -1654,7 +1671,7 @@ class Feeder:
         mode, command = config.post_cycle_mode, list(config.post_cycle_command)
         said = {key: outcome[key] for key in ("merge_base", "merge_head", "merge_moved",
                                                "merge_range")}
-        where = ("unknown" if moved is None else outcome["merge_range"] or "empty")
+        where = merge_words(said)
         try:
             with open(self.paths.hook_out, "a", encoding="utf-8") as handle:
                 handle.write("%s cycle %d post_cycle %s: %s\n" % (
@@ -1664,11 +1681,13 @@ class Feeder:
             self.log("the post cycle hook's output file could not be written: %s" % exc)
         if mode == HOOK_DETACHED:
             try:
-                pid = self.deps.start_hook(command, repo, extra, self.paths.hook_out).pid
+                proc = self.deps.start_hook(command, repo, extra, self.paths.hook_out)
             except (OSError, subprocess.SubprocessError) as exc:
                 self.log("the post cycle hook could not start: %s" % exc)
                 self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=None, error=str(exc), **said)
                 return None
+            pid = proc.pid
+            self.detached.append((proc, self.state["cycles"]))
             self.log("the post cycle hook started detached, pid %d, merge range %s, output in %s"
                      % (pid, where, self.paths.hook_out))
             self.emit(EVENT_POST_CYCLE, mode=mode, hook_pid=pid, error=None, **said)
@@ -1693,14 +1712,38 @@ class Feeder:
         self.log("the post cycle hook %s%s, merge range %s, output in %s" % (
             failure or "exited 0", ", holding the feeder" if held else "", where,
             self.paths.hook_out))
+        if held:
+            # Saved before the event and before `settle` decides how to leave, and saved even
+            # when the rules already stop the feeder: the gate failed whichever way it goes, and
+            # a feeder started again must not run its next cycle on top of it (issue #53).
+            self.state["hold"] = dict(said, at=self.deps.now().isoformat(timespec="seconds"),
+                                      cycle=self.state["cycles"], failure=failure,
+                                      default_branch=branch, hook_out=self.paths.hook_out)
+            self.save_state()
         self.emit(EVENT_POST_CYCLE, mode=mode, exit_code=exit_code, error=failure, held=held,
                   **said)
         return failure if held else None
 
     def hold(self, failure):
         return self.stop(EXIT_HALTED, "stopping: the post cycle hook %s and post_cycle_hold is "
-                                      "on. Read %s, then start the feeder again."
-                         % (failure, self.paths.hook_out), HOLD_WORD)
+                                      "on. Read %s and repair the default branch, then release "
+                                      "the hold with `feed %s --release` and start the feeder "
+                                      "again." % (failure, self.paths.hook_out,
+                                                  self.paths.manifest), HOLD_WORD)
+
+    def reap_detached(self):
+        """Poll each detached hook this feeder started, and log and forget the ones that have
+        finished. A hook still running is left alone: it is in its own session and may outlive
+        the feeder, which is what detached is for."""
+        running = []
+        for proc, cycle in self.detached:
+            code = proc.poll()
+            if code is None:
+                running.append((proc, cycle))
+            else:
+                self.log("the detached post cycle hook from cycle %d, pid %s, exited %s, output "
+                         "in %s" % (cycle, proc.pid, code, self.paths.hook_out))
+        self.detached = running
 
     # The steps.
     def pre_cycle(self, manifest):
@@ -1978,7 +2021,68 @@ def read_state(paths):
         raise ConfigError("%s could not be read: %s" % (paths.state, exc))
     if not isinstance(loaded, dict):
         raise ConfigError("%s is not a JSON object" % paths.state)
+    if loaded.get("hold") is not None and not isinstance(loaded["hold"], dict):
+        # Refused rather than read as held or not: a hand edit that left `true` here would
+        # otherwise crash every reader of the hold, and `false` would quietly release it.
+        raise ConfigError("%s holds a hold that is not a JSON object or null" % paths.state)
     return loaded
+
+
+def write_state(paths, state):
+    """Rename the whole state into place in one step, so a reader never sees half of it."""
+    manifestedit.write_atomic(paths.state, json.dumps(state, indent=1, sort_keys=True))
+
+
+def log_line(when, message):
+    """A feeder log line: the time to the second, then the sentence."""
+    return "%s %s" % (when.isoformat(timespec="seconds"), message)
+
+
+def append_log(paths, line):
+    with open(paths.log, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def merge_words(record):
+    """The three way reading of a merge range the hook's log line uses: unknown, empty, or the
+    range itself."""
+    if record.get("merge_moved") is None:
+        return "unknown"
+    return record.get("merge_range") or "empty"
+
+
+def hold_sentence(manifest_path, hold):
+    """The sentence a refused start and `feed --status` say for the hold record `hold`, set on
+    the manifest at `manifest_path` (issue #53)."""
+    return ("a post cycle hold is set: the hook %s after cycle %s at %s, merge range %s. Read %s "
+            "and repair the default branch, then release it with `feed %s --release`."
+            % (hold.get("failure"), hold.get("cycle"), hold.get("at"), merge_words(hold),
+               hold.get("hook_out") or paths_for(manifest_path).hook_out, manifest_path))
+
+
+def release_hold(paths, now=datetime.now):
+    """Clear the hold from the state file. Returns (the record cleared, or None when none was
+    set; None, or the reason the release could not be logged). The caller holds the feeder
+    lock, so no feeder saves over this write. Raises ConfigError on a state file that cannot be
+    read, which holds the halt counts too, and OSError when the state cannot be written, in
+    which case nothing was released.
+
+    The log is written after the state and a failure there is only reported: the release is
+    what the operator asked for, and saying it failed once the hold is gone would send them
+    after a hold that no longer exists."""
+    state = read_state(paths)
+    hold = state.get("hold")
+    if not hold:
+        return None, None
+    state["hold"] = None
+    write_state(paths, state)
+    try:
+        append_log(paths, log_line(now(), "the post cycle hold from cycle %s was released by "
+                                          "the operator: the hook %s at %s"
+                                   % (hold.get("cycle"), hold.get("failure"), hold.get("at"))))
+    except OSError as exc:
+        return hold, str(exc)
+    return hold, None
 
 
 def liveness(paths, state, hostname=None):
@@ -2025,7 +2129,8 @@ def status_report(paths, hostname=None):
     state = read_state(paths)
     report = {"manifest": paths.manifest, "state_path": paths.state, "events_path": paths.events,
               "process": state.get("process"), "cycles": state.get("cycles", 0),
-              "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event")}
+              "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event"),
+              "hold": state.get("hold") or None}
     report.update(liveness(paths, state, hostname=hostname))
     return report
 
@@ -2034,19 +2139,27 @@ def _ids(values):
     return "[%s]" % ", ".join(str(value) for value in values or ())
 
 
-def feeder_line(report):
-    """One line: whether this manifest's feeder is running, and why the answer is what it is."""
+def feeder_line(report, with_hold=True):
+    """One line: whether this manifest's feeder is running, and why the answer is what it is.
+    `with_hold` adds a set hold in brief, for `status`, which has no line of its own for it."""
     line = "feeder: %s, %s" % ("running" if report["running"] else "not running",
                                report["detail"])
     process = report.get("process") or {}
     if report["running"] and process.get("pid") == report.get("pid"):
         line += ", since %s, cycle %s" % (process.get("started_at"), process.get("cycle"))
+    hold = report.get("hold")
+    if hold and with_hold:
+        line += "; held since %s by a failed post cycle hook, release with feed %s --release" % (
+            hold.get("at"), report["manifest"])
     return line
 
 
 def status_lines(report):
-    """`feed --status` for a person: the feeder line, then the last cycle and the last event."""
-    lines = [feeder_line(report), "manifest: %s" % report["manifest"]]
+    """`feed --status` for a person: the feeder line, a set hold in full, then the last cycle
+    and the last event."""
+    lines = [feeder_line(report, with_hold=False), "manifest: %s" % report["manifest"]]
+    if report.get("hold"):
+        lines.append("hold: " + hold_sentence(report["manifest"], report["hold"]))
     process = report.get("process") or {}
     if process.get("runner_tree"):
         lines.append("runner tree: %s" % process["runner_tree"])
