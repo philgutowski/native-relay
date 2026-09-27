@@ -42,8 +42,9 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     for it alone to the next run, so no other blocked record is revived with it. It is a quick
     death for the whole cycle rule too (issue #45): a cycle whose deaths are all of this kind,
     with no fallback free, is waited out like a cycle of halts, and each such record is queued
-    for the same retry after the wait. Without that it fell through to an ordinary blocked
-    report, left its model unmarked, and the next cycle appended fresh cards on the dead model.
+    for the same retry after the wait, holding its room in the batch ahead of fresh cards.
+    Without that it fell through to an ordinary blocked report, left its model unmarked, and
+    the next cycle filled the batch with fresh cards on the dead model.
 
 The feeder never merges, pushes, moves a card, or edits the target repository. It writes three
 things, all beside the manifest: the manifest itself, through `manifestedit`; its own state
@@ -860,8 +861,8 @@ class Feeder:
                     self.report_blocked(task)
                 self.save_state()
                 return self.stop(EXIT_HALTED, "every task has died quickly for %d waits. Not a "
-                                              "usage limit. Read the summary."
-                                              % config.limit_waits_max)
+                                              "usage limit, or one that outlasts the waits. "
+                                              "Read the summary." % config.limit_waits_max)
             for task in limited:
                 self.queue_retry(task)
             if limited:

@@ -523,6 +523,24 @@ class BlockedLimit(FeederCase):
         self.assertEqual(self.state()["halts"], {})
         self.assertNotIn("blocked; a later run will not retry it", self.log_text())
 
+    def test_a_blocked_death_with_no_free_fallback_holds_a_movable_halt_to_the_wait(self):
+        # 1 halted on fable, whose fallback sonnet is free; 2 blocked on opus, whose fallback
+        # haiku is marked and leads nowhere. Nothing landed and one death has nowhere to go, so
+        # the whole cycle rule decides for both, as it does for two halts: neither moves.
+        config = feeder.Config(allowed_models=("fable", "opus", "sonnet", "haiku"),
+                               model_fallback={"fable": "sonnet", "opus": "haiku"})
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     exhausted={"haiku": "2026-09-19T08:00:00"})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 fable\n2 opus\n")
+        self.plans = [{"1": halted(8), "2": self.blocked(4)}, {}]
+        self.feed(config)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.retries, [[], ["2"]])
+        self.assertEqual(self.models(), {"1": "fable", "2": "opus"})
+        self.assertEqual(self.state()["exhausted"], {"haiku": "2026-09-19T08:00:00"})
+        self.assertEqual(self.state()["halts"], {})
+
     def test_blocked_limit_deaths_with_no_free_fallback_run_out_the_waits_and_stop(self):
         self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
                                                      exhausted={"opus": "2026-09-19T08:00:00"})))

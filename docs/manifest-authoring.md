@@ -432,8 +432,9 @@ labels = []
   run with `--retry-blocked <id>` for that id alone; no other blocked record is retried. It is a
   quick death for the whole cycle rule as well, so a cycle of blocked limit deaths with no free
   fallback, a fallback already marked or two models that fall back to each other and both died,
-  is waited out. It waits too, holds its place in the batch, and relaunches on its own model
-  with `--retry-blocked <id>`. `feed <manifest>
+  is waited out. It waits too, holds its place in the batch ahead of fresh cards, and
+  relaunches on its own model with `--retry-blocked <id>`. In a cycle where something landed,
+  one with no free fallback stays blocked. `feed <manifest>
   --retry-blocked <id>` queues one blocked task by hand the same way.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart`. The order and routing files are read at every cycle and need no restart.
