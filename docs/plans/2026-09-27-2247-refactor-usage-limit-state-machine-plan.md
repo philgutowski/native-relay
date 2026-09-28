@@ -58,7 +58,7 @@ The cost is real processes. Every limit death is a Task process and then a Close
 
 **Model marks**
 
-- R4. A confirmed limit death marks its model. The mark expires at the reset time the CLI printed for that death, when the log carries one and it lies ahead. Otherwise it expires `fallback_hours` after the death. A landing on the same model earlier in the Cycle does not prevent the mark. A later confirmed death on a marked model replaces the mark with that death's own. The operator is notified when a model goes from unmarked to marked, and not again until it has been unmarked.
+- R4. A confirmed limit death marks its model. The mark expires at the reset time the CLI printed for that death, when the log carries one and it lies ahead of the moment the rules run. A reset time that lies between the death and that moment writes no mark, since the limit is already over. Otherwise the mark expires `fallback_hours` after the death, and is not written when that time has passed too. A landing on the same model earlier in the Cycle does not prevent the mark. A later confirmed death on a marked model replaces the mark with that death's own. The operator is notified when a model goes from unmarked to marked, and not again until it has been unmarked.
 - R5. No Task is launched on a marked model. Before each run, every unsettled Task and every queued retry the Manifest lists on a marked model is moved to the first free model along its fallback chain. With none free it is held. A held blocked Task keeps its place in the retry queue and is not passed to the run. Every other held Task, halted or never launched, is named to the run as deferred (R10). A held Task takes no room in the batch.
 - R6. A confirmed limit death is never counted toward `max_halts`. A blocked one is queued for a retry and is not reported as an ordinary blocked Task while that retry is queued.
 - R7. When held work is all that is left, the Feeder waits with reason `model_held`. The wait is no longer than the time until the earliest mark that holds that work expires.
@@ -240,6 +240,16 @@ flowchart TB
 | A sidecar or flag an older pinned extract does not know refuses that extract | This plan adds no sidecar key. `--defer` and `--clear-limits` are flags of the same tree the Feeder launches its Runner from. |
 | The `CONCEPTS.md` entry and the code drift again | R14 leaves one statement of the rules. U7 deletes the other three. |
 | Reason words are read by watchers | No reason word is renamed or removed. The `limit` event is an addition. |
+
+### Amendments from the build
+
+The build ran from 2026-09-27 to 2026-09-28 and landed ten cards. Three were not units of this plan. Each came from the independent review of a unit.
+
+- #94, after U1. The Runner writes a line of its own to a process's log before each launch, and the reader stops there as well as at `init`. Without it an attempt that died before printing anything read the attempt before it.
+- #96, after U2. A mark is sized from the time the Task died, not from the time the rules run. R4 above carries the amended rule.
+- #98, after U4. When a run halts on a confirmed limit death, the halted Tasks listed after it, which the run never reached, are not counted.
+
+One finding was held for a person and not built: #97, a confirmed death whose reset has already passed writes no mark, so nothing bounds its relaunch.
 
 ### Sources
 
