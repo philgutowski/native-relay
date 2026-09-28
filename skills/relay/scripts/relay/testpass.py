@@ -601,8 +601,7 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
                              log_path=launched.log_path)
     record["read_from"]["test"] = report.source
     if report.source is None:
-        return finish(FAILED, "the test process left no transcript to read: %s"
-                              % testbrief.NO_FINAL_MESSAGE)
+        return finish(FAILED, "the test process left no transcript to read: %s" % report.error)
     if not report.ok:
         return finish(FAILED, report.error)
     record["approval_steps"] = list(report.approval_steps)

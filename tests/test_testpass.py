@@ -456,6 +456,23 @@ class ReadFromTheLog(PassCase):
         self.assertFalse(os.path.exists(self.paths().findings))
         self.assert_checkout_clean()
 
+    def test_a_transcript_that_opened_with_no_assistant_record_fails_naming_the_transcript(self):
+        """The one boundary the guard removal does not widen: a transcript at the predicted
+        path is the process's own file, and the reader takes nothing past it, so the reason
+        names it and not the log (code review)."""
+        empty = os.path.join(self.tmp.name, "empty.jsonl")
+        with open(empty, "w") as handle:
+            handle.write(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+        self.queue_entry(empty, stream=self.transcript(report_text([finding(1)]), "stream-1"))
+        outcome, _ = self.run_pass(testpass.Request(report_only=True))
+        record = outcome.record
+        self.assertEqual(record["status"], testloop.FAILED)
+        self.assertIn("left no transcript to read", record["reason"])
+        self.assertIn("no assistant record", record["reason"])
+        self.assertNotIn("stdout log", record["reason"])
+        self.assertTrue(os.path.exists(record["transcripts"]["test"]))
+        self.assertIsNone(record["read_from"]["test"])
+
     def test_a_transcript_at_the_predicted_path_is_still_the_file_named(self):
         self.test_process([finding(1)])
         self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],

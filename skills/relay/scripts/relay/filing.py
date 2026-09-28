@@ -331,12 +331,11 @@ def parse(transcript_path, backend="claude", log_path=None, count=None):
     """Read the filed block from the process's transcript, or from its stdout log when the
     transcript is absent: the full final message through the reader `testbrief` owns, then
     `parse_text`. The result's `source` names the file read."""
-    text, source = testbrief.read_final_message(transcript_path, backend=backend,
-                                                log_path=log_path)
-    if text is None:
+    read = testbrief.read_final_message(transcript_path, backend=backend, log_path=log_path)
+    if read.text is None:
         return Filed(error="the filing process left no transcript to read: %s"
-                     % testbrief.NO_FINAL_MESSAGE)
-    return replace(parse_text(text, count=count), source=source)
+                     % read.no_message_reason)
+    return replace(parse_text(read.text, count=count), source=read.source)
 
 
 def confirm(entries, adapter, known=()):
