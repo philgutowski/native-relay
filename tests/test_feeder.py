@@ -1330,6 +1330,65 @@ class LimitMachine(FeederCase):
         self.assertEqual(manifestedit.excluded_ids(self.text()), set())
         self.assertEqual(set(self.state()["exhausted"]), {"fable"})
 
+    def task_halt_ahead_of_an_old_halt(self, death, run_status="halted", old_halt_first=False):
+        """T, 7 on fable, listed ahead of H, 8 on opus. H halted once already, a Cycle in which T
+        was deferred on a held fable whose mark has since expired. T launches first and dies with
+        `death`, a Task scoped class, and the run stops there: H is never reached. With
+        `old_halt_first` H is listed ahead of T instead, so the run reached it and refused it
+        before launch, and passed it under `continue_past_task_halt`."""
+        pairs = [("7", "fable"), ("8", "opus")]
+        self.listing(*(pairs[::-1] if old_halt_first else pairs),
+                     _8=dict(halted(5000), model="opus", started_at="old"))
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), halts={"8": 1})))
+        self.adapter.ready_cards = []
+        self.run_record = {"run_status": run_status, "halt_task": "7",
+                           "halt_class": "unclean_exit"}
+        self.plans = [{"7": death, "8": UNREACHED}, {}]
+        return self.feed(feeder.Config(model_fallback={"fable": "opus"}))
+
+    def test_a_task_scoped_halt_read_as_the_limit_counts_nothing_it_never_reached(self):
+        self.task_halt_ahead_of_an_old_halt(self.limit_halt())
+        self.assertEqual(self.state()["halts"], {"8": 1})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), set())
+        self.assertFalse(any("excluded" in note for note in self.notes), self.notes)
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+        self.assertIn("8", self.ran_on[1])
+
+    def test_a_limit_halt_still_counts_a_halt_it_refused_before_launch_ahead_of_it(self):
+        # R3: a card refused at pre flight every Cycle is excluded, even beside a limit death.
+        self.task_halt_ahead_of_an_old_halt(self.limit_halt(), old_halt_first=True)
+        self.assertEqual(self.state()["halts"], {"8": 2})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"8"})
+        self.assertTrue(any("8 excluded after 2 halts" in note for note in self.notes),
+                        self.notes)
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+
+    def test_a_task_scoped_halt_that_is_not_the_limit_counts_what_it_never_reached(self):
+        self.task_halt_ahead_of_an_old_halt(self.limit_halt(log=MISSING_MODEL_LOG))
+        self.assertEqual(self.state()["halts"], {"7": 1, "8": 2})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"8"})
+        self.assertTrue(any("8 excluded after 2 halts" in note for note in self.notes),
+                        self.notes)
+        self.assertEqual(self.state()["exhausted"], {})
+
+    def test_a_quick_unconfirmed_task_halt_waits_the_cycle_out(self):
+        # T's quick death is waited out and not counted. The guard reads only a confirmed death,
+        # so H, never reached, is still counted as it was before it; issue #99 asks whether a
+        # waited Cycle should leave it alone too.
+        self.task_halt_ahead_of_an_old_halt(halted(8))
+        self.assertEqual(self.sleeps[0], 1800)
+        self.assertIn("reading that as a usage limit", self.log_text())
+        self.assertNotIn("7", self.state()["halts"])
+        self.assertEqual(self.state()["halts"], {"8": 2})
+
+    def test_a_completed_run_counts_a_halt_it_refused_before_launch(self):
+        # The run did not halt on a limit, so the guard never reaches H: pre flight refused it.
+        self.task_halt_ahead_of_an_old_halt("landed", run_status="completed")
+        self.assertEqual(self.state()["halts"], {"8": 2})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"8"})
+        self.assertTrue(any("8 excluded after 2 halts" in note for note in self.notes),
+                        self.notes)
+
     def test_a_mark_that_expires_before_routing_routes_to_its_model(self):
         # Read at the start of the Cycle, gone by the time a card is routed.
         loop = feeder.Feeder(self.paths, feeder.Config(), self.deps(), self.base_env(),

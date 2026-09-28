@@ -60,6 +60,10 @@ python3 -c "import subprocess, sys; subprocess.run([sys.executable, '-m', 'unitt
   not `running` (`Feeder.passed_over`). The fake runner mirrors this: every run stamps
   `terminal_written_at` unless its plan carries `NO_TERMINAL`.
 - A run scoped halt read as a confirmed limit no longer stops the Feeder. The run still stopped
-  there, so every record it did not launch is added to the passed over set. Otherwise
-  `decide_after_run` counts the old halted records the stopped run never reached, the cascade
-  the run scoped stop exists to prevent.
+  there, so every halted record listed after the halt task that it did not launch is added to
+  the passed over set. Otherwise `decide_after_run` counts the old halted records the stopped
+  run never reached, the cascade the run scoped stop exists to prevent. Issue #98 widened this
+  to a halt of any class whose death reads confirmed, and narrowed it to records listed after
+  the halt task, since one listed ahead that the run did not launch was refused before launch
+  and still counts under R3. A waited Cycle, where the halt task's death is unconfirmed, still
+  counts what the run never reached; issue #99 holds that question.
