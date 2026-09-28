@@ -214,6 +214,21 @@ class Status(LoopCase):
                          (True, True, 2, 4, 2.8, 12, 3, {"1": 2, "2": 1}, ["Search"],
                           testloop.STOP_ROUNDS))
 
+    def test_status_counts_a_planning_card_apart_from_the_filed_cards(self):
+        """Issue #115: the filed count is the budget's count, so status never reads as a spent
+        budget while the loop still has room."""
+        self.write(self.paths.config, ON)
+        self.seed(rounds=1, filed={
+            "10": {"generation": 1, "area": "Search", "design": False, "cause_file": "a.py"},
+            "14": {"generation": 1, "area": "Search", "design": False,
+                   "cause_file": "docs/tour.md", "attended": True}})
+        code, text = self.call("--status")
+        self.assertEqual(code, 0, text)
+        self.assertIn("test loop filed cards: 1, generation 1: 1, planning cards: 1", text)
+        loop = json.loads(self.call("--status", "--json")[1])["test_loop"]
+        self.assertEqual((loop["cards_filed"], loop["planning_cards"], loop["generations"]),
+                         (1, 1, {"1": 1}))
+
     def test_a_running_loop_counts_its_hours_to_the_present(self):
         self.write(self.paths.config, ON)
         self.seed(started_at=(self.clock - timedelta(hours=3)).isoformat(timespec="seconds"))

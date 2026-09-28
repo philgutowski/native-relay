@@ -331,6 +331,27 @@ class ShouldStop(unittest.TestCase):
                          testloop.STOP_CLEAN)
         self.assertEqual(self.stop(tour(["stray"] + numbered(["high"]), new_cards=1)), None)
 
+    def test_a_planning_finding_beside_only_lows_stops_clean(self):
+        """Issue #115: the attended planning finding of R19 is filed high so a person sees it,
+        and it is the loop's own request, not a defect the tour found."""
+        planning = finding("high", area="Billing", title="Plan the Billing area",
+                           **{testloop.ATTENDED_KEY: True})
+        self.assertTrue(testloop.is_attended(planning))
+        self.assertFalse(testloop.is_attended(finding()))
+        self.assertFalse(testloop.is_attended(finding(**{testloop.ATTENDED_KEY: "yes"})))
+        self.assertEqual(self.stop(tour(numbered(["low"]) + [planning], new_cards=0)),
+                         testloop.STOP_CLEAN)
+        self.assertEqual(self.stop(tour([planning], new_cards=0)), testloop.STOP_CLEAN)
+
+    def test_a_planning_card_filed_beside_dropped_or_commented_findings_is_no_new_card(self):
+        """The caller counts the planning card out of `new_cards`, and the dropped or commented
+        highs then stop the loop on open findings, never read as productive."""
+        planning = finding("high", area="Billing", **{testloop.ATTENDED_KEY: True})
+        dropped = numbered(["high", "medium"], area="Billing")
+        self.assertEqual(self.stop(tour(dropped + [planning], new_cards=0)),
+                         testloop.STOP_OPEN_FINDINGS)
+        self.assertIsNone(self.stop(tour(dropped + [planning], new_cards=1), cards=1))
+
     def test_an_unknown_kind_or_status_is_refused(self):
         for result in (testloop.PassResult(kind="Tour", status=testloop.RAN),
                        testloop.PassResult(kind=testloop.TOUR, status="Ran")):

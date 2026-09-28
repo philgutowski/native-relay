@@ -686,7 +686,11 @@ recording only what the Tracker confirms. It is to a Test pass what the Closeout
 Task: the Feeder and the Runner still never write to a Tracker, and a launched process writes
 through the adapter's own instructions. It runs in the checkout on the Manifest's closeout
 model, and on a markdown Tracker its commit is bounded to the tracker file by the Closeout's own
-scope check.
+scope check. A Filing process that did not complete, one that could not launch, timed out, lost
+the Lease, left no readable block, or had its commit reset, fails the pass with that sentence,
+so the Feeder reads a filing failure as a failed pass and never as findings that produced no
+card. The attended planning card it files for a stopped area is a person's, counted toward
+neither the loop's card budget nor a pass's new cards.
 
 ### Tour document
 The app's own description of what a Test process tests, kept in the app's repository at the path

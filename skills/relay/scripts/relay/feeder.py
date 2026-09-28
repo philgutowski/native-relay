@@ -1180,6 +1180,18 @@ def new_loop_state(now):
             "unchecked": [], "stop": None}
 
 
+def loop_cards_filed(loop):
+    """The cards the loop has filed against its budget (R17): every entry of the loop's `filed`
+    map but an attended planning card, which is a person's, filed outside the per pass cap
+    and counted toward neither the budget nor a pass's new cards (issue #115). `loop` is the
+    state file's `test_loop` dict."""
+    filed = loop.get("filed") if isinstance(loop, dict) else None
+    if not isinstance(filed, dict):
+        return 0
+    return sum(1 for record in filed.values()
+               if not (isinstance(record, dict) and record.get("attended") is True))
+
+
 def loop_stop_sentence(reason, loop, settings):
     """The sentence for a `testloop` stop word, for the log, the notice, and the stop record."""
     if reason == testloop.STOP_CLEAN:
@@ -1194,7 +1206,7 @@ def loop_stop_sentence(reason, loop, settings):
         return "the loop started at %s and max_hours is %d" % (loop.get("started_at"),
                                                                settings.max_hours)
     if reason == testloop.STOP_BUDGET:
-        return "%d cards filed, the max_cards_total cap of %d" % (len(loop.get("filed") or {}),
+        return "%d cards filed, the max_cards_total cap of %d" % (loop_cards_filed(loop),
                                                                   settings.max_cards_total)
     if reason == testloop.STOP_REPORT_ONLY:
         return ("report only mode runs one full tour, and its findings are in the findings "
@@ -2102,7 +2114,7 @@ class Feeder:
         # here is asking whether either has run out before this pass starts.
         reason = testloop.should_stop(testloop.PassResult(kind=kind, status=testloop.NOT_RUN),
                                       loop["rounds"], self.loop_started_at(loop),
-                                      self.deps.now(), len(loop["filed"]),
+                                      self.deps.now(), loop_cards_filed(loop),
                                       report_only=settings.report_only, settings=settings)
         if reason:
             self.stop_loop(reason)
@@ -2123,7 +2135,7 @@ class Feeder:
                              % ", ".join(gone))
             stopped = tuple(area for area in stopped if area in headings)
         plan = tuple(area for area in stopped if area not in loop["planned_areas"])
-        budget = max(0, settings.max_cards_total - len(loop["filed"]))
+        budget = max(0, settings.max_cards_total - loop_cards_filed(loop))
         self.log("starting a %s test pass on %s%s, stopped areas %s, planning %s, budget %d"
                  % (kind, model, " of %s" % _ids(cards) if cards else "", _ids(stopped),
                     _ids(plan), budget))
@@ -2138,7 +2150,9 @@ class Feeder:
         confirmed card with its generation, area, design flag, and cause file; the areas each
         checked card's check filed in, and from them the patch counts and the areas newly at
         the cap (R19); the round, for a tour that ran; one `test_pass` event. A pass that did not
-        run or failed is notified once per reason and counts as no round."""
+        run or failed is notified once per reason and counts as no round. An attended planning
+        card is recorded in the filed map so the loop knows it, and is not a new card to the
+        stop rule nor a card against the budget (issue #115)."""
         loop, settings, now = self.loop_state(), self.config.test_loop, self.deps.now()
         status = record.get("status")
         reason = str(record.get("reason") or "")
@@ -2169,8 +2183,14 @@ class Feeder:
                      if isinstance(entry, dict) and entry.get("id") is not None]
         if kind == testloop.TOUR and status == testloop.RAN:
             loop["rounds"] += 1
-        if status == testloop.RAN:
-            loop["planned_areas"] += [area for area in plan if area not in loop["planned_areas"]]
+        # An area is planned when its pass ran, and also when its planning card was confirmed
+        # filed on a pass that then failed (code review): the card exists on the tracker, and
+        # asking the next tour for it again would file a second one for the same area.
+        planned = list(plan) if status == testloop.RAN else []
+        planned += [loop["filed"][card_id].get("area") for card_id in sorted(attended)
+                    if loop["filed"][card_id].get("area") not in planned
+                    and loop["filed"][card_id].get("area") is not None]
+        loop["planned_areas"] += [area for area in planned if area not in loop["planned_areas"]]
         patches = testloop.area_patches(loop["filed"], loop["checks"],
                                         settings.max_patches_per_area)
         loop["patches"] = dict(patches.counts)
@@ -2184,7 +2204,7 @@ class Feeder:
         loop["passes"].append({
             "pass": record.get("pass"), "kind": kind, "status": status, "reason": reason,
             "at": now.isoformat(timespec="seconds"), "cycle": self.state["cycles"], "cards": list(sent), "filed": new,
-            "commented": commented, "planned": list(plan) if status == testloop.RAN else [],
+            "commented": commented, "planned": planned,
             "record_path": record.get("record_path")})
         self.log("test pass %s, a %s, %s%s: filed %s, commented %s" % (
             record.get("pass"), kind, status, ": " + reason if reason else "", _ids(new),
@@ -2205,18 +2225,18 @@ class Feeder:
                 self.notify(message)
         self.emit(EVENT_TEST_PASS, kind=kind, status=status, reason=reason,
                   pass_number=record.get("pass"), cards=list(sent), filed=new,
-                  commented=commented, planned=list(plan) if status == testloop.RAN else [],
+                  commented=commented, planned=planned,
                   record_path=record.get("record_path"),
                   transcripts=record.get("transcripts") or {},
                   read_from=record.get("read_from") or {})
-        ready = self.ready_filed([card_id for card_id in new if card_id not in attended],
-                                 manifest)
+        unattended = [card_id for card_id in new if card_id not in attended]
+        ready = self.ready_filed(unattended, manifest)
         result = testloop.PassResult(
-            kind=kind, status=status, new_cards=len(new),
+            kind=kind, status=status, new_cards=len(unattended),
             findings=tuple(finding for finding in record.get("findings") or ()
                            if isinstance(finding, dict)))
         stop = testloop.should_stop(result, loop["rounds"], self.loop_started_at(loop), now,
-                                    len(loop["filed"]), report_only=settings.report_only,
+                                    loop_cards_filed(loop), report_only=settings.report_only,
                                     settings=settings)
         if stop:
             self.stop_loop(stop, record)
@@ -2268,7 +2288,7 @@ class Feeder:
         self.notify(message)
         self.emit(EVENT_TEST_LOOP_STOPPED, reason=reason, message=sentence,
                   pass_number=(record or {}).get("pass"), rounds=loop["rounds"],
-                  cards_filed=len(loop["filed"]))
+                  cards_filed=loop_cards_filed(loop))
         self.save_state()
 
     # Blocked tasks and their retries (issue #39).
@@ -2927,9 +2947,15 @@ def status_loop(state, paths, now):
             passes.append({"pass": entry.get("pass"), "kind": entry.get("kind"),
                            "status": entry.get("status"),
                            "filed": len(cards) if isinstance(cards, list) else 0})
-    generations = {}
+    # The filed cards are counted the way the budget counts them (issue #115): an attended
+    # planning card is shown apart, so the status agrees with the budget stop sentence and
+    # the stop event rather than reading as a spent budget that is not.
+    generations, planning = {}, 0
     filed = loop_filed(state)
     for record in filed.values():
+        if isinstance(record, dict) and record.get("attended") is True:
+            planning += 1
+            continue
         generation = record.get("generation") if isinstance(record, dict) else None
         key = (str(generation) if isinstance(generation, int)
                and not isinstance(generation, bool) else "unreadable")
@@ -2938,7 +2964,8 @@ def status_loop(state, paths, now):
     return {"enabled": settings.enabled, "report_only": settings.report_only,
             "rounds": loop.get("rounds", 0), "max_rounds": settings.max_rounds,
             "started_at": started, "hours_used": hours, "max_hours": settings.max_hours,
-            "passes": passes, "cards_filed": len(filed), "generations": generations,
+            "passes": passes, "cards_filed": loop_cards_filed(loop), "generations": generations,
+            "planning_cards": planning,
             "stopped_areas": [str(area) for area in areas] if isinstance(areas, list) else [],
             "stop": stop, "sidecar_problem": problem}
 
@@ -2967,7 +2994,8 @@ def status_report(paths, hostname=None, now=datetime.now):
 def loop_lines(report):
     """The browser test loop lines of `feed --status` (R26), none when the loop is off: on and
     report only, the round and the clock against their caps, the cards filed per pass, the
-    filed cards by generation, the stopped areas, and the stop reason."""
+    filed cards by generation with the planning cards apart, the stopped areas, and the stop
+    reason."""
     loop = report.get("test_loop")
     if not loop:
         return []
@@ -2991,8 +3019,11 @@ def loop_lines(report):
         "#%s %s %s %d" % (entry.get("pass"), entry.get("kind"), entry.get("status"),
                           entry.get("filed", 0)) for entry in passes) or "no pass yet"))
     generations = loop.get("generations") or {}
-    lines.append("test loop filed cards: %d%s" % (loop.get("cards_filed", 0), "".join(
-        ", generation %s: %d" % (key, generations[key]) for key in sorted(generations))))
+    planning = loop.get("planning_cards") or 0
+    lines.append("test loop filed cards: %d%s%s" % (
+        loop.get("cards_filed", 0),
+        "".join(", generation %s: %d" % (key, generations[key]) for key in sorted(generations)),
+        ", planning cards: %d" % planning if planning else ""))
     lines.append("test loop stopped areas: %s" % _ids(loop.get("stopped_areas")))
     stop = loop.get("stop")
     if isinstance(stop, dict):

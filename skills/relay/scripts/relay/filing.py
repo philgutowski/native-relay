@@ -42,8 +42,9 @@ ACTIONS = (ACTION_FILED, ACTION_COMMENTED)
 
 # A finding carrying this key as true is the planning card of R19: the loop's request for a
 # person to plan an area it has stopped testing. The pass code synthesizes it outside the cap
-# (U5), and the Brief tells the process to label it the way the adapter's instructions say.
-ATTENDED_KEY = "attended"
+# (U5), and the Brief tells the process to label it the way the adapter's instructions say. The
+# key is the rules module's, since `testloop.should_stop` sets such a finding aside by it.
+ATTENDED_KEY = testloop.ATTENDED_KEY
 
 # The Filing process's allowlist floor is the Closeout's: it reads, edits a markdown tracker,
 # commits, and runs the tracker's command line tool. The adapter adds what its filing needs.
