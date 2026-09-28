@@ -10,7 +10,10 @@ A Feeder, when there is one, grows a Manifest between runs and launches a Runner
 a Manifest with a fixed Task list needs none. A Runner reads one Manifest and drives a series of Tasks. Each Task gets its own Task process and,
 once it exits, its own Closeout process. The Runner decides a Task's outcome by Verify-landed,
 which consults git and the Tracker through a Tracker adapter, never the Task process itself. The
-Shipping mode named in the Manifest decides what landing means for that project.
+Shipping mode named in the Manifest decides what landing means for that project. A Feeder with
+the browser test loop switched on also starts Test passes between runs; each launches a Test
+process to find defects in the running app and a Filing process to file the ones its code chose,
+as cards the same Feeder then builds.
 
 ## The loop
 
@@ -636,6 +639,69 @@ only ready cards were all refused this way is not an empty queue: the Feeder sto
 and names them, since only a routing change, not a wait, releases them. The Closeout process
 stays on the Manifest's closeout model. The Review step runs inside the Task process, so it runs
 on whatever model the Task was routed to.
+
+### Test pass
+One run of the browser test loop, a Feeder feature the sidecar's `[test_loop]` table switches on
+for one Manifest. A pass is one `relay test` invocation: a full tour of the Tour document, or a
+check of the cards a Cycle landed. The Feeder starts it as a subprocess between runs, a tour at
+the loop's start and whenever the queue drains and a check after each Cycle that landed cards,
+and an operator runs the same verb by hand. A pass takes both Leases, runs the sidecar's
+`prepare` command to move the app under test to the default branch's commit and confirm it,
+launches a Test process, decides in code what to file, launches a Filing process with exactly
+that, and leaves a pass record beside the Manifest. Its outcome is the record's own `status`,
+`ran`, `not_run`, or `failed`, never a Halt class: a pass is not a Task and writes no Task record,
+so the closed set is untouched.
+
+The code between the two processes is the point. The per pass cap, the loop's card budget, the
+rule that low findings go to a lows file and never to the Tracker, report only mode, the stopped
+areas, and each filed card's Generation are all decided there, before any card is written, so a
+cap is prevented rather than detected afterwards. The Feeder holds the loop's state under one
+state file key and stops the loop on a rule it checks: a clean tour, a tour whose findings made
+no new card, a round cap, a clock cap, or the card budget. A stopped loop starts no further pass,
+and the Feeder goes on building what it filed. `docs/manifest-authoring.md` section 12 names
+every setting and stop reason.
+
+### Test process
+The fresh headless agent invocation a Test pass launches to test the running app. It drives the
+app through a headless browser from the shell, using the driver the Tour document names, reads
+the code for each defect's cause, and ends with one `relay-test-report` block of JSON findings,
+each with a severity, an area, a cause file and line, the steps, and Done when lines. It runs in a
+detached worktree of the tested commit, outside the checkout the Runner merges into, and the pass
+fails and files nothing when that checkout changed underneath it. It holds no Tracker write tool
+and `Bash(gh *)` is denied it, so a tour cannot file, comment, or move a card by any route. It
+never types a credential, using the session the operator signed in, and never approves anything
+that writes outside the app, stopping at each approval step. Its Brief carries nothing project
+specific; project facts reach it as sidecar data and from the Tour document.
+
+### Filing process
+The short launched process a Test pass starts after the code has chosen what to file. It gets
+the chosen findings, numbered, and the Tracker adapter's filing instructions, which put the
+sidecar's loop labels on every card. For each finding it first looks for an open card describing
+the same defect and comments there; otherwise it files one card. It ends with one `relay-filed`
+block naming each finding's card, and the pass reads every named id back through the adapter,
+recording only what the Tracker confirms. It is to a Test pass what the Closeout process is to a
+Task: the Feeder and the Runner still never write to a Tracker, and a launched process writes
+through the adapter's own instructions. It runs in the checkout on the Manifest's closeout
+model, and on a markdown Tracker its commit is bounded to the tracker file by the Closeout's own
+scope check.
+
+### Tour document
+The app's own description of what a Test process tests, kept in the app's repository at the path
+the sidecar's `test_loop.tour` names. Every markdown heading in it is one area, and a finding
+names its area exactly as a heading spells it; a finding naming anything else is recorded as
+invalid and never filed, and an area the loop stopped testing is passed by its heading. Under
+each heading it says what to check, what counts as a defect, and the approval steps not to pass.
+Its opening text, before any heading, names the driver, the storage state file holding the
+operator's signed in session, and how to tell the sign in page. It travels to the Test process
+inside the Brief's data fence, as data, never as instructions.
+
+### Generation
+How far a card the browser test loop filed is from a card a person wrote, and the rule that keeps
+a check from feeding itself. A card filed by a full tour, or by checking a card the loop did not
+file, is generation 1. A card filed by checking a generation 1 card is generation 2, the last:
+when it lands, no check runs on it, and its fix lands on the gate alone. A check pass finding that
+names no card the pass sent is taken as generation 2 too. The Feeder records each filed card's
+generation in its state file, so the rule survives a restart.
 
 ## Outcomes
 

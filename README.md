@@ -260,6 +260,20 @@ running; `--restart` asks the old one to leave, waits for it, and takes its plac
 killed, so the task in flight finishes and merges normally. The order and routing files are the
 exception, since they are read at every cycle.
 
+**It can test the web app it builds.** A sidecar `[test_loop]` table switches on the browser
+test loop for one manifest: a full tour of the running app at the start and each time the queue
+drains, and a check of the landed cards after each cycle. Each pass is one `relay test`
+invocation. The sidecar's `prepare` command moves the app, served from a worktree of its own
+with its outbound integrations stubbed, to the default branch's commit and confirms it. A Test
+process drives it through a headless browser from the shell, using the operator's signed in
+session and never typing a credential. The pass code then decides in code what to file, and a
+Filing process files the high and medium findings as cards carrying the loop's `labels`, which
+the ready source must admit. The loop stops on its own at a clean tour, a tour that made no new
+card, or a cap on rounds, hours, or cards, and `feed --status` shows where it is. Every key with
+its default, the stop reasons, and how to run one pass by hand are in section 12 of
+`docs/manifest-authoring.md`, and `docs/examples/browser-test-loop/` has a sidecar, a tour
+document template, and a driver to copy.
+
 ## Platform
 
 - Python 3.11 or later. The runner is standard library only and reads TOML with `tomllib`,
