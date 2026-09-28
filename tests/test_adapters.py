@@ -916,6 +916,10 @@ class GitHub(AdapterCase):
         self.assertIn("label `attended`", text)
         self.assertNotIn("gh issue close", text)
         self.assertNotIn("item-edit", text)
+        # Code review: `gh issue create --label` fails outright on an undefined label, and the
+        # brief forbids a retry by another route, so the labels are checked first.
+        self.assertRegex(text, r"(?i)before the first create.*gh label list.*gh label create <name>")
+        self.assertLess(text.index("gh label list"), text.index("gh issue create"))
 
     def test_filing_instructions_with_no_labels_create_without_a_label_flag(self):
         text = self.github(self.run_for()).filing_instructions((), "")
@@ -927,8 +931,10 @@ class GitHub(AdapterCase):
         """A denied `gh issue create` in a Filing process reads as a tracker write denial, the
         way a denied `gh issue close` does in a Closeout."""
         patterns = self.github(self.run_for()).write_tool_patterns()
-        for command in ("gh issue create --title x", "gh issue comment 12 --body-file f"):
+        for command in ("gh issue create --title x", "gh issue comment 12 --body-file f",
+                        "gh project item-add 4 --owner example-org --url u"):
             self.assertTrue(any(command.startswith(prefix) for prefix in patterns["bash"]), command)
+        self.assertFalse(any("gh label create x".startswith(prefix) for prefix in patterns["bash"]))
 
     def test_a_pr_create_command_does_not_match_the_write_patterns(self):
         from relay import classify
@@ -1124,6 +1130,9 @@ class Markdown(AdapterCase):
         self.assertRegex(text, r"(?i)highest existing number plus one")
         self.assertIn("`[loop]` `[web]`", text)
         self.assertIn("`[attended]`", text)
+        # Code review: `ready` returns every open line with no labels, so the sentence says the
+        # mark is for a reader rather than promising it keeps the line out of the open lines.
+        self.assertRegex(text, r"(?i)nothing else keeps it out of the open lines")
         self.assertIn("`  - <date> <text>`", text)
         self.assertIn("Take the design route.", text)
         self.assertNotIn("`[x]`", text)

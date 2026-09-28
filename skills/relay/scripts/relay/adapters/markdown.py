@@ -195,7 +195,10 @@ class MarkdownAdapter:
         its body the indented comment lines under it, committed alone and never pushed: the
         loop pairs only with a Manifest that does not push (KTD13), and the pass code checks the
         commit against this file alone. This tracker has no labels, so the loop's labels ride
-        as bracketed words at the end of the title where a reader can see who filed the line."""
+        as bracketed words at the end of the title where a reader can see who filed the line.
+        The same holds for the attended mark: `ready` returns every open line with no labels,
+        so nothing here keeps an attended planning card out of the ready read (code review).
+        The sentence says so rather than promising what the file cannot do."""
         labelled = (" and end the title with the loop's labels in brackets, %s,"
                     % " ".join("`[%s]`" % label for label in labels) if labels else "")
         text = (
@@ -207,8 +210,9 @@ class MarkdownAdapter:
             "in the file's own scheme, the highest existing number plus one under the same prefix,"
             "%s and put the card body under it as indented comment lines in the same `  - <text>` "
             "form, one per line. Report `filed` with the new line's id. An attended planning "
-            "card ends its title with `[attended]`. Commit %s alone, touching no other file, and "
-            "do not push."
+            "card ends its title with `[attended]`; this file has no labels, so the mark tells a "
+            "reader what the line is and nothing else keeps it out of the open lines. Commit %s "
+            "alone, touching no other file, and do not push."
             % (self._file, labelled, self._file)
         )
         note = " ".join(str(design_note or "").split())

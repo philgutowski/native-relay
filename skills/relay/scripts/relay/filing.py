@@ -22,11 +22,11 @@ report.
 """
 import json
 import os
+import re
 import string
 from dataclasses import dataclass, field
 
-from . import brief, classify, closeout, contracts, launch, manifest as manifest_module, state, \
-    testbrief, testloop
+from . import brief, classify, closeout, contracts, launch, state, testbrief, testloop
 
 TEMPLATE = "brief-filing.md"
 
@@ -120,13 +120,21 @@ class FilingResult:
 
 def allowed_tools(manifest, adapter, backend=None):
     """The base set, plus what the adapter's filing needs, plus the manifest's closeout
-    additions. Order is stable and duplicates are dropped, as `closeout.allowed_tools` does."""
+    additions. Order is stable and duplicates are dropped, as `closeout.allowed_tools` does.
+    The Jira triple exception that function carries is absent here on purpose: the loop is a
+    serial Feeder feature and a Filing process on Jira is the one process that holds the card
+    creation tools, so there is no coordinator to hand its writes to."""
     tools = list(BASE_TOOLS)
     extras = tuple(adapter.filing_allowed_tools(backend=backend))
     for extra in extras + tuple(manifest.closeout.allowed_tools):
         if extra not in tools:
             tools.append(extra)
     return tuple(tools)
+
+
+# A path token in free text: everything up to the characters `brief.PATH_TAIL_STOP` names as
+# the end of a path, on both sides of the segment.
+_PATH_TOKEN_RE = re.compile(r"[^\s\"'`()\[\]{},;:<>]*\.claude/[^\s\"'`()\[\]{},;:<>]*")
 
 
 def describe_file(path):
@@ -145,8 +153,24 @@ def describe_file(path):
     return described
 
 
+def describe_paths(text):
+    """`describe_file` applied to every such path inside free text (code review: the segment
+    can arrive in a title, a step, or the observed text as easily as in the cause, and the
+    template then tells the process the finding already describes the location in words). A
+    token that merely contains the letters, like `foo.claude/`, is not the path and is left."""
+
+    def replace(match):
+        token = match.group(0)
+        stripped = token.rstrip(".")
+        if not contracts.CLAUDE_DIR_PATH_REGEX.search(stripped):
+            return token
+        return describe_file(stripped) + token[len(stripped):]
+
+    return _PATH_TOKEN_RE.sub(replace, str(text if text is not None else ""))
+
+
 def _line(value):
-    return brief.defang(" ".join(str(value if value is not None else "").split()))
+    return brief.defang(describe_paths(" ".join(str(value if value is not None else "").split())))
 
 
 def _list_lines(items, numbered):
@@ -162,7 +186,7 @@ def _list_lines(items, numbered):
 def _quoted(text):
     """Copied page text as a quoted block, every line prefixed, so it cannot read as one of
     the finding's own fields, let alone as an instruction."""
-    lines = brief.defang(str(text if text is not None else "")).splitlines() or [""]
+    lines = brief.defang(describe_paths(text)).splitlines() or [""]
     return "\n".join(("> " + line).rstrip() for line in lines)
 
 
@@ -180,8 +204,7 @@ def _finding_block(number, finding):
         lines.append(DESIGN_LINE)
     if finding.get(ATTENDED_KEY) is True:
         lines.append(ATTENDED_LINE)
-    lines.append("Cause: %s, line %s, %s" % (_line(describe_file(cause.get("file"))),
-                                             _line(cause.get("line")),
+    lines.append("Cause: %s, line %s, %s" % (_line(cause.get("file")), _line(cause.get("line")),
                                              _line(cause.get("verdict"))))
     lines.append("")
     lines.append("Steps to reproduce:")
@@ -270,7 +293,7 @@ def parse_text(text, count=None):
     if not isinstance(payload, list):
         return Filed(error="the %s block must hold one JSON array" % contracts.FILED_FENCE_TAG)
     entries = []
-    seen = set()
+    seen_numbers, seen_ids = set(), set()
     for index, entry in enumerate(payload):
         label = "entry %d" % (index + 1)
         if not isinstance(entry, dict):
@@ -281,9 +304,9 @@ def parse_text(text, count=None):
         if count is not None and number > count:
             return Filed(error="%s: finding %d is past the %d findings the brief carried"
                          % (label, number, count))
-        if number in seen:
+        if number in seen_numbers:
             return Filed(error="%s: finding %d appears twice" % (label, number))
-        seen.add(number)
+        seen_numbers.add(number)
         action = entry.get("action")
         if action not in ACTIONS:
             return Filed(error="%s: action %r is not one of %s" % (label, action, ", ".join(ACTIONS)))
@@ -291,7 +314,13 @@ def parse_text(text, count=None):
         if not isinstance(card_id, (str, int)) or isinstance(card_id, bool) \
                 or not str(card_id).strip():
             return Filed(error="%s: id must be a non empty string" % label)
-        entries.append({"finding": number, "action": action, "id": str(card_id).strip()})
+        card_id = str(card_id).strip()
+        # One card per finding cuts both ways (code review): two findings naming one card
+        # would charge the caps twice for one card and claim a card that does not exist.
+        if card_id in seen_ids:
+            return Filed(error="%s: card %s appears twice" % (label, card_id))
+        seen_ids.add(card_id)
+        entries.append({"finding": number, "action": action, "id": card_id})
     return Filed(entries=tuple(entries))
 
 
@@ -304,13 +333,20 @@ def parse(transcript_path, backend="claude", log_path=None, count=None):
     return parse_text(text, count=count)
 
 
-def confirm(entries, adapter):
+def confirm(entries, adapter, known=()):
     """Read each claimed card back through the adapter (KTD5). An entry is confirmed when the
     adapter's `read` answers for its id without a `skipped` reason; a read that raises or is
     skipped is a note and not a card. A `commented` entry is confirmed the same way, by reading
     the existing card, and lands in `commented` rather than `filed`, since it is not a new card
-    and counts toward no cap (R15)."""
+    and counts toward no cap (R15).
+
+    `known` is the ids the caller saw on the tracker before the Filing process ran, when it
+    read them. A `filed` claim naming one of them is a note rather than a new card (code
+    review): the card exists, but the process did not create it, and counting it would charge
+    the caps for a card the loop never filed. An empty `known` checks existence alone, which is
+    all a caller without a pre read can ask."""
     filed, commented, notes = [], [], []
+    known = {str(card_id) for card_id in known or ()}
     for entry in entries or ():
         card_id = entry["id"]
         label = "finding %s" % entry.get("finding")
@@ -324,27 +360,28 @@ def confirm(entries, adapter):
             notes.append("%s: card %s claimed %s could not be read: %s"
                          % (label, card_id, entry.get("action"), card["skipped"]))
             continue
-        (commented if entry.get("action") == ACTION_COMMENTED else filed).append(dict(entry))
+        if entry.get("action") == ACTION_COMMENTED:
+            commented.append(dict(entry))
+        elif card_id in known:
+            notes.append("%s: card %s claimed filed existed before this pass, so it is not a "
+                         "new card" % (label, card_id))
+        else:
+            filed.append(dict(entry))
     return Confirmation(filed=tuple(filed), commented=tuple(commented), notes=tuple(notes))
 
 
-def _filing_task(manifest, process_id, backend):
-    """A task record shaped for the launcher, on the Manifest's closeout model and effort: a
-    bounded job that needs judgment about duplicates, not depth. The backend is the caller's,
-    for the same reason `closeout.render`'s is."""
-    return manifest_module.Task(id=process_id, model=manifest.closeout.model,
-                                effort=manifest.closeout.effort, excluded=False, reason=None,
-                                backend=backend)
-
-
 def run(manifest, findings, adapter, store, backend, process_id, labels=(), design_note="",
-        timeout_seconds=None, **launch_kwargs):
+        timeout_seconds=None, task_model=None, **launch_kwargs):
     """Render, launch, and read the ending. Returns what happened; it changes no git state and
     writes nothing to the tracker itself. The caller confirms the ids through `confirm`, runs
     the markdown scope check, and records the pass.
 
     `process_id` names the brief and the log under the state directory, the way a task id names
-    a Closeout's. `timeout_seconds` defaults to the Manifest's closeout timeout."""
+    a Closeout's. `timeout_seconds` defaults to the Manifest's closeout timeout. The process
+    runs on the Manifest's closeout model and effort, through the same task record a Closeout
+    launches with, so a non claude backend gets `task_model` in place of the claude vocabulary
+    the closeout model is written in (code review, and U14's codex 400 on `sonnet`)."""
+    findings = tuple(findings or ())
     text = render(findings, adapter, labels=labels, design_note=design_note, backend=backend)
     brief_path = store.path("briefs", process_id + ".filing.md")
     with open(brief_path, "w", encoding="utf-8") as handle:
@@ -354,7 +391,8 @@ def run(manifest, findings, adapter, store, backend, process_id, labels=(), desi
     if timeout_seconds is None:
         timeout_seconds = manifest.timeouts.closeout_minutes * 60
     launch_result = launch.launch(
-        manifest, _filing_task(manifest, process_id, backend), text,
+        manifest, closeout._closeout_task(manifest, process_id, backend, task_model=task_model),
+        text,
         store.path("logs", process_id + ".filing.stdout.log"), timeout_seconds,
         allowed=allowed_tools(manifest, adapter, backend=backend),
         disallowed=contracts.CLOSEOUT_DISALLOWED_EXTRA, **dict(launch_kwargs, host_probe=None))
@@ -374,6 +412,6 @@ def run(manifest, findings, adapter, store, backend, process_id, labels=(), desi
         filed = Filed(error="the filing process left no transcript to read")
     else:
         filed = parse(launch_result.transcript_path, backend=backend,
-                      log_path=launch_result.log_path, count=len(tuple(findings)))
+                      log_path=launch_result.log_path, count=len(findings))
     return FilingResult(filed, findings_out, digest, launch_result, brief_path,
                         state.sha256_of(text))

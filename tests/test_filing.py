@@ -12,6 +12,7 @@ import re
 import string
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import _paths
 import _repo
@@ -143,6 +144,11 @@ class ParseText(unittest.TestCase):
             ([{"finding": 1, "action": "filed"}], "entry 1: id must be a non empty string"),
             ([{"finding": 1, "action": "filed", "id": "1"},
               {"finding": 1, "action": "commented", "id": "2"}], "entry 2: finding 1 appears twice"),
+            # Code review: one card per finding cuts both ways.
+            ([{"finding": 1, "action": "filed", "id": "45"},
+              {"finding": 2, "action": "filed", "id": "45"}], "entry 2: card 45 appears twice"),
+            ([{"finding": 1, "action": "filed", "id": 45},
+              {"finding": 2, "action": "commented", "id": "45"}], "entry 2: card 45 appears twice"),
         )
         for payload, error in cases:
             filed = filing.parse_text(block(payload))
@@ -254,6 +260,21 @@ class Confirm(unittest.TestCase):
         result = filing.confirm(filed.entries, adapter)
         self.assertEqual((result.filed, result.commented, result.notes), ((), (), ()))
         self.assertEqual(adapter.calls, [])
+
+    def test_a_filed_claim_naming_a_card_known_before_the_pass_is_a_note_not_a_new_card(self):
+        """Code review: existence alone confirms a `filed` claim on any old card. With the ids
+        the caller read before the pass, such a claim is a note, while a comment on a known
+        card is exactly what `commented` means."""
+        adapter = FakeFilingAdapter(cards={"12": {"title": "old"}, "40": {"title": "new"}})
+        result = filing.confirm(self.entries(("filed", "12"), ("filed", "40"), ("commented", "12")),
+                                adapter, known=(12, "13"))
+        self.assertEqual(result.filed_ids, ("40",))
+        self.assertEqual(result.commented_ids, ("12",))
+        self.assertEqual(len(result.notes), 1)
+        self.assertIn("finding 1", result.notes[0])
+        self.assertIn("existed before this pass", result.notes[0])
+        # Without a pre read, existence is all that can be asked.
+        self.assertEqual(filing.confirm(self.entries(("filed", "12")), adapter).filed_ids, ("12",))
 
     def test_the_confirmed_entries_keep_their_finding_numbers_in_block_order(self):
         adapter = FakeFilingAdapter(cards={"5": {"title": "a"}, "6": {"title": "b"}})
@@ -394,6 +415,31 @@ class ConfigDirectory(unittest.TestCase):
                          "skills/x/SKILL.md under the agent config directory in tools")
         self.assertEqual(filing.describe_file(".claude/"), "the agent config directory")
         self.assertEqual(filing.describe_file("app/search.py"), "app/search.py")
+
+    def test_every_text_field_is_described_not_only_the_cause(self):
+        """Code review: the segment arrives in a title, a step, or the observed text as easily
+        as in the cause, and the template tells the process the finding already describes the
+        location in words."""
+        shape = finding(title="Settings page ignores .claude/settings.json.",
+                        steps=["Open tools/.claude/skills/x/SKILL.md", "Reload"],
+                        expected="The value from `.claude/settings.json` is shown",
+                        observed="error: .claude/settings.json not found\nfoo.claude/bar stays",
+                        done_when=["The page reads .claude/settings.json"])
+        text = render([shape])
+        self.assertEqual(brief.scan({}, text), [])
+        self.assertIn("Title: Settings page ignores settings.json under the agent config "
+                      "directory.", text)
+        self.assertIn("1. Open skills/x/SKILL.md under the agent config directory in tools", text)
+        self.assertIn("Expected: The value from `settings.json under the agent config directory` "
+                      "is shown", text)
+        self.assertIn("> error: settings.json under the agent config directory not found", text)
+        # Letters that merely contain the name are not the path and are left alone.
+        self.assertIn("> foo.claude/bar stays", text)
+        self.assertNotIn(".claude/settings", text)
+
+    def test_describe_paths_on_plain_text_is_the_identity(self):
+        for text in ("app/search.py line 4", "", "nothing here", "claude/x", "a .claudex/ b"):
+            self.assertEqual(filing.describe_paths(text), text)
 
     def test_the_rendered_brief_passes_the_scan_with_and_without_such_a_cause(self):
         plain = render()
@@ -585,6 +631,40 @@ class RunTheProcess(unittest.TestCase):
         disallowed = args[args.index("--disallowedTools") + 1]
         for pattern in contracts.CLOSEOUT_DISALLOWED_EXTRA:
             self.assertIn(pattern, disallowed)
+
+    def test_an_iterator_of_findings_is_counted_once_and_read_once(self):
+        """Code review: `run` counted the findings after `render` had consumed them."""
+        entries = [{"finding": 1, "action": "filed", "id": "T-2"},
+                   {"finding": 2, "action": "filed", "id": "T-3"}]
+        result = self.go(block(entries), findings=iter([finding(1), finding(2)]))
+        self.assertTrue(result.filed.ok, result.filed.error)
+        self.assertEqual(len(result.filed.entries), 2)
+
+    def test_a_non_claude_backend_runs_on_the_tasks_own_model(self):
+        """Code review, and U14's live finding: the closeout model is claude vocabulary, so a
+        Filing process on another backend takes `task_model`, through the same task record a
+        Closeout launches with."""
+        from unittest import mock
+
+        seen = {}
+
+        def fake_launch(manifest, task, text, log_path, timeout_seconds, **kwargs):
+            seen[task.backend] = (task.model, task.effort, task.id)
+            return SimpleNamespace(timed_out=False, transcript_path=None, log_path=log_path)
+
+        store = state.StateStore(self.manifest.path, self.repo, home=self.home)
+        with mock.patch.object(filing.launch, "launch", side_effect=fake_launch), \
+                mock.patch.object(filing.classify, "classify", return_value={"findings": []}):
+            for backend in ("claude", "codex", "grok"):
+                result = filing.run(self.manifest, [finding()], self.adapter, store, backend,
+                                    "pass-%s" % backend, task_model="task-chosen-model")
+                self.assertFalse(result.filed.ok)
+                self.assertIn("no transcript", result.filed.error)
+        self.assertEqual(seen["claude"], (self.manifest.closeout.model,
+                                          self.manifest.closeout.effort, "pass-claude"))
+        for backend in ("codex", "grok"):
+            self.assertEqual(seen[backend][0], "task-chosen-model", backend)
+            self.assertEqual(seen[backend][1], self.manifest.closeout.effort, backend)
 
     def test_a_timed_out_process_is_an_error_naming_the_timeout(self):
         self.entry(self.transcript(block([])), sleep=5)

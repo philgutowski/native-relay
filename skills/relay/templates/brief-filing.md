@@ -41,8 +41,8 @@ it knows to take the design route.
 
 A finding marked as an attended planning card is not a defect to fix. It is the loop's request
 for a person to plan an area it has stopped testing after repeated patches. File it the way the
-tracker instructions say for one, and label it as they say, so no unattended process picks it up
-as ordinary work.
+tracker instructions say for one, and mark it as they say, so a reader and the loop's own rules
+can tell it from ordinary work.
 
 Never write the literal path of the agent config directory, the dot prefixed folder the CLI
 keeps its settings and skills in, into a card, in a title, a body, or a comment. When a cause
