@@ -598,15 +598,20 @@ design_note = ""
   tell the sign in page. List each area's approval steps under its heading.
 - **`url`** is where the app under test is served. The Test process is told the app is there
   and already serves the tested commit, and it never starts, stops, or moves it.
-- **`prepare`** moves the app to the commit a pass tests and confirms it. It runs in the target
-  repository, in its own process group, with `RELAY_TEST_COMMIT` (the default branch's sha)
-  and `RELAY_TEST_URL` in its environment, under the lease heartbeat. Exit 0 means the app at
-  `url` now serves that commit; anything else, or running past `prepare_timeout_seconds`, which
-  ends its whole group, records the pass as `not_run` with the command's last output line, and
-  nothing is filed. Serve the app from a worktree of its own, outside the checkout the runner
-  merges into, and have `prepare` compare the commit the app reports with `RELAY_TEST_COMMIT`
-  before it exits 0, since a server that looks current can be serving code from before the last
-  merge. A launched process cannot stop a server, so moving and restarting it lives only here.
+- **`prepare`** moves the app to the commit a pass tests and confirms it. It runs in its own
+  process group, from a directory under the state directory rather than the target repository,
+  with `RELAY_TEST_COMMIT` (the default branch's sha), `RELAY_TEST_URL`, and `RELAY_TEST_REPO`
+  (the checkout's path) in its environment, under the lease heartbeat. Name any script in the
+  argument list by its absolute path. Exit 0 means the app at `url` now serves that commit;
+  anything else, or running past `prepare_timeout_seconds`, which ends its whole group, records
+  the pass as `not_run` with the command's last output line, and nothing is filed. A checkout
+  `prepare` leaves changed, a server log or a pid file written there, is `not_run` too, naming
+  the first changed path, before any process launches; the file stays until someone removes
+  it. So is a checkout it moved off the default branch or off that commit. Serve the app from a
+  worktree of its own, outside the checkout the runner merges into, and have `prepare` compare
+  the commit the app reports with `RELAY_TEST_COMMIT` before it exits 0, since a server that
+  looks current can be serving code from before the last merge. A launched process cannot stop
+  a server, so moving and restarting it lives only here.
 - **`prepare` serves the app with its outbound integrations stubbed.** Mail, payments,
   webhooks, and every other call that leaves the app go to a local stub while the loop runs. The
   Test brief already tells the Test process never to approve, send, submit, post, or confirm

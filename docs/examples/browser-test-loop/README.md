@@ -39,12 +39,16 @@ each time the queue drains. One pass:
 1. **Give the app a worktree of its own.** The app under test is served from a worktree outside
    the checkout the runner merges into, so a merge never changes what is being served mid pass
    and a server never holds the checkout. `prepare` below makes one on its first run.
-2. **Write `prepare`.** It is an argument list the pass runs in the target repository, in its
-   own process group, ended whole after `prepare_timeout_seconds`. It reads `RELAY_TEST_COMMIT`
-   and `RELAY_TEST_URL` from its environment. It exits 0 only once the app at that url serves
-   that commit; anything else records the pass as not run, with the command's last output line
-   as the reason. A launched process cannot stop a server, so moving and restarting it lives
-   here and nowhere else.
+2. **Write `prepare`.** It is an argument list the pass runs in its own process group, ended
+   whole after `prepare_timeout_seconds`, from a directory under the runner's state directory
+   rather than the checkout, so name the script by its absolute path. It reads
+   `RELAY_TEST_COMMIT`, `RELAY_TEST_URL`, and `RELAY_TEST_REPO`, the checkout's path, from its
+   environment. It must leave the checkout as it found it: a file it writes there, a log or a
+   pid file, records the pass as not run naming that path, and so does a checkout it moved off
+   the default branch. It exits 0 only once the app at that url serves that commit; anything
+   else records the pass as not run, with the command's last output line as the reason. A
+   launched process cannot stop a server, so moving and restarting it lives here and nowhere
+   else.
 3. **Stub the app's outbound integrations in `prepare`.** Serve the app with mail, payments,
    webhooks, and every other outbound call pointed at a local stub. The Test brief tells the
    Test process never to approve, send, submit, or post anything that leaves the app, and to
@@ -92,10 +96,11 @@ HOME = os.path.expanduser("~/.example-app")
 TREE = os.path.join(HOME, "tree")          # the app's own worktree, outside the checkout
 PID = os.path.join(HOME, "server.pid")
 commit, url = os.environ["RELAY_TEST_COMMIT"], os.environ["RELAY_TEST_URL"]
+repo = os.environ["RELAY_TEST_REPO"]        # the checkout; prepare does not run inside it
 
 os.makedirs(HOME, exist_ok=True)
 if not os.path.isdir(TREE):
-    subprocess.run(["git", "worktree", "add", "--detach", TREE, commit], check=True)
+    subprocess.run(["git", "-C", repo, "worktree", "add", "--detach", TREE, commit], check=True)
 else:
     subprocess.run(["git", "-C", TREE, "checkout", "--detach", commit], check=True)
 

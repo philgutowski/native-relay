@@ -428,34 +428,67 @@ class TourAndFiling(PassCase):
         self.assertEqual(self.entries_taken(), 2)
         self.assert_checkout_clean()
 
-    def test_a_filing_process_that_could_not_launch_or_lost_the_lease_fails_the_pass(self):
-        """The two causes the stub cannot stage on its own, answered by `filing.run` itself:
-        each is the pass's reason, and the block's own error is not."""
-        cases = [
-            ({"launch_error": "could not start claude: not found"},
-             "the filing process could not be launched: could not start claude: not found"),
-            ({"lease_lost": True}, "the lease was lost while the filing process ran"),
-        ]
-        for fields, expected in cases:
-            with self.subTest(expected=expected):
-                self.test_process([finding(1)])
-                launched = launch.LaunchResult(session_id="filing", **fields)
-                answer = filing.FilingResult(filing.Filed(error="no assistant record"),
-                                             launch_result=launched)
-                with mock.patch.object(filing, "run", return_value=answer):
-                    outcome, _ = self.run_pass()
-                self.assertEqual(outcome.record["status"], testloop.FAILED)
-                self.assertEqual(outcome.record["reason"], expected)
-                self.assertEqual(outcome.record["filed"], [])
-                self.assert_checkout_clean()
-
-    def test_a_second_filing_cause_is_a_note_beside_the_first_as_the_reason(self):
-        """Code review: a lost lease headlines, and the reset the scope check made of what the
-        process left in the checkout is still on the record."""
+    def test_a_filing_process_that_could_not_launch_fails_the_pass(self):
+        """The cause the stub cannot stage on its own, answered by `filing.run` itself: it is
+        the pass's reason, and the block's own error is not."""
         self.test_process([finding(1)])
-        launched = launch.LaunchResult(session_id="filing", lease_lost=True)
+        launched = launch.LaunchResult(session_id="filing",
+                                       launch_error="could not start claude: not found")
         answer = filing.FilingResult(filing.Filed(error="no assistant record"),
                                      launch_result=launched)
+        with mock.patch.object(filing, "run", return_value=answer):
+            outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"], "the filing process could not be launched: "
+                                                   "could not start claude: not found")
+        self.assertEqual(outcome.record["filed"], [])
+        self.assert_checkout_clean()
+
+    def test_a_lost_lease_during_filing_fails_the_pass_with_no_scope_check_and_no_reset(self):
+        """Issue #117: with the Lease gone another runner may have merged into the checkout, so
+        a scope check would name its paths and the reset would remove its merge. The pass ends
+        `failed` on the lost Lease and leaves the checkout exactly as it found it, the other
+        runner's commit included. The card the process filed before the Lease went is still
+        read back and recorded (code review), so the next tour does not file it again."""
+        self.test_process([finding(1)])
+        launched = launch.LaunchResult(session_id="filing", lease_lost=True)
+        answer = filing.FilingResult(
+            filing.Filed(entries=({"finding": 1, "action": "filed", "id": "T-2"},)),
+            launch_result=launched)
+
+        def commit(message):
+            subprocess.run(["git", "-C", self.repo, "add", "-A"], check=True)
+            subprocess.run(["git", "-C", self.repo, "commit", "-q", "-m", message], check=True)
+
+        def filed_then_another_runner_merged(*args, **kwargs):
+            with open(os.path.join(self.repo, "tracker.md"), "a") as handle:
+                handle.write("- [ ] T-2 Finding 1 [loop]\n")
+            commit("file findings")
+            # Another runner's merge lands a source file once the Lease has gone.
+            os.makedirs(os.path.join(self.repo, "src"), exist_ok=True)
+            with open(os.path.join(self.repo, "src", "merged.py"), "w") as handle:
+                handle.write("merged = True\n")
+            commit("another runner")
+            return answer
+
+        with mock.patch.object(filing, "run", side_effect=filed_then_another_runner_merged), \
+                mock.patch.object(testpass.gitwrite, "closeout_scope_check") as scope_check:
+            outcome, _ = self.run_pass()
+        scope_check.assert_not_called()
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
+        self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2"])
+        self.assertIn("no scope check and no reset", "\n".join(outcome.record["notes"]))
+        self.assertEqual(gitread.show(self.repo, "HEAD", "src/merged.py"), "merged = True\n")
+        self.assertEqual(gitread.status_porcelain(self.repo), "")
+
+    def test_a_second_filing_cause_is_a_note_beside_the_first_as_the_reason(self):
+        """Code review: a timeout headlines, and the reset the scope check made of what the
+        process left in the checkout is still on the record."""
+        self.test_process([finding(1)])
+        launched = launch.LaunchResult(session_id="filing", timed_out=True)
+        answer = filing.FilingResult(filing.Filed(error="timed out"), launch_result=launched)
 
         def leave_a_change(*args, **kwargs):
             with open(os.path.join(self.repo, "tracker.md"), "a") as handle:
@@ -463,12 +496,11 @@ class TourAndFiling(PassCase):
             return answer
 
         with mock.patch.object(filing, "run", side_effect=leave_a_change):
-            outcome, _ = self.run_pass()
+            outcome, _ = self.run_pass(timeout_overrides={"filing_seconds": 5})
         self.assertEqual(outcome.record["status"], testloop.FAILED)
-        self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
+        self.assertEqual(outcome.record["reason"], "the filing process timed out after 5 seconds")
         notes = "\n".join(outcome.record["notes"])
         self.assertIn("left tracker.md changed and uncommitted", notes)
-        self.assertIn("block could not be read: no assistant record", notes)
         self.assert_checkout_clean()
 
     def test_ran_is_kept_only_when_the_block_was_read_and_the_ids_confirmed(self):
@@ -662,7 +694,7 @@ class Prepare(PassCase):
         ok, sentence, seconds = testpass.prepare(
             ["bash", "-c", "echo moving; sleep 60 & echo $! > %s; wait" % pid_file],
             self.repo, "abc1234", "http://127.0.0.1:8765", 600, log, self.base_env(),
-            heartbeat=lambda: False, heartbeat_interval=0.2, grace_seconds=1,
+            os.path.join(self.tmp.name, "prepare-cwd"), heartbeat=lambda: False, heartbeat_interval=0.2, grace_seconds=1,
             tick_seconds=0.1)
         self.assertFalse(ok)
         self.assertIn("the lease was lost while prepare ran", sentence)
@@ -680,6 +712,70 @@ class Prepare(PassCase):
             else:
                 time.sleep(0.1)
         self.assertFalse(alive, "the prepare command's grandchild outlived the lost lease")
+
+    def test_prepare_runs_outside_the_checkout_and_is_told_where_the_checkout_is(self):
+        """Issue #117: `prepare` runs from the state directory, never the checkout, and reads
+        the checkout's path from its environment."""
+        told = os.path.join(self.tmp.name, "prepare.where")
+        self.write_sidecar(prepare=["bash", "-c", 'pwd -P > "%s"; echo "$RELAY_TEST_REPO" >> "%s"'
+                                    % (told, told)])
+        self.test_process([])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.RAN, outcome.record["reason"])
+        with open(told) as handle:
+            cwd, repo = handle.read().splitlines()
+        self.assertEqual(cwd, os.path.realpath(self.store().path(testpass.PREPARE_DIR)))
+        self.assertFalse(cwd.startswith(os.path.realpath(self.repo) + os.sep))
+        self.assertEqual(repo, self.repo)
+        self.assert_checkout_clean()
+
+    def test_a_prepare_that_leaves_a_file_in_the_checkout_is_not_run_naming_it(self):
+        """Issue #117: a leftover reached through the checkout's path is named as prepare's
+        before the snapshot and before any process launches, rather than blamed on the Filing
+        process and reset around."""
+        self.write_sidecar(prepare=["bash", "-c", 'mkdir -p "$RELAY_TEST_REPO/run" && '
+                                    'echo 4242 > "$RELAY_TEST_REPO/run/server.pid"; '
+                                    'echo started > "$RELAY_TEST_REPO/server.log"'])
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        head = gitread.rev_parse(self.repo, "HEAD")
+        outcome, text = self.run_pass()
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
+        self.assertIn("prepare left the checkout changed at run/server.pid",
+                      outcome.record["reason"])
+        self.assertEqual(self.entries_taken(), 0)
+        self.assertEqual(outcome.record["transcripts"], {"test": None, "filing": None})
+        self.assertEqual(outcome.record["checkout"], {})
+        self.assertEqual(gitread.rev_parse(self.repo, "HEAD"), head)
+        self.assertEqual(self.tracker(), TRACKER_MD)
+        self.assertIn("pass 1 not_run", text)
+        # Nothing was reset or removed: the leftovers are still there for the operator.
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "server.log")))
+        self.assertIsNone(self.store().lease())
+
+    def test_a_prepare_that_moves_the_checkout_off_the_default_branch_is_not_run(self):
+        """Code review: a clean tree is not enough. A prepare that detaches or commits in the
+        checkout through `RELAY_TEST_REPO` would have the Filing process commit where the
+        Runner never merges, so it is named before any process launches."""
+        cases = [
+            (["bash", "-c", 'git -C "$RELAY_TEST_REPO" checkout -q --detach "$RELAY_TEST_COMMIT"'],
+             "prepare moved the checkout to HEAD at "),
+            (["bash", "-c", 'git -C "$RELAY_TEST_REPO" commit -q --allow-empty -m moved'],
+             "prepare moved the checkout to main at "),
+        ]
+        for command, expected in cases:
+            with self.subTest(expected=expected):
+                subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"], check=True)
+                self.write_sidecar(prepare=command)
+                self.test_process([finding(1)])
+                taken = self.entries_taken()
+                outcome, _ = self.run_pass()
+                self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
+                self.assertIn(expected, outcome.record["reason"])
+                self.assertIn("must leave the checkout where it found it", outcome.record["reason"])
+                self.assertEqual(self.entries_taken(), taken)
 
     def test_the_prepare_log_holds_the_whole_output(self):
         self.write_sidecar(prepare=["bash", "-c", "echo one; echo two; exit 3"])
