@@ -13,12 +13,14 @@ Where each process runs (KTD6). The Test process runs in a detached worktree of 
 commit, placed under the state directory and removed when the pass ends, never in the checkout
 the Runner merges into; the pass records that checkout's HEAD and status before and compares
 them after, and fails the pass on any change. The Filing process runs in the checkout like a
-Closeout, and its commit is bounded to the tracker file by the Closeout's own scope check.
+Closeout, and its commit is bounded to the tracker file by the Closeout's own scope check, which
+runs only while the pass still holds the Lease, as the Closeout's does.
 
 The app is prepared in code (KTD7): the sidecar's `prepare` argument list runs in its own
-process group under a timeout with `RELAY_TEST_COMMIT` and `RELAY_TEST_URL` in its environment,
-and anything but exit 0 records the pass as `not_run`. A launched process cannot stop a server,
-so moving and restarting it lives only here.
+process group under a timeout with `RELAY_TEST_COMMIT`, `RELAY_TEST_URL`, and `RELAY_TEST_REPO`
+in its environment, from a directory under the state directory rather than the checkout, and
+anything but exit 0, or a checkout it left changed, records the pass as `not_run`. A launched
+process cannot stop a server, so moving and restarting it lives only here.
 
 A pass takes both Leases for its whole length and renews them on the heartbeat, as `run` does
 (KTD8). A pass is not a Task and writes no Task record: its outcomes are the pass record's own
@@ -56,14 +58,18 @@ FAILED = testloop.FAILED
 # document, or whose shape the validator refused, recorded and never filed (KTD4).
 OUTCOME_INVALID = "invalid"
 
-# The environment `prepare` reads (KTD7).
+# The environment `prepare` reads (KTD7). The checkout's path is there because `prepare` runs
+# outside it (issue #117), so a command that needs the repository reaches it by this path.
 ENV_COMMIT = "RELAY_TEST_COMMIT"
 ENV_URL = "RELAY_TEST_URL"
+ENV_REPO = "RELAY_TEST_REPO"
 
 PASS_DIR_SUFFIX = ".test"
 LOWS_SUFFIX = ".lows.md"
 FINDINGS_SUFFIX = ".findings.md"
 PASS_PREFIX = "pass-"
+# The working directory `prepare` runs in, under the state directory (issue #117).
+PREPARE_DIR = "prepare"
 
 # The planning finding of R19, synthesized for each `--plan-area` outside the cap. Its cause is
 # the tour document itself, at the area's heading, and its verdict is intended: nothing is
@@ -240,18 +246,23 @@ def _last_line(text):
     return lines[-1].strip() if lines else ""
 
 
-def prepare(command, repo, commit, url, timeout_seconds, log_path, env, heartbeat=None,
+def prepare(command, repo, commit, url, timeout_seconds, log_path, env, cwd, heartbeat=None,
             heartbeat_interval=contracts.LEASE_HEARTBEAT_SECONDS,
             grace_seconds=launch.SIGKILL_GRACE_SECONDS, tick_seconds=launch.TICK_SECONDS):
     """Run the sidecar's `prepare` (KTD7): its own process group, ended whole at the bound,
-    with the commit and the url in its environment. Returns (ok, sentence, seconds). The whole
-    output goes to `log_path`; the sentence carries the last line, which is what a `not_run`
-    record says. The Lease heartbeat runs around it, as it does around the gate, and the
-    group is ended the moment the Lease is lost (code review), as `launch.launch` ends a
-    process, rather than at the command's own bound: the command is moving a server to a
-    commit in a checkout another runner may now own."""
+    with the commit, the url, and the checkout's path in its environment. Returns (ok,
+    sentence, seconds). The whole output goes to `log_path`; the sentence carries the last
+    line, which is what a `not_run` record says. The Lease heartbeat runs around it, as it does
+    around the gate, and the group is ended the moment the Lease is lost (code review), as
+    `launch.launch` ends a process, rather than at the command's own bound: the command is
+    moving a server to a commit in a checkout another runner may now own.
+
+    It runs in `cwd`, never in the checkout (issue #117): a relative file it leaves behind, a
+    server log or a pid file, would otherwise be blamed on the Filing process by the scope check
+    and then refuse every later pass and the Feeder's next cycle as a dirty tree."""
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-    child_env = dict(env, **{ENV_COMMIT: commit, ENV_URL: url})
+    os.makedirs(cwd, exist_ok=True)
+    child_env = dict(env, **{ENV_COMMIT: commit, ENV_URL: url, ENV_REPO: repo})
     started = time.monotonic()
     beat = launch._Heartbeat(heartbeat, heartbeat_interval)
     beat.start()
@@ -259,7 +270,7 @@ def prepare(command, repo, commit, url, timeout_seconds, log_path, env, heartbea
     try:
         with open(log_path, "w", encoding="utf-8") as log:
             try:
-                proc = subprocess.Popen(list(command), cwd=repo, env=child_env,
+                proc = subprocess.Popen(list(command), cwd=cwd, env=child_env,
                                         stdin=subprocess.DEVNULL, stdout=log,
                                         stderr=subprocess.STDOUT, start_new_session=True)
             except OSError as exc:
@@ -409,21 +420,20 @@ def _append(path, text):
 def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
     """The sentences for every way the Filing step did not complete, most telling first, or an
     empty list when a readable `relay-filed` block was read from a process that ran to its end
-    in bounds (issue #115). Five causes: the process could not be launched, it timed out, the
-    Lease was lost while it ran, its block could not be read, or the scope check reset its
-    commit. The first is the pass's reason and the rest are its notes, so a reset of the
-    checkout is on the record even when a lost Lease is the headline (code review). Each is a
-    filing failure and not an account of the findings: a pass recorded `ran` with no new card
-    on one of these would stop the loop on open findings that no card ever answered, so the
-    pass is `failed`, which the Feeder notifies once and counts as no round."""
+    in bounds (issue #115). Four causes: the process could not be launched, it timed out, its
+    block could not be read, or the scope check reset its commit. The first is the pass's
+    reason and the rest are its notes, so a reset of the checkout is on the record even when a
+    timeout is the headline (code review). Each is a filing failure and not an account of the
+    findings: a pass recorded `ran` with no new card on one of these would stop the loop on open
+    findings that no card ever answered, so the pass is `failed`, which the Feeder notifies once
+    and counts as no round. A lost Lease is not among them: `_pass` ends the pass on it before
+    any scope check runs (issue #117)."""
     launched = result.launch_result
     sentences = []
     if launched.launch_error:
         sentences.append("the filing process could not be launched: %s" % launched.launch_error)
     if launched.timed_out:
         sentences.append("the filing process timed out after %d seconds" % timeout_seconds)
-    if launched.lease_lost:
-        sentences.append("the lease was lost while the filing process ran")
     if not result.filed.ok and not launched.timed_out:
         # A timeout writes itself as the block's error, so that sentence is the timeout's.
         sentences.append("the filing process's block could not be read: %s" % result.filed.error)
@@ -549,10 +559,12 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         return finish(FAILED, "the default branch %s does not resolve to a commit" % default)
     record["commit"] = commit
 
-    # KTD7. The app is moved to the commit and confirmed by the operator's own command.
+    # KTD7. The app is moved to the commit and confirmed by the operator's own command, run
+    # from a directory of the pass's own rather than the checkout (issue #117).
     ok, sentence, seconds = prepare(loop.prepare, repo, commit, loop.url,
                                     loop.prepare_timeout_seconds,
                                     store.path("logs", pass_id + ".prepare.log"), env,
+                                    store.path(PREPARE_DIR),
                                     heartbeat=store.heartbeat,
                                     heartbeat_interval=launch_kwargs.get(
                                         "heartbeat_interval", contracts.LEASE_HEARTBEAT_SECONDS),
@@ -560,6 +572,17 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["timings"]["prepare_seconds"] = round(seconds, 3)
     if not ok:
         return finish(NOT_RUN, sentence)
+    # The refusal saw a clean tree, so anything changed now is `prepare`'s, reached by an
+    # absolute path. Caught here, before the snapshot, it is named as `prepare`'s and not blamed
+    # on the Filing process by the scope check, whose reset would leave the file behind.
+    try:
+        changed, _ = gitread.status_paths(repo)
+    except gitread.GitError as exc:
+        return finish(FAILED, "the checkout could not be read after prepare: %s" % exc)
+    if changed:
+        return finish(NOT_RUN, "prepare left the checkout changed at %s; the pass runs only in a "
+                               "clean checkout, so remove it and have prepare write outside the "
+                               "checkout" % changed[0])
 
     # KTD6. The checkout is recorded, the Test process runs in a worktree of its own, and the
     # checkout is compared after.
@@ -692,7 +715,15 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["timings"]["filing_wall_seconds"] = round(result.launch_result.wall_seconds, 3)
     for finding in result.findings:
         record["notes"].append("filing process: %s" % json.dumps(finding, sort_keys=True))
-    allowed = ([manifest.tracker.file] if manifest.tracker.adapter == "markdown"
+    # Before the scope check, as `run.py`'s Closeout path is (issue #117): with the Lease gone,
+    # another runner may have merged into the checkout meanwhile, and the diff from `pre_head`
+    # would name its paths as out of scope and the reset would remove its merge. So nothing is
+    # checked, reset, or read back; the checkout is left for whoever holds the Lease now.
+    if result.launch_result.lease_lost:
+        record["notes"].append("the checkout was left as the filing process ended, with no scope "
+                               "check and no reset, since another runner may hold it now")
+        return finish(FAILED, "the lease was lost while the filing process ran")
+    allowed =([manifest.tracker.file] if manifest.tracker.adapter == "markdown"
                and manifest.tracker.file else [])
     # The scope check runs whatever the process did, so a commit outside the bound is reset
     # before anything is read back or recorded.

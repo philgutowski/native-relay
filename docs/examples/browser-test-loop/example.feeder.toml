@@ -32,7 +32,8 @@ report_only = false
 # The three keys an enabled loop cannot run without, and none has a default.
 tour = "docs/tour.md"                          # the tour document, relative to the target repo
 url = "http://127.0.0.1:8765"                  # where `prepare` serves the app under test
-prepare = ["python3", "tools/prepare_app.py"]  # an argument list, never a shell string
+# An argument list, never a shell string, and absolute: prepare runs outside the checkout.
+prepare = ["python3", "/path/to/app/tools/prepare_app.py"]
 prepare_timeout_seconds = 600                  # prepare is ended whole after this; not_run
 
 # The Test process. Empty model and effort mean the [models] default and effort.
