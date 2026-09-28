@@ -644,7 +644,19 @@ def cmd_summary(args, env, out):
     if failure:
         return failure
     store = _store_for(manifest, env)
-    data = summary.build(manifest, store)
+    # Issue #80: only GitHub's adapter can confirm a project item's status (every other one has
+    # nothing `_pending_checks` could call), so building any other kind here would be
+    # construction, and for Jira an exception on credentials `summary` was never meant to need,
+    # spent on a tracker with nothing for it to use. What it is spent on is still a best effort:
+    # `summary` has never needed tracker credentials to read state and print, and an
+    # unconfigured or unreachable GitHub tracker is not a reason to fail it now either.
+    adapter = None
+    if manifest.tracker.adapter == "github":
+        try:
+            adapter = adapters.build(manifest, env=env)
+        except Exception:
+            adapter = None
+    data = summary.build(manifest, store, adapter=adapter)
     if args.as_json:
         out.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
     else:

@@ -16,7 +16,7 @@ at a machine readable file the operator would have to parse to learn anything.
 import shlex
 import string
 
-from . import audit, contracts, gitread, host, manifest as manifest_module, verify
+from . import adapters, audit, contracts, gitread, host, manifest as manifest_module, verify
 
 SCHEMA_VERSION = 1
 
@@ -93,6 +93,11 @@ def _task_entry(store, record):
         findings.append({
             "class": finding.get("class"),
             "line": cause_line(finding.get("class"), finding),
+            # Issue #80: when this line is a board_item_not_terminal finding with no later
+            # reading to prefer, `_pending_checks` says when this was observed rather than
+            # leave the operator reading a fact of unknown age. None on every other class,
+            # and on a record written before the field existed.
+            "observed_at": finding.get("observed_at"),
         })
     verify_result = record.get("verify") or {}
     failed = [name for name, check in (verify_result.get("checks") or {}).items()
@@ -145,15 +150,37 @@ def _task_entry(store, record):
     }
 
 
-def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_audit=None):
+def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_audit=None,
+                    adapter=None):
     """R36's last column: what a human still has to do. Each entry is a kind and a sentence, so
     the skill can group them and the text can print them as a list.
 
     `card_audit` is the run end card audit the state file carries (stale cards, R8). Each of its
     findings is copied in as it is: `audit.build` already wrote the sentence, and rewriting it
-    here would be a second place for the words to drift."""
+    here would be a second place for the words to drift.
+
+    `adapter`, when given (issue #80), lets a landed task's still open item lag check be
+    confirmed away at print time: an operator who moved the item by hand between the run that
+    landed it and this call gets a clear summary without needing another run's own end of run
+    audit to notice, which was the only caller that ever retired it before. `None` on every
+    caller that offers nothing, which keeps this a no-op and the old behaviour exact.
+
+    This one check is the one place this module's data can print cleaner than the state file
+    it was built from: a caller reading `store.records()` or `store.audit()` directly still
+    meets the finding this confirmed away, since nothing here is a Lease holder and neither may
+    write it. Only another run's own end of run audit retires it for good; this is the
+    presentation the operator reads between runs, not the record."""
     checks = []
-    item_not_terminal_tasks = set()
+    item_cache = {}
+    # Issue #80: keyed once, up front, so the per task loop below can look up the run end
+    # audit's own reading of a task's item as soon as it meets that task's own record finding,
+    # right where the record's line always printed, rather than moving the check to a new
+    # position after every other one.
+    audit_item_lag = {
+        finding.get("task"): finding for finding in (card_audit or {}).get("findings") or []
+        if finding.get("class") == contracts.AUDIT_ITEM_NOT_TERMINAL
+    }
+    resolved_item_lag_tasks = set()
     for entry in entries:
         task_id = entry["id"]
         if entry["status"] == contracts.STATUS_EXCLUDED:
@@ -224,24 +251,52 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
                 checks.append({"kind": "card_left_in_review", "task": task_id,
                                "text": "%s: %s" % (task_id, finding["line"])})
             elif finding["class"] == contracts.BOARD_ITEM_NOT_TERMINAL:
-                checks.append({"kind": "board_item_not_terminal", "task": task_id,
-                               "text": "%s: %s" % (task_id, finding["line"])})
-                item_not_terminal_tasks.add(task_id)
+                resolved_item_lag_tasks.add(task_id)
+                audit_finding = audit_item_lag.get(task_id)
+                if audit_finding:
+                    # Issue #80: the later of the two readings, so it wins outright rather than
+                    # being dropped in favour of the record's, which used to happen here.
+                    check = {"kind": audit_finding.get("class"), "task": task_id,
+                             "text": audit_finding.get("text") or ""}
+                else:
+                    text = "%s: %s" % (task_id, finding["line"])
+                    if finding.get("observed_at"):
+                        text += " (observed %s)" % finding["observed_at"]
+                    check = {"kind": "board_item_not_terminal", "task": task_id, "text": text}
+                if not _item_confirmed_terminal_now(adapter, task_id, item_cache):
+                    checks.append(check)
     for finding in (card_audit or {}).get("findings") or []:
-        # Issue #61: a lagging item raises here, from the run end audit, and above, from the
-        # record's own closeout finding, so a card still lagging at run end used to print
-        # twice. The record's line already names the card; drop the audit's copy of the same
-        # disagreement rather than print it a second time.
-        if (finding.get("class") == contracts.AUDIT_ITEM_NOT_TERMINAL
-                and finding.get("task") in item_not_terminal_tasks):
-            continue
-        checks.append({"kind": finding.get("class"), "task": finding.get("task"),
-                       "text": finding.get("text") or ""})
+        klass, task_id = finding.get("class"), finding.get("task")
+        if klass == contracts.AUDIT_ITEM_NOT_TERMINAL:
+            if task_id in resolved_item_lag_tasks:
+                # Already resolved above, in the record's own position, in favour of this same
+                # finding.
+                continue
+            # Issue #80: no record finding to prefer this over, since a Closeout that landed
+            # cleanly writes none; the item can still have lagged again since this reading, so
+            # the same live confirmation applies here too.
+            if _item_confirmed_terminal_now(adapter, task_id, item_cache):
+                continue
+        checks.append({"kind": klass, "task": task_id, "text": finding.get("text") or ""})
     if run_status == contracts.RUN_HALTED:
         checks.append({"kind": "halted", "task": halt_task,
                        "text": "the run halted on %s with class %s. Repair by hand, then run "
                                "again to resume. State is in %s" % (halt_task, halt_class, state_dir)})
     return checks
+
+
+def _item_confirmed_terminal_now(adapter, task_id, cache):
+    """Issue #80: the print time read `_pending_checks` uses to clear an item lag check an
+    operator has since fixed by hand. `adapter` is None on every caller that offers none (every
+    summary.build call before this issue, and every one since that has no tracker configured),
+    which makes this a plain "no later reading" the same as before. `item_confirmed_terminal`
+    already answers `(False, reason)` rather than raising for a failed read or an adapter with
+    nothing to check, so a failed or irrelevant read leaves the existing line in place without
+    this needing a try of its own."""
+    if adapter is None:
+        return False
+    confirmed, _ = adapters.item_confirmed_terminal(adapter, task_id, cache=cache)
+    return bool(confirmed)
 
 
 def _shipping(manifest):
@@ -284,8 +339,11 @@ def _unpushed_check(shipping, landed):
     return {"kind": "unpushed", "task": None, "text": text}
 
 
-def build(manifest, store):
-    """The summary as data. Reads state only; acquires nothing and changes nothing."""
+def build(manifest, store, adapter=None):
+    """The summary as data. Reads state only; acquires nothing and changes nothing on disk.
+
+    `adapter`, when given (issue #80), lets an open item lag check confirm itself away at print
+    time with one more live read; see `_pending_checks`. Every existing caller passes none."""
     raw = store.read() or {}
     terminal = raw.get("terminal") or {}
     records = store.records()
@@ -313,7 +371,7 @@ def build(manifest, store):
     }
     data["pending_checks"] = _pending_checks(entries, run_status, data["halt_task"],
                                              data["halt_class"], store.dir,
-                                             card_audit=data["audit"])
+                                             card_audit=data["audit"], adapter=adapter)
     # Additive to schema version 1, like `audit`.
     data["shipping"] = _shipping(manifest)
     if not data["shipping"]["push"]:

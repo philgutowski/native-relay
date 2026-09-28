@@ -3062,15 +3062,19 @@ in_review_status = "In review"
         self.assertEqual([(f["card_status"], f["terminal_status"]) for f in mine],
                          [(self.IN_REVIEW, self.DONE)])
         checks = summary_module.build(self.manifest, self.store())["pending_checks"]
-        mine = [check for check in checks if check["kind"] == "board_item_not_terminal"]
+        # Issue #80: the record's own line reads "unreadable" on a Closeout whose board read
+        # failed, or is otherwise older than the run end audit's; either way the audit's line is
+        # the later reading and wins, so it is the one that survives here, not the record's own
+        # "board_item_not_terminal" kind.
+        mine = [check for check in checks if check["kind"] == contracts.AUDIT_ITEM_NOT_TERMINAL]
         self.assertEqual(len(mine), 1, checks)
-        self.assertIn("move T-1 to Done by hand", mine[0]["text"])
+        self.assertIn("Move the item to `Done` by hand", mine[0]["text"])
         self.assertEqual([f["class"] for f in self.store().audit()["findings"]],
                          [contracts.AUDIT_ITEM_NOT_TERMINAL])
         self.assertIn("1 stale card(s)", seen[-1])
-        # Issue #61: a lagging item raises both from the record's own closeout finding and from
-        # the run end audit, and used to print once for each. Only the record's line should
-        # survive into the checks the operator reads.
+        # Issue #61's original dedupe, now issue #80's: a lagging item raises both from the
+        # record's own closeout finding and from the run end audit, and used to print once for
+        # each. Only one line should survive into the checks the operator reads.
         t1_lag_checks = [check for check in checks if check.get("task") == "T-1"
                         and check["kind"] in ("board_item_not_terminal",
                                               contracts.AUDIT_ITEM_NOT_TERMINAL)]
@@ -3106,6 +3110,35 @@ in_review_status = "In review"
         self.go_board()
         self.assertEqual(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL), [])
         self.assertEqual(self.store().audit()["count"], 0)
+
+    def test_summary_retires_the_lag_check_at_print_time_with_no_run_in_between(self):
+        """Issue #80: the record's own finding and the run end audit used to retire only at a
+        later run's own end. An operator who moves the item by hand and asks for `summary`
+        again, with no run in between, now gets a clear summary from that one call's own live
+        read, and nothing on disk changes to produce it."""
+        self.task_moves_card("success.jsonl")
+        self.closeout_closes_issue()
+        self.go_board()
+        self.assertEqual(len(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL)), 1)
+        before_audit = self.store().audit()
+        self.set_card("T-1", self.DONE)
+        checks = summary_module.build(self.manifest, self.store(),
+                                      adapter=self.adapter)["pending_checks"]
+        t1_lag_checks = [check for check in checks if check.get("task") == "T-1"
+                        and check["kind"] in ("board_item_not_terminal",
+                                              contracts.AUDIT_ITEM_NOT_TERMINAL)]
+        self.assertEqual(t1_lag_checks, [])
+        # Print time only: the record's finding and the persisted audit are exactly as the run
+        # left them, and only this call's own decision, not a write, made the line disappear.
+        self.assertEqual(len(self.findings(contracts.BOARD_ITEM_NOT_TERMINAL)), 1)
+        self.assertEqual(self.store().audit(), before_audit)
+        # With no adapter (every caller before this issue, and `summary` with none configured),
+        # the same state still shows the check: the live read is what cleared it, not the move.
+        stale_checks = summary_module.build(self.manifest, self.store())["pending_checks"]
+        t1_stale = [check for check in stale_checks if check.get("task") == "T-1"
+                   and check["kind"] in ("board_item_not_terminal",
+                                         contracts.AUDIT_ITEM_NOT_TERMINAL)]
+        self.assertEqual(len(t1_stale), 1, stale_checks)
 
 
 # Issue #43. Closes the issue and comments the landing, and leaves the project item alone.

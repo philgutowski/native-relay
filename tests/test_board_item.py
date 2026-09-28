@@ -279,8 +279,8 @@ class ItemConfirmedTerminal(unittest.TestCase):
 class ConfirmBoardTerminal(unittest.TestCase):
     """The read after a landed Closeout, the same shape as `closeout.read_back`."""
 
-    def confirm(self, run):
-        return closeout.confirm_board_terminal(_adapter(run), _manifest(), "12")
+    def confirm(self, run, **kwargs):
+        return closeout.confirm_board_terminal(_adapter(run), _manifest(), "12", **kwargs)
 
     def test_a_lagging_item_is_a_finding_naming_the_terminal_status(self):
         finding = self.confirm(TwoTruths({"12": "CLOSED"}, {"12": "In review"}))
@@ -313,6 +313,12 @@ class ConfirmBoardTerminal(unittest.TestCase):
         self.assertEqual(line, finding["evidence"])
         self.assertIn("gh exploded", line)
         self.assertNotIn("by hand", line)
+
+    def test_the_finding_carries_when_it_was_observed(self):
+        """Issue #80: `summary` prints this reading's own timestamp when nothing later is
+        available to prefer over it, so an operator reading it by hand knows its age."""
+        finding = self.confirm(TwoTruths({"12": "CLOSED"}, {"12": "In review"}), now=lambda: 0)
+        self.assertEqual(finding["observed_at"], state._iso(0))
 
     def test_a_board_read_that_raises_is_a_finding_rather_than_an_exception(self):
         class Exploding(FakeAdapter):
