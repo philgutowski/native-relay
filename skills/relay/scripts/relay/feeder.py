@@ -2173,6 +2173,18 @@ class Feeder:
         if status not in (testloop.RAN, testloop.NOT_RUN, testloop.FAILED):
             reason = "the pass record carries no status the loop knows: %r" % (status,)
             status = testloop.FAILED
+        # The areas the pass could not reach (issue #121), as the record lists them. The pass
+        # checked each against the tour document before writing it, so a list of any other
+        # shape is a record the loop cannot read, and it reads as a failed pass the way an
+        # unknown status does, before the round is counted, rather than as a tour that reached
+        # every area (code review).
+        untoured = record.get("untoured")
+        if untoured is None:
+            untoured = []
+        if not isinstance(untoured, list) or not all(isinstance(area, str) and area.strip()
+                                                     for area in untoured):
+            reason = "the pass record's untoured list is unreadable: %r" % (untoured,)
+            status, untoured = testloop.FAILED, []
         new, attended = [], set()
         for entry in record.get("filed") or ():
             if not isinstance(entry, dict) or entry.get("id") in (None, ""):
@@ -2218,12 +2230,6 @@ class Feeder:
             self.report_once("test_area:" + area, "the %s area took %d patches and still fails: "
                              "the loop stops testing it and files one attended planning card "
                              "for it at the next pass" % (area, patches.counts[area]))
-        # The areas the pass could not reach (issue #121), as the record lists them; a record
-        # whose list is not one of strings reads as naming none, since the pass checked each
-        # against the tour document before writing it.
-        untoured = record.get("untoured")
-        untoured = ([str(area) for area in untoured if isinstance(area, str) and area.strip()]
-                    if isinstance(untoured, list) else [])
         loop["passes"].append({
             "pass": record.get("pass"), "kind": kind, "status": status, "reason": reason,
             "at": now.isoformat(timespec="seconds"), "cycle": self.state["cycles"], "cards": list(sent), "filed": new,
@@ -2235,13 +2241,14 @@ class Feeder:
         # A pass that ran without reaching every area is notified once per kind, naming the
         # areas, until a pass of that kind reaches them all (issue #121): the tour is not clean
         # and the loop does not stop on it, so the operator is the one who can act, by signing
-        # the app in again or fixing what the areas need.
+        # the app in again or fixing what the areas need. The notice carries the areas and not
+        # the reason, which a process words anew each pass and the log line above keeps, so
+        # the same missed areas are one notice however the reason is phrased (code review).
         untoured_key = "test_pass:%s:untoured" % kind
         if status == testloop.RAN and untoured:
-            self.report_once(untoured_key, "the %s test pass could not reach %s%s; a tour that "
-                             "misses an area is never read as clean" % (
-                                 kind, ", ".join(untoured),
-                                 ": " + reason if reason else ""))
+            self.report_once(untoured_key, "the %s test pass could not reach %s; a tour that "
+                             "misses an area is never read as clean, and the log has the "
+                             "reason" % (kind, ", ".join(untoured)))
         elif status == testloop.RAN:
             self.state["reported"].pop(untoured_key, None)
         # One notice per kind and status until a pass of that kind runs (step 7): a reason

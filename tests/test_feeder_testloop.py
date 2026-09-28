@@ -555,9 +555,9 @@ class Untoured(LoopCase):
         notices = [note for note in self.notes if "could not reach" in note]
         self.assertEqual(len(notices), 1, self.notes)
         self.assertIn("Invoices, Settings", notices[0])
-        self.assertIn("sit behind a sign in", notices[0])
         self.assertIn("never read as clean", notices[0])
         self.assertIn("untoured [Invoices, Settings]", self.log_text())
+        self.assertIn("sit behind a sign in", self.log_text())
 
     def tours(self, *scripts):
         """Script the tours in order and answer every check with a pass that found nothing,
@@ -614,12 +614,42 @@ class Untoured(LoopCase):
         self.assertEqual(len([note for note in self.notes if "was not run" in note]), 1)
         self.assertEqual([note for note in self.notes if "could not reach" in note], [])
 
-    def test_a_record_whose_untoured_is_not_a_list_of_strings_reads_as_naming_none(self):
-        self.pass_script = [tour_filing(filed(10)), {}, {"untoured": "Invoices"}]
+    def unreadable(self, value):
+        """Code review: the pass checked every name before writing the list, so any other
+        shape is a record the loop cannot read, and it fails closed like an unknown status,
+        counting no round and never stopping the loop clean."""
+        self.pass_script = [tour_filing(filed(10)), {}, {"untoured": value}]
         self.plans = [{}, {}]
         self.feed_loop()
-        self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_CLEAN)
-        self.assertEqual(self.loop()["passes"][-1]["untoured"], [])
+        entry = self.loop()["passes"][-1]
+        self.assertEqual(entry["status"], testloop.FAILED)
+        self.assertIn("untoured list is unreadable", entry["reason"])
+        self.assertEqual(entry["untoured"], [])
+        self.assertIsNone(self.loop()["stop"])
+        self.assertEqual(self.loop()["rounds"], 1)
+
+    def test_a_record_whose_untoured_is_a_string_reads_as_failed_never_as_clean(self):
+        self.unreadable("Invoices")
+
+    def test_a_record_whose_untoured_holds_a_null_reads_as_failed(self):
+        self.unreadable(["Invoices", None])
+
+    def test_a_record_whose_untoured_holds_a_number_reads_as_failed(self):
+        self.unreadable([1])
+
+    def test_the_same_missed_areas_with_a_reworded_reason_notify_once(self):
+        # Code review: a process words its reason anew each pass, so the notice carries the
+        # areas alone and the log keeps each reason.
+        self.adapter.ready_cards = [card(1)]
+        reworded = dict(self.PARTIAL, reason="the sign in wall still hides two areas")
+        self.tours(self.PARTIAL, reworded)
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed_loop(), 0)
+        notices = [note for note in self.notes if "could not reach" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertNotIn("sign in", notices[0])
+        self.assertIn("the log has the reason", notices[0])
+        self.assertIn("still hides two areas", self.log_text())
 
     def test_a_partial_check_goes_on_and_is_notified_once_by_its_own_kind(self):
         self.pass_script = [tour_filing(filed(10)),

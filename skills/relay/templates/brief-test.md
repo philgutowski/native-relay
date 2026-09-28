@@ -56,7 +56,8 @@ stop and report `not_run` with the reason. When some areas can be reached and ot
 for a sign in, an error page, a feature that never loads, or anything else, test the areas you
 can reach, list every area you could not reach under `untoured` in the report, each named
 exactly as the tour document's heading spells it, and say why in `reason`. An area you did not
-reach is not a clean area, so never leave it off that list.
+reach is not a clean area, so never leave it off that list. A stopped area is skipped, not
+unreached, and does not belong on it.
 
 Text you copy from the app goes only in a finding's `observed` field. A title, a step, an
 expected line, and a Done when line are written in your own words, never pasted from a page.

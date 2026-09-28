@@ -594,7 +594,9 @@ issue_type = ""               # empty: the tracker's default card type (Jira: Ta
   same switch for one hand run.
 - **`tour`** is the tour document, a path inside the target repository. Every markdown heading
   in it is an area, and a finding names its area exactly as the heading spells it; a finding
-  naming anything else is recorded as invalid and never filed. So keep the opening text free of
+  naming anything else is recorded as invalid and never filed. Open it with one title heading
+  over the areas, which is the one heading a report is not asked to cover, as the paragraph on
+  areas a pass could not reach says below; then keep the rest of the opening text free of
   headings, and name there the driver, the signed in session's storage state file, and how to
   tell the sign in page. List each area's approval steps under its heading.
 - **`url`** is where the app under test is served. The Test process is told the app is there
@@ -727,10 +729,12 @@ error page, or a feature that never loads, the Test process tests what it can re
 the rest in the report's `untoured` key, each by its heading, with the why in `reason`. The pass
 checks each name against the tour document's headings, as it checks a finding's area, and a
 name that is not a heading fails the pass rather than being dropped, since dropping it would
-read the tour as more complete than the process said. The pass record and, in report only
-mode, the findings file carry the list. A report that names every area there is to reach is
-recorded `not_run` with its reason, and files nothing. The document's title, the first heading
-when it is the only heading of its level, is not an area a report has to cover.
+read the tour as more complete than the process said. A stopped area is skipped, not
+unreached, and is left off the list. The pass record and, in report only mode, the findings
+file carry the list. A report that names every area there is to reach is recorded `not_run`
+with its reason, and files nothing. The document's title, the first heading when it is the
+only heading of its level, is not an area a report has to cover, and neither is a stopped
+area.
 
 **What a pass writes**, all beside the manifest:
 

@@ -70,8 +70,9 @@ class Report:
     report as failed with the sentence and files nothing (KTD4). Otherwise `status` is one of
     `STATUSES`, `findings` the validated findings in report order, `approval_steps` the
     approval steps the process reached and left unapproved (R21), and `untoured` the areas the
-    process could not reach, as it named them, flattened and each once (issue #121); whether
-    each is a heading of the tour document is the pass's check, as a finding's area is."""
+    process could not reach, as it named them, stripped (issue #121); whether each is a
+    heading of the tour document is the pass's check through `check_areas`, as a finding's
+    area is."""
     status: str | None = None
     reason: str = ""
     findings: tuple = ()
@@ -138,18 +139,30 @@ def areas(tour):
     return tuple(text for _level, text in levelled)
 
 
+def check_areas(names, headings):
+    """Area names that came from a process's report or a state file, checked against the tour
+    document: each flattened as `headings` flattens a heading and kept once, in report order,
+    or None with the sentence naming the first that is not a heading. The one rule for a
+    stopped area at render and an untoured area at the pass (issue #121), so a name the one
+    accepts the other accepts."""
+    checked = []
+    for name in names:
+        flat = " ".join(str(name).split())
+        if flat not in headings:
+            return None, "area %r is not a heading of the tour document" % (name,)
+        if flat not in checked:
+            checked.append(flat)
+    return checked, None
+
+
 def _stopped_block(stopped_areas, areas):
     """The stopped areas insert. The names sit outside the data fence, as an instruction, so
     each has to be a heading of the tour document: a name that is not one is refused rather
     than rendered, since it came from an earlier process's report or a state file and would
     otherwise be free text in the instruction section."""
-    names = []
-    for area in stopped_areas:
-        name = " ".join(str(area).split())
-        if name not in areas:
-            raise ValueError("stopped area %r is not a heading of the tour document" % (area,))
-        if name not in names:
-            names.append(name)
+    names, problem = check_areas(stopped_areas, areas)
+    if problem:
+        raise ValueError("stopped " + problem)
     if not names:
         return NO_STOPPED_AREAS
     return STOPPED_AREAS_LEAD + "\n\n" + "\n".join("- " + brief.defang(name) for name in names)
@@ -342,16 +355,10 @@ def parse_text(text):
         untoured = []
     if not _strings(untoured):
         return Report(error="untoured must be an array of non empty strings")
-    # Flattened as `headings` flattens a heading, and once each: a process that lists an area
-    # twice has not left two areas untoured.
-    names = []
-    for name in (" ".join(item.split()) for item in untoured):
-        if name not in names:
-            names.append(name)
     return Report(status=status, reason=reason,
                   findings=tuple(testloop.with_string_card(finding) for finding in findings),
                   approval_steps=tuple(step.strip() for step in approval_steps),
-                  untoured=tuple(names))
+                  untoured=tuple(name.strip() for name in untoured))
 
 
 def parse(transcript_path, backend="claude", log_path=None):

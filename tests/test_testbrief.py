@@ -602,15 +602,30 @@ class Untoured(unittest.TestCase):
     it to. The live tour that found this reached 3 of 10 areas behind a sign in and reported
     `ran` with nothing to say which areas it never saw."""
 
-    def test_untoured_areas_parse_flattened_and_once_each(self):
+    def test_untoured_areas_parse_as_given_and_stripped(self):
+        # Flattening and keeping each once is `check_areas`, the pass's step, as it is for a
+        # stopped area at render: the parser carries the names the way it carries a step.
         report = testbrief.parse_text(block({
             "status": "ran", "reason": "the sign in wall hid two areas",
             "findings": [finding(severity="low")],
             "untoured": ["Invoices", "  Invoices ", "Settings\tpage"]}))
         self.assertTrue(report.ok, report.error)
-        self.assertEqual(report.untoured, ("Invoices", "Settings page"))
+        self.assertEqual(report.untoured, ("Invoices", "Invoices", "Settings\tpage"))
         self.assertEqual(report.reason, "the sign in wall hid two areas")
         self.assertEqual(len(report.findings), 1)
+
+    def test_check_areas_is_the_one_rule_for_a_stopped_and_an_untoured_name(self):
+        headings = testbrief.headings(TOUR)
+        self.assertEqual(testbrief.check_areas(["  Search ", "Search", "Invoices"], headings),
+                         (["Search", "Invoices"], None))
+        checked, problem = testbrief.check_areas(["Search", "Cart"], headings)
+        self.assertIsNone(checked)
+        self.assertEqual(problem, "area 'Cart' is not a heading of the tour document")
+        # The render path reads the same answer, with its own word in front.
+        with self.assertRaises(ValueError) as caught:
+            render(stopped_areas=("Cart",))
+        self.assertEqual(str(caught.exception),
+                         "stopped area 'Cart' is not a heading of the tour document")
 
     def test_a_report_without_the_key_or_with_null_names_no_untoured_area(self):
         self.assertEqual(testbrief.parse_text(block({"status": "ran", "findings": []})).untoured,

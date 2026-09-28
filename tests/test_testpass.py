@@ -1269,13 +1269,47 @@ class Untoured(PassCase):
         self.assertEqual(outcome.record["filed"], [])
         self.assertEqual(self.entries_taken(), 1)
 
-    def test_check_untoured_flattens_and_keeps_each_name_once(self):
+    def test_check_untoured_flattens_keeps_each_name_once_and_leaves_a_stopped_area_out(self):
         headings = testbrief.headings(TOUR_MD)
         self.assertEqual(testpass.check_untoured(["  Search ", "Search", "Settings"], headings),
                          (["Search", "Settings"], None))
+        self.assertEqual(testpass.check_untoured(["Search", "Settings"], headings,
+                                                 stopped_areas=("Settings",)),
+                         (["Search"], None))
         checked, sentence = testpass.check_untoured(["Search", "Cart"], headings)
         self.assertIsNone(checked)
-        self.assertIn("'Cart'", sentence)
+        self.assertEqual(sentence, "untoured area 'Cart' is not a heading of the tour document")
+
+    def test_a_stopped_area_listed_as_untoured_is_skipped_not_unreached(self):
+        """Code review: the brief tells the process to skip a stopped area, and a process that
+        lists it has skipped it. Left in, a loop with a stopped area could never stop clean."""
+        self.test_process([], untoured=["Settings"])
+        outcome, _ = self.run_pass(testpass.Request(stopped_areas=("Settings",)))
+        self.assertEqual(outcome.record["status"], testloop.RAN)
+        self.assertEqual(outcome.record["untoured"], [])
+
+    def test_reaching_nothing_but_a_stopped_area_is_not_run(self):
+        # Search and Invoices are every area left to reach once Settings is stopped.
+        self.test_process([], reason="the sign in form again", untoured=["Search", "Invoices"])
+        outcome, _ = self.run_pass(testpass.Request(stopped_areas=("Settings",)))
+        self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
+        self.assertIn("could reach no area", outcome.record["reason"])
+        self.assertEqual(outcome.record["untoured"], ["Search", "Invoices"])
+
+    def test_a_not_run_report_carries_its_untoured_areas_in_the_same_shape(self):
+        # Code review: the process's own not_run and the one the pass synthesizes for a report
+        # that reached nothing agree on what the record holds.
+        self.test_process([], status="not_run", reason="the session file is missing",
+                          untoured=["Search", " Invoices ", "Settings"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
+        self.assertEqual(outcome.record["reason"], "the session file is missing")
+        self.assertEqual(outcome.record["untoured"], ["Search", "Invoices", "Settings"])
+        self.test_process([], status="not_run", reason="the session file is missing",
+                          untoured=["Nowhere"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertIn("'Nowhere'", outcome.record["reason"])
 
     def test_the_findings_file_lists_the_untoured_areas_in_report_only_mode(self):
         self.test_process([finding(1)], reason="Settings never loaded",

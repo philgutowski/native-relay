@@ -375,22 +375,21 @@ def check_findings(findings, headings, kind, sent):
     return valid, invalid
 
 
-def check_untoured(names, headings):
-    """The areas a report says it could not reach, checked against the tour document the way a
-    finding's area is (issue #121): each flattened, and returned in report order, or None with
-    the sentence naming the first that is not a heading. A name that is not a heading fails
-    the pass rather than being dropped like an invalid finding, because the two errors point
-    opposite ways: a dropped finding files nothing, which is safe, while a dropped untoured
-    area would read the tour as more complete than the process said it was, which is the very
-    misreading this key exists to prevent."""
-    checked = []
-    for name in names:
-        flat = _flat(name)
-        if flat not in headings:
-            return None, "untoured area %r is not a heading of the tour document" % (name,)
-        if flat not in checked:
-            checked.append(flat)
-    return checked, None
+def check_untoured(names, headings, stopped_areas=()):
+    """The areas a report says it could not reach, checked against the tour document through
+    the rule a stopped area is checked by (issue #121): each flattened and once, in report
+    order, or None with the sentence naming the first that is not a heading. A name that is
+    not a heading fails the pass rather than being dropped like an invalid finding, because
+    the two errors point opposite ways: a dropped finding files nothing, which is safe, while
+    a dropped untoured area would read the tour as more complete than the process said it was,
+    which is the very misreading this key exists to prevent. A stopped area is left out after
+    the check: the brief tells the process to skip it, so a process that lists it has skipped
+    it, not failed to reach it, and a loop with a stopped area could otherwise never stop
+    clean (code review)."""
+    checked, problem = testbrief.check_areas(names, headings)
+    if problem:
+        return None, "untoured " + problem
+    return [name for name in checked if name not in stopped_areas], None
 
 
 def _finding_entry(finding, outcome, problem=None):
@@ -707,16 +706,19 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     if not report.ok:
         return finish(FAILED, report.error)
     record["approval_steps"] = list(report.approval_steps)
-    if report.status == NOT_RUN:
-        return finish(NOT_RUN, report.reason)
     # KTD4's check on the areas the process could not reach (issue #121), before the findings
-    # are read: a report that names every area the tour document has reached nothing, and is
-    # a pass that did not run whatever it found on the way, so nothing of it is filed.
-    untoured, sentence = check_untoured(report.untoured, headings)
+    # are read and before a not_run report returns, so every record carries the list in one
+    # shape. A report that names every area there was to reach, the stopped ones set aside
+    # since the process was told to skip them, has reached nothing: it is a pass that did not
+    # run whatever it found on the way, so nothing of it is filed.
+    untoured, sentence = check_untoured(report.untoured, headings, request.stopped_areas)
     if sentence:
         return finish(FAILED, sentence)
     record["untoured"] = untoured
-    if untoured and all(area in untoured for area in testbrief.areas(tour)):
+    if report.status == NOT_RUN:
+        return finish(NOT_RUN, report.reason)
+    to_reach = [area for area in testbrief.areas(tour) if area not in request.stopped_areas]
+    if untoured and all(area in untoured for area in to_reach):
         return finish(NOT_RUN, "the test process could reach no area of the tour document%s"
                       % (": " + report.reason if report.reason else ""))
 
