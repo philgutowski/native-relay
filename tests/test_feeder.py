@@ -1330,11 +1330,14 @@ class LimitMachine(FeederCase):
         self.assertEqual(manifestedit.excluded_ids(self.text()), set())
         self.assertEqual(set(self.state()["exhausted"]), {"fable"})
 
-    def task_halt_ahead_of_an_old_halt(self, death, run_status="halted"):
-        """T on fable listed ahead of H on opus. H halted once already, a Cycle in which T was
-        deferred on a held fable whose mark has since expired. T launches first and dies with
-        `death`, a Task scoped class, and the run stops there: H is never reached."""
-        self.listing(("7", "fable"), ("8", "opus"),
+    def task_halt_ahead_of_an_old_halt(self, death, run_status="halted", old_halt_first=False):
+        """T, 7 on fable, listed ahead of H, 8 on opus. H halted once already, a Cycle in which T
+        was deferred on a held fable whose mark has since expired. T launches first and dies with
+        `death`, a Task scoped class, and the run stops there: H is never reached. With
+        `old_halt_first` H is listed ahead of T instead, so the run reached it and refused it
+        before launch, and passed it under `continue_past_task_halt`."""
+        pairs = [("7", "fable"), ("8", "opus")]
+        self.listing(*(pairs[::-1] if old_halt_first else pairs),
                      _8=dict(halted(5000), model="opus", started_at="old"))
         self.write(self.paths.state, json.dumps(dict(feeder.new_state(), halts={"8": 1})))
         self.adapter.ready_cards = []
@@ -1350,6 +1353,15 @@ class LimitMachine(FeederCase):
         self.assertFalse(any("excluded" in note for note in self.notes), self.notes)
         self.assertEqual(set(self.state()["exhausted"]), {"fable"})
         self.assertIn("8", self.ran_on[1])
+
+    def test_a_limit_halt_still_counts_a_halt_it_refused_before_launch_ahead_of_it(self):
+        # R3: a card refused at pre flight every Cycle is excluded, even beside a limit death.
+        self.task_halt_ahead_of_an_old_halt(self.limit_halt(), old_halt_first=True)
+        self.assertEqual(self.state()["halts"], {"8": 2})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"8"})
+        self.assertTrue(any("8 excluded after 2 halts" in note for note in self.notes),
+                        self.notes)
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
 
     def test_a_task_scoped_halt_that_is_not_the_limit_counts_what_it_never_reached(self):
         self.task_halt_ahead_of_an_old_halt(self.limit_halt(log=MISSING_MODEL_LOG))
