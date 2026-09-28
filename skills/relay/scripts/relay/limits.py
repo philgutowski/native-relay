@@ -20,11 +20,18 @@ prints nothing, a binary that would not start or a CLI that died on a bad flag w
 has no `init` of its own, and without a line of the runner's the walk back would read the
 attempt before it as this death. A log written before that line existed reads as it always did.
 
+The second half of the module is the state machine (U2, KTD4), as two pure functions:
+`decide_after_run` turns one Cycle's facts into a `Decision`, and `plan_cycle_start` turns the
+work waiting at the start of a Cycle into a `CycleStart`. Neither reads a file, a clock, or a
+state object, and neither writes anything; the caller applies the record.
+
 This module imports nothing from the feeder or the runner. Both read deaths through it.
 """
 import json
+import math
 import os
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 # The HTTP status the CLI's `result` line carries as `api_error_status` when the account's
 # limit for the model is spent. Not `terminal_reason: api_error` alone: a model the account
@@ -159,3 +166,311 @@ def read_death(record, log_text, quick_death_seconds):
     if wall < quick_death_seconds:
         return UNCONFIRMED, None
     return REFUTED, None
+
+
+# The state machine (U2, KTD4). Everything below is a pure function of its arguments.
+
+# Where a mark's expiry came from: the reset the CLI printed (KTD10), or `fallback_hours`.
+MARK_CLI = "cli"
+MARK_FALLBACK_HOURS = "fallback_hours"
+
+# The three outcomes of a Cycle, and the words and code the Feeder already uses for two of them.
+GO = "go"
+WAIT = "wait"
+LEAVE = "leave"
+WAIT_USAGE_LIMIT = "usage_limit"
+WAIT_MODEL_HELD = "model_held"
+LEAVE_LIMIT_WAITS = "limit_waits_exhausted"
+LEAVE_EXIT = 2
+
+
+@dataclass(frozen=True)
+class Settings:
+    """The configuration values the machine reads. The Feeder's own config has every one of
+    these attributes, so it can be passed in place of this."""
+    quick_death_seconds: int = 600
+    limit_wait_seconds: int = 1800
+    limit_waits_max: int = 16
+    max_halts: int = 2
+    fallback_hours: int = 5
+    batch: int = 3
+
+
+@dataclass(frozen=True)
+class Mark:
+    """A model at its limit: marked `since` the death that said so, `until` the time it is
+    expected back, and `source`, MARK_CLI or MARK_FALLBACK_HOURS, for where that time came
+    from (R4)."""
+    since: datetime
+    until: datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What the Cycle asks for next: GO round, WAIT `seconds` with `reason`, or LEAVE with exit
+    `code` and `reason`."""
+    kind: str
+    reason: str = None
+    seconds: int = None
+    code: int = None
+
+
+GO_ROUND = Outcome(GO)
+
+
+@dataclass(frozen=True)
+class CycleFacts:
+    """One Cycle, as the Feeder read it. `before` and `after` are {id: record} for this Cycle's
+    Tasks before and after the run; `readings` {id: (reading, resets_at)} from `read_death` for
+    each death; `died_on` {id: model} the model each ran on, and `listed_on` {id: model} the
+    Manifest's. `marks` is {model: Mark}, `streak` the `limit_waits` count, `halts` {id: count}.
+    `deferred` and `passed_over` are the ids this Cycle deferred and the ids the run passed over
+    under R11. `retries` is the ids queued for a retry when the run started."""
+    after: dict
+    now: datetime
+    before: dict = field(default_factory=dict)
+    readings: dict = field(default_factory=dict)
+    died_on: dict = field(default_factory=dict)
+    listed_on: dict = field(default_factory=dict)
+    fallback: dict = field(default_factory=dict)
+    marks: dict = field(default_factory=dict)
+    streak: int = 0
+    halts: dict = field(default_factory=dict)
+    deferred: frozenset = frozenset()
+    passed_over: frozenset = frozenset()
+    retries: frozenset = frozenset()
+    settings: object = Settings()
+
+
+@dataclass(frozen=True)
+class Decision:
+    """What one Cycle's facts decide, for the Feeder to apply.
+
+    `marks` {model: Mark} to write, each replacing any mark the model had (KTD5); `notify` the
+    models among them that were not marked before (R4). `moves` (id, from, to) to write to the
+    Manifest; `holds` (id, model) left where they are. `retry` the ids to queue for a retry.
+    `halts` {id: new count} for each halt to count, and `exclude` the ids among them that have
+    reached `max_halts`. `report` the ids to report blocked. `streak` the new `limit_waits`."""
+    marks: dict
+    notify: tuple
+    moves: tuple
+    holds: tuple
+    retry: tuple
+    halts: dict
+    exclude: tuple
+    report: tuple
+    streak: int
+    outcome: Outcome
+
+
+@dataclass(frozen=True)
+class CycleStart:
+    """What the start of a Cycle decides. `moves` (id, from, to) to write before the run;
+    `retry` the ids to pass as `--retry-blocked` and `defer` the ids to pass as `--defer`;
+    `held` (id, model) for every held Task, a held queued retry among them keeping its place in
+    the queue; `room` the batch's room left by the work that will run; `wait` the R7 wait, an
+    Outcome with reason WAIT_MODEL_HELD, when held work is all there is among these Tasks, else
+    None. Held fresh cards are the caller's to add, through `hold_wait`."""
+    moves: tuple
+    retry: tuple
+    defer: tuple
+    held: tuple
+    room: int
+    wait: int = None
+
+
+def resolve_fallback(model, table, unavailable):
+    """The first model along `model`'s fallback chain that is not in `unavailable`, or None
+    when the chain ends or comes back on itself first. `model` itself is taken to be
+    unavailable. Every model is visited once at most, so no table can make this loop."""
+    seen, current = {model}, model
+    while True:
+        current = table.get(current)
+        if current is None or current in seen:
+            return None
+        if current not in unavailable:
+            return current
+        seen.add(current)
+
+
+def _chain(model, table):
+    """`model` and every model along its fallback chain, each once."""
+    seen = []
+    while model is not None and model not in seen:
+        seen.append(model)
+        model = table.get(model)
+    return seen
+
+
+def active_marks(marks, now):
+    """The marks in `marks` that have not expired by `now`."""
+    return {model: mark for model, mark in marks.items() if mark.until > now}
+
+
+def is_held(model, marks, table, now):
+    """A model marked at `now` whose fallback chain has no free model: nothing listed or routed
+    on it can run anywhere until a mark along that chain expires. Derived, never stored."""
+    active = active_marks(marks, now)
+    return model in active and resolve_fallback(model, table, set(active)) is None
+
+
+def mark_for(now, resets_at, fallback_hours):
+    """The mark one confirmed death at `now` writes: until the CLI's reset when there is one
+    and it lies ahead, else `fallback_hours` on (R4, KTD10)."""
+    if resets_at is not None and resets_at > now:
+        return Mark(since=now, until=resets_at, source=MARK_CLI)
+    return Mark(since=now, until=now + timedelta(hours=fallback_hours),
+                source=MARK_FALLBACK_HOURS)
+
+
+def hold_wait(held_models, marks, table, now, cap):
+    """The R7 wait for work held on `held_models`: `cap` seconds, or less when a mark along one
+    of those models' chains expires sooner, since that expiry frees the work. None when nothing
+    is held. At least one second, so a mark due to expire now is not a wait of nothing."""
+    active = active_marks(marks, now)
+    expiries = [active[model].until for held in held_models
+                for model in _chain(held, table) if model in active]
+    if not expiries:
+        return None
+    seconds = math.ceil((min(expiries) - now).total_seconds())
+    return max(1, min(cap, seconds))
+
+
+def _launched(task_id, facts):
+    """True when this Cycle's run launched a process for the Task: its record carries a
+    `started_at` the record before the run did not (KTD9)."""
+    started = facts.after[task_id].get("started_at")
+    return started is not None and started != facts.before.get(task_id, {}).get("started_at")
+
+
+def decide_after_run(facts):
+    """The decision for one Cycle, from `facts`, a `CycleFacts`. In order: set the records the
+    run did not launch aside, so none is read as a limit death (R3, KTD9); read each launched
+    death; mark the model of every confirmed death (R4); move or hold each confirmed death
+    against the marks as they stand after this Cycle's (R5, R6); decide the whole Cycle wait
+    from the unconfirmed deaths (R8, R9); then sort what is left, the unlaunched halted records
+    among it, into counted halts and reported blocked Tasks. A Task deferred or passed over
+    this Cycle is in neither."""
+    settings, now = facts.settings, facts.now
+    ids = list(facts.after)
+    status = {task_id: facts.after[task_id].get("status") for task_id in ids}
+    # Landed in this Cycle: a record already landed before the run is no news of the account.
+    landed = any(status[task_id] == "landed"
+                 and facts.before.get(task_id, {}).get("status") != "landed" for task_id in ids)
+    dead = [task_id for task_id in ids if status[task_id] in ("halted", "blocked")]
+    launched = [task_id for task_id in dead if _launched(task_id, facts)]
+    left_alone = frozenset(facts.deferred) | frozenset(facts.passed_over)
+    unlaunched = [task_id for task_id in dead
+                  if task_id not in launched and task_id not in left_alone]
+
+    def model_of(task_id):
+        return (facts.died_on.get(task_id) or facts.after[task_id].get("model")
+                or facts.listed_on.get(task_id))
+
+    reading = {task_id: facts.readings.get(task_id, (REFUTED, None))[0] for task_id in launched}
+    # A confirmed death is never counted or reported (R6), even one whose model nobody knows;
+    # that one marks nothing, moves nothing, and holds nothing.
+    confirmed = [task_id for task_id in launched if reading[task_id] == CONFIRMED]
+    unconfirmed = [task_id for task_id in launched if reading[task_id] == UNCONFIRMED]
+    ordinary = [task_id for task_id in launched
+                if task_id not in confirmed and task_id not in unconfirmed]
+
+    # Mark. Two deaths on one model in one Cycle keep the later expiry: it is back only when
+    # both limits have lifted.
+    before = active_marks(facts.marks, now)
+    marks = {}
+    for task_id in confirmed:
+        mark = mark_for(now, facts.readings[task_id][1], settings.fallback_hours)
+        model = model_of(task_id)
+        if model is None:
+            continue
+        if model not in marks or mark.until > marks[model].until:
+            marks[model] = mark
+    notify = tuple(sorted(model for model in marks if model not in before))
+
+    # Move or hold, against every mark standing once this Cycle's are written.
+    unavailable = set(before) | set(marks)
+    moves, holds, retry = [], [], []
+    for task_id in confirmed:
+        source = model_of(task_id)
+        if source is not None:
+            target = resolve_fallback(source, facts.fallback, unavailable)
+            if target is None:
+                holds.append((task_id, source))
+            else:
+                moves.append((task_id, source, target))
+        if status[task_id] == "blocked":
+            retry.append(task_id)
+
+    # The whole Cycle wait: nothing landed, every launched death quick, one unconfirmed.
+    quick = all(facts.after[task_id].get("wall_seconds") is not None
+                and facts.after[task_id]["wall_seconds"] < settings.quick_death_seconds
+                for task_id in launched)
+    streak, outcome, report = facts.streak, GO_ROUND, []
+    waited = bool(unconfirmed) and not landed and quick
+    if waited:
+        streak += 1
+        if streak > settings.limit_waits_max:
+            streak = 0
+            outcome = Outcome(LEAVE, reason=LEAVE_LIMIT_WAITS, code=LEAVE_EXIT)
+            report += [task_id for task_id in unconfirmed if status[task_id] == "blocked"]
+        else:
+            outcome = Outcome(WAIT, reason=WAIT_USAGE_LIMIT, seconds=settings.limit_wait_seconds)
+            retry += [task_id for task_id in unconfirmed if status[task_id] == "blocked"]
+    elif landed or not quick or not launched:
+        streak = 0
+    if not waited:
+        ordinary += unconfirmed
+
+    # What is left: ordinary deaths, and the records the run did not launch.
+    halts, exclude = {}, []
+    for task_id in [task_id for task_id in ids if task_id in ordinary or task_id in unlaunched]:
+        if status[task_id] == "halted":
+            count = facts.halts.get(task_id, 0) + 1
+            halts[task_id] = count
+            if count >= settings.max_halts:
+                exclude.append(task_id)
+        elif task_id in ordinary or task_id not in facts.retries:
+            # A queued retry the run never reached keeps its place and was reported already.
+            report.append(task_id)
+
+    return Decision(marks=marks, notify=notify, moves=tuple(moves), holds=tuple(holds),
+                    retry=tuple(retry), halts=halts, exclude=tuple(exclude),
+                    report=tuple(report), streak=streak, outcome=outcome)
+
+
+def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings,
+                     default_model=None):
+    """The start of a Cycle (R5, R7). `unsettled` is the listed Task ids left to run, in order;
+    `retries` the ids queued for a retry, in order, which run with them; `listed_on` {id: model}
+    the Manifest's models, and `default_model` the model a Task the Manifest gives none runs on;
+    `marks` {model: Mark}; `table` the fallback table. The Manifest decides, not the record: a
+    moved retry's record still names the model it died on.
+
+    A Task listed on a marked model moves to the first free model along its chain. With none
+    free it is held: a queued retry keeps its place and is not retried, and any other Task is
+    deferred. A held Task takes no room in the batch."""
+    active = active_marks(marks, now)
+    retries = list(retries)
+    ids = list(unsettled) + [task_id for task_id in retries if task_id not in unsettled]
+    moves, retry, defer, held, running = [], [], [], [], 0
+    for task_id in ids:
+        model = listed_on.get(task_id) or default_model
+        if model in active:
+            target = resolve_fallback(model, table, set(active))
+            if target is None:
+                held.append((task_id, model))
+                if task_id not in retries:
+                    defer.append(task_id)
+                continue
+            moves.append((task_id, model, target))
+        running += 1
+        if task_id in retries:
+            retry.append(task_id)
+    wait = None
+    if held and not running:
+        wait = Outcome(WAIT, reason=WAIT_MODEL_HELD, seconds=hold_wait(
+            {model for _, model in held}, marks, table, now, settings.limit_wait_seconds))
+    return CycleStart(moves=tuple(moves), retry=tuple(retry), defer=tuple(defer),
+                      held=tuple(held), room=max(0, settings.batch - running), wait=wait)

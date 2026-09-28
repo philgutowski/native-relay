@@ -1,10 +1,13 @@
 """U1 of the usage limit plan: the reader that answers confirmed, refuted, or unconfirmed for one
-death, and the stub entry keys that let a process die the way the CLI dies at its limit."""
+death, and the stub entry keys that let a process die the way the CLI dies at its limit.
+
+U2: the state machine as two pure decisions, one after a run and one at the start of a Cycle,
+tested as a table of facts in and a record out, with no Feeder, no clock, and no files."""
 import json
 import os
 import unittest
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import _paths  # noqa: F401
 import test_run
@@ -223,6 +226,385 @@ class ThroughTheStub(test_run.RunCase):
         self.assertNotIn("stub_done", text)
         self.assertIn('"subtype": "init"', text)
         self.assertEqual(limits.read_death(record, text, QUICK), (limits.CONFIRMED, RESET))
+
+
+# U2. The Cycle facts the tables below are built from. NOW is AE9's death, 20:06, fourteen minutes
+# before RESET.
+NOW = datetime(2026, 9, 27, 20, 6)
+BEFORE_RUN = "2026-09-27T19:00:00"
+THIS_RUN = "2026-09-27T20:00:00"
+SETTINGS = limits.Settings(quick_death_seconds=QUICK, limit_wait_seconds=1800,
+                           limit_waits_max=16, max_halts=2, fallback_hours=5, batch=3)
+FIVE_HOURS = timedelta(hours=5)
+MUTUAL = {"fable": "opus", "opus": "fable"}
+
+CONFIRMED = (limits.CONFIRMED, None)
+REFUTED = (limits.REFUTED, None)
+UNCONFIRMED = (limits.UNCONFIRMED, None)
+
+
+def record(task_id, status, model="fable", wall=8, started=THIS_RUN, halt_class="no_envelope"):
+    return {"id": task_id, "status": status, "model": model, "wall_seconds": wall,
+            "started_at": started, "class": halt_class if status != "landed" else None}
+
+
+def landed(task_id, model="sonnet"):
+    return record(task_id, "landed", model=model, wall=900)
+
+
+def facts(records, readings=None, before=None, **overrides):
+    """This Cycle's facts: `records` after the run, and before it each launched one had no record
+    unless `before` says otherwise. The model each died on is the record's own."""
+    after = {rec["id"]: rec for rec in records}
+    values = dict(before=before or {}, after=after, readings=readings or {},
+                  died_on={task_id: rec["model"] for task_id, rec in after.items()},
+                  listed_on={task_id: rec["model"] for task_id, rec in after.items()},
+                  fallback={}, marks={}, streak=0, halts={}, deferred=frozenset(),
+                  passed_over=frozenset(), retries=frozenset(), now=NOW, settings=SETTINGS)
+    values.update(overrides)
+    return limits.CycleFacts(**values)
+
+
+def fallback_mark(since=NOW):
+    return limits.Mark(since=since, until=since + FIVE_HOURS, source=limits.MARK_FALLBACK_HOURS)
+
+
+class AfterRun(unittest.TestCase):
+    """`decide_after_run`: one Cycle's facts in, one decision record out."""
+
+    def decide(self, *args, **kwargs):
+        return limits.decide_after_run(facts(*args, **kwargs))
+
+    def assertGoesRound(self, decision):
+        self.assertEqual(decision.outcome, limits.GO_ROUND)
+
+    def test_ae1_the_mutual_fallback_walk_marks_moves_holds_and_moves_back(self):
+        """Covers AE1. Sonnet lands beside T every Cycle, so the streak never moves off 0."""
+        # Cycle 1: T dies on fable with a 429. Fable is marked and T moves to opus.
+        first = self.decide([record("T", "blocked", "fable"), landed("S1")],
+                            {"T": CONFIRMED}, fallback=MUTUAL)
+        self.assertEqual(first.marks, {"fable": fallback_mark()})
+        self.assertEqual(first.notify, ("fable",))
+        self.assertEqual(first.moves, (("T", "fable", "opus"),))
+        self.assertEqual((first.holds, first.retry, first.report), ((), ("T",), ()))
+        self.assertEqual(first.streak, 0)
+        self.assertGoesRound(first)
+        marks = dict(first.marks)
+
+        # Cycle 2 starts an hour later: T is listed on opus, which is free, so it is retried.
+        later = NOW + timedelta(hours=1)
+        start = limits.plan_cycle_start(["T"], {"T"}, {"T": "opus"}, marks, MUTUAL, later,
+                                        SETTINGS)
+        self.assertEqual((start.moves, start.retry, start.defer), ((), ("T",), ()))
+        # T dies on opus with a 429. Opus is marked, fable is still marked, so T is held.
+        second = self.decide([record("T", "blocked", "opus", started="2026-09-27T21:06:00"),
+                              landed("S2")], {"T": CONFIRMED},
+                             before={"T": record("T", "blocked", "fable")},
+                             fallback=MUTUAL, marks=marks, now=later)
+        self.assertEqual(second.marks, {"opus": fallback_mark(later)})
+        self.assertEqual(second.notify, ("opus",))
+        self.assertEqual((second.moves, second.holds), ((), (("T", "opus"),)))
+        self.assertEqual((second.retry, second.report, second.streak), (("T",), (), 0))
+        self.assertGoesRound(second)
+        marks.update(second.marks)
+
+        # While both marks stand, T is held: not retried, not deferred, keeping its queue place.
+        held = limits.plan_cycle_start(["T"], {"T"}, {"T": "opus"}, marks, MUTUAL,
+                                       later + timedelta(hours=1), SETTINGS)
+        self.assertEqual((held.moves, held.retry, held.defer, held.held),
+                         ((), (), (), (("T", "opus"),)))
+
+        # Fable's mark expires: T moves back to fable before the run and is retried there.
+        back = limits.plan_cycle_start(["T"], {"T"}, {"T": "opus"}, marks, MUTUAL,
+                                       NOW + FIVE_HOURS + timedelta(minutes=1), SETTINGS)
+        self.assertEqual((back.moves, back.retry, back.defer),
+                         ((("T", "opus", "fable"),), ("T",), ()))
+
+    def test_ae2_a_quick_unconfirmed_blocked_death_beside_a_landing_is_reported(self):
+        """Covers AE2."""
+        decision = self.decide([record("T", "blocked", "fable"), landed("S")],
+                               {"T": UNCONFIRMED}, fallback=MUTUAL)
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+        self.assertEqual((decision.report, decision.retry), (("T",), ()))
+        self.assertGoesRound(decision)
+
+    def test_ae3_a_landing_does_not_keep_two_confirmed_deaths_off_their_model(self):
+        """Covers AE3."""
+        decision = self.decide([landed("1", "fable"), record("2", "blocked", "fable"),
+                                record("3", "blocked", "fable")],
+                               {"2": CONFIRMED, "3": CONFIRMED})
+        self.assertEqual(set(decision.marks), {"fable"})
+        self.assertEqual(decision.holds, (("2", "fable"), ("3", "fable")))
+        self.assertEqual((decision.moves, decision.retry, decision.report), ((), ("2", "3"), ()))
+        # The next Cycle routes no card to fable: it is held, and so are 2 and 3.
+        self.assertTrue(limits.is_held("fable", decision.marks, {}, NOW))
+        start = limits.plan_cycle_start(["2", "3"], {"2", "3"}, {"2": "fable", "3": "fable"},
+                                        decision.marks, {}, NOW, SETTINGS)
+        self.assertEqual((start.retry, start.defer, start.room), ((), (), 3))
+
+    def test_ae4_a_quick_halt_with_a_404_is_an_ordinary_halt(self):
+        """Covers AE4."""
+        decision = self.decide([record("T", "halted", "fable", halt_class="unclean_exit")],
+                               {"T": REFUTED}, fallback={"fable": "opus"})
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+        self.assertEqual(decision.halts, {"T": 1})
+        self.assertEqual(decision.exclude, ())
+
+    def test_a_landing_on_the_same_model_does_not_stop_the_move_either(self):
+        decision = self.decide([landed("1", "fable"), record("2", "blocked", "fable")],
+                               {"2": CONFIRMED}, fallback={"fable": "opus"})
+        self.assertEqual(set(decision.marks), {"fable"})
+        self.assertEqual((decision.moves, decision.holds), ((("2", "fable", "opus"),), ()))
+        self.assertEqual(decision.retry, ("2",))
+
+    def test_two_models_that_fall_back_to_each_other_both_die_and_both_hold(self):
+        decision = self.decide([record("A", "blocked", "fable"), record("B", "blocked", "opus"),
+                                landed("S")], {"A": CONFIRMED, "B": CONFIRMED}, fallback=MUTUAL)
+        self.assertEqual(set(decision.marks), {"fable", "opus"})
+        self.assertEqual(decision.notify, ("fable", "opus"))
+        self.assertEqual(decision.moves, ())
+        self.assertEqual(decision.holds, (("A", "fable"), ("B", "opus")))
+
+    def test_a_confirmed_halted_death_is_never_counted_moved_or_held(self):
+        for table, moves, holds in (({"fable": "opus"}, (("T", "fable", "opus"),), ()),
+                                    ({}, (), (("T", "fable"),))):
+            with self.subTest(fallback=table):
+                decision = self.decide([record("T", "halted", "fable")], {"T": CONFIRMED},
+                                       fallback=table, halts={"T": 1})
+                self.assertEqual((decision.moves, decision.holds), (moves, holds))
+                self.assertEqual((decision.halts, decision.exclude), ({}, ()))
+                # A halted Task is not a retry: the next run launches it, or it is deferred.
+                self.assertEqual(decision.retry, ())
+
+    def test_a_confirmed_death_on_a_marked_model_restamps_quietly(self):
+        old = fallback_mark(NOW - timedelta(hours=1))
+        decision = self.decide([record("T", "halted", "fable")], {"T": CONFIRMED},
+                               marks={"fable": old})
+        self.assertEqual(decision.marks, {"fable": fallback_mark()})
+        self.assertEqual(decision.notify, ())
+
+    def test_ae6_three_unconfirmed_quick_deaths_and_no_landing_wait(self):
+        """Covers AE6."""
+        decision = self.decide([record("A", "halted"), record("B", "halted", "opus"),
+                                record("C", "blocked", "sonnet")],
+                               {"A": UNCONFIRMED, "B": UNCONFIRMED, "C": UNCONFIRMED},
+                               streak=0)
+        self.assertEqual(decision.outcome, limits.Outcome(limits.WAIT, reason="usage_limit",
+                                                          seconds=1800))
+        self.assertEqual(decision.streak, 1)
+        self.assertEqual((decision.halts, decision.report), ({}, ()))
+        self.assertEqual(decision.retry, ("C",))
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+
+    def test_a_confirmed_death_beside_an_unconfirmed_one_still_marks_and_waits(self):
+        decision = self.decide([record("A", "blocked", "fable"), record("B", "halted", "opus")],
+                               {"A": CONFIRMED, "B": UNCONFIRMED}, fallback={"fable": "sonnet"})
+        self.assertEqual(set(decision.marks), {"fable"})
+        self.assertEqual(decision.moves, (("A", "fable", "sonnet"),))
+        self.assertEqual(decision.retry, ("A",))
+        self.assertEqual(decision.outcome.kind, limits.WAIT)
+        self.assertEqual(decision.outcome.reason, "usage_limit")
+        self.assertEqual((decision.streak, decision.halts), (1, {}))
+
+    def test_every_death_confirmed_and_moved_does_not_wait(self):
+        decision = self.decide([record("A", "blocked", "fable"), record("B", "halted", "fable")],
+                               {"A": CONFIRMED, "B": CONFIRMED}, fallback={"fable": "opus"},
+                               streak=3)
+        self.assertEqual(len(decision.moves), 2)
+        self.assertGoesRound(decision)
+        self.assertEqual(decision.streak, 3)
+
+    def test_a_landing_beside_an_unconfirmed_quick_halt_counts_it_and_clears_the_streak(self):
+        decision = self.decide([record("A", "halted"), landed("S")], {"A": UNCONFIRMED},
+                               streak=3)
+        self.assertEqual(decision.halts, {"A": 1})
+        self.assertEqual(decision.streak, 0)
+        self.assertGoesRound(decision)
+
+    def test_a_slow_death_alone_clears_the_streak(self):
+        decision = self.decide([record("A", "halted", wall=3000)], {"A": REFUTED}, streak=3)
+        self.assertEqual((decision.halts, decision.streak), ({"A": 1}, 0))
+        self.assertGoesRound(decision)
+
+    def test_nothing_dying_clears_the_streak(self):
+        self.assertEqual(self.decide([landed("S")], streak=3).streak, 0)
+        self.assertEqual(self.decide([], streak=3).streak, 0)
+
+    def test_one_more_waited_cycle_past_the_maximum_leaves(self):
+        decision = self.decide([record("A", "halted"), record("C", "blocked", "sonnet")],
+                               {"A": UNCONFIRMED, "C": UNCONFIRMED}, streak=16)
+        self.assertEqual(decision.outcome, limits.Outcome(
+            limits.LEAVE, reason="limit_waits_exhausted", code=limits.LEAVE_EXIT))
+        self.assertEqual(limits.LEAVE_EXIT, 2)
+        self.assertEqual((decision.report, decision.retry), (("C",), ()))
+        self.assertEqual((decision.streak, decision.halts), (0, {}))
+
+    def test_the_last_wait_before_the_maximum_still_waits(self):
+        decision = self.decide([record("A", "halted")], {"A": UNCONFIRMED}, streak=15)
+        self.assertEqual((decision.outcome.kind, decision.streak), (limits.WAIT, 16))
+
+    def test_an_unlaunched_blocked_record_with_a_429_marks_and_moves_nothing(self):
+        stale = record("T", "blocked", "fable", started=BEFORE_RUN)
+        for queued in (frozenset(), frozenset({"T"})):
+            with self.subTest(queued=bool(queued)):
+                decision = self.decide([stale], {"T": CONFIRMED}, before={"T": stale},
+                                       fallback={"fable": "opus"}, retries=queued)
+                self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+                self.assertEqual(decision.retry, ())
+                # Still queued, the run never reached it: its report was made when it blocked.
+                self.assertEqual(decision.report, () if queued else ("T",))
+
+    def test_ae8_a_halt_refused_before_launch_is_counted_and_excluded_at_max_halts(self):
+        """Covers AE8. Refused in two Cycles in a row."""
+        stale = record("T", "halted", started=BEFORE_RUN, halt_class="unclean_exit")
+        first = self.decide([stale], {"T": CONFIRMED}, before={"T": stale})
+        self.assertEqual((first.halts, first.exclude, first.marks), ({"T": 1}, (), {}))
+        second = self.decide([stale], {"T": CONFIRMED}, before={"T": stale}, halts=first.halts)
+        self.assertEqual((second.halts, second.exclude), ({"T": 2}, ("T",)))
+
+    def test_a_halt_deferred_or_passed_over_is_not_counted(self):
+        stale = record("T", "halted", started=BEFORE_RUN)
+        for key in ("deferred", "passed_over"):
+            with self.subTest(key=key):
+                decision = self.decide([stale], {"T": REFUTED}, before={"T": stale},
+                                       **{key: frozenset({"T"})})
+                self.assertEqual((decision.halts, decision.exclude, decision.report),
+                                 ({}, (), ()))
+
+    def test_ae9_the_mark_ends_at_the_cli_reset_when_it_lies_ahead(self):
+        """Covers AE9."""
+        ahead = self.decide([record("T", "halted")], {"T": (limits.CONFIRMED, RESET)})
+        self.assertEqual(ahead.marks, {"fable": limits.Mark(
+            since=NOW, until=RESET, source=limits.MARK_CLI)})
+        self.assertEqual(RESET - NOW, timedelta(minutes=14))
+        past = self.decide([record("T", "halted")],
+                           {"T": (limits.CONFIRMED, NOW - timedelta(minutes=1))})
+        self.assertEqual(past.marks, {"fable": fallback_mark()})
+
+    def test_an_ordinary_halt_at_max_halts_minus_one_is_excluded(self):
+        decision = self.decide([record("T", "halted", wall=3000)], {"T": REFUTED},
+                               halts={"T": SETTINGS.max_halts - 1})
+        self.assertEqual((decision.halts, decision.exclude), ({"T": 2}, ("T",)))
+
+    def test_a_confirmed_death_on_no_known_model_is_still_never_counted(self):
+        bare = dict(record("T", "halted"), model=None)
+        decision = self.decide([bare], {"T": CONFIRMED}, died_on={}, listed_on={})
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+        self.assertEqual((decision.halts, decision.report), ({}, ()))
+
+    def test_a_landing_from_an_earlier_cycle_is_not_a_landing_now(self):
+        old = landed("S")
+        decision = self.decide([old, record("A", "halted")], {"A": UNCONFIRMED},
+                               before={"S": old})
+        self.assertEqual((decision.outcome.reason, decision.streak), ("usage_limit", 1))
+
+    def test_deferred_and_passed_over_may_be_any_collection(self):
+        stale = record("T", "halted", started=BEFORE_RUN)
+        decision = self.decide([stale], before={"T": stale}, deferred=["T"], passed_over=[])
+        self.assertEqual(decision.halts, {})
+
+    def test_a_launched_death_with_no_reading_is_ordinary(self):
+        decision = self.decide([record("T", "halted", wall=3000)], {})
+        self.assertEqual((decision.halts, decision.marks), ({"T": 1}, {}))
+
+    def test_the_facts_are_left_as_they_were(self):
+        marks = {"opus": fallback_mark()}
+        cycle = facts([record("T", "blocked", "fable")], {"T": CONFIRMED}, marks=marks,
+                      fallback=MUTUAL, halts={"X": 1})
+        limits.decide_after_run(cycle)
+        self.assertEqual((marks, cycle.halts), ({"opus": fallback_mark()}, {"X": 1}))
+
+
+class CycleStart(unittest.TestCase):
+    """`plan_cycle_start`: the moves, retries, and deferrals before a run, and the R7 wait."""
+
+    def plan(self, unsettled, retries, listed_on, marks, table=None, now=NOW, settings=SETTINGS):
+        return limits.plan_cycle_start(unsettled, retries, listed_on, marks, table or {}, now,
+                                       settings)
+
+    def test_a_queued_retry_on_a_marked_model_with_a_free_fallback_moves_and_retries(self):
+        start = self.plan(["T"], {"T"}, {"T": "fable"}, {"fable": fallback_mark()},
+                          {"fable": "opus"})
+        self.assertEqual((start.moves, start.retry, start.defer, start.held),
+                         ((("T", "fable", "opus"),), ("T",), (), ()))
+        self.assertIsNone(start.wait)
+
+    def test_ae5_a_halted_task_on_a_held_model_is_deferred(self):
+        """Covers AE5. Its halt is untouched: the start of a Cycle counts nothing."""
+        start = self.plan(["T"], set(), {"T": "fable"}, {"fable": fallback_mark()})
+        self.assertEqual((start.moves, start.retry, start.defer), ((), (), ("T",)))
+        self.assertEqual(start.held, (("T", "fable"),))
+
+    def test_a_task_with_no_record_on_a_held_model_is_deferred(self):
+        start = self.plan(["T"], set(), {"T": "fable"}, {"fable": fallback_mark()}, MUTUAL)
+        # Opus is free, so T moves rather than defers; with opus marked too it is deferred.
+        self.assertEqual(start.moves, (("T", "fable", "opus"),))
+        both = {"fable": fallback_mark(), "opus": fallback_mark()}
+        held = self.plan(["T"], set(), {"T": "fable"}, both, MUTUAL)
+        self.assertEqual((held.moves, held.defer), ((), ("T",)))
+
+    def test_ae10_held_tasks_take_no_room_in_the_batch(self):
+        """Covers AE10."""
+        start = self.plan(["A", "B"], set(), {"A": "fable", "B": "fable"},
+                          {"fable": fallback_mark()})
+        self.assertEqual(start.defer, ("A", "B"))
+        self.assertEqual(start.room, 3)
+        busy = self.plan(["A", "C"], set(), {"A": "fable", "C": "sonnet"},
+                         {"fable": fallback_mark()})
+        self.assertEqual(busy.room, 2)
+
+    def test_only_held_work_waits_no_longer_than_the_earliest_mark(self):
+        def at(minutes):
+            return limits.Mark(since=NOW, until=NOW + timedelta(minutes=minutes),
+                               source=limits.MARK_CLI)
+        listed = {"A": "fable", "B": "opus"}
+        start = self.plan(["A", "B"], set(), listed, {"fable": at(40), "opus": at(90)})
+        self.assertEqual(start.wait, limits.Outcome(limits.WAIT, reason="model_held",
+                                                    seconds=1800))
+        soon = self.plan(["A", "B"], set(), listed, {"fable": at(10), "opus": at(90)})
+        self.assertEqual(soon.wait.seconds, 600)
+
+    def test_a_held_task_waits_on_the_earliest_mark_along_its_chain(self):
+        marks = {"fable": fallback_mark(), "opus": limits.Mark(
+            since=NOW, until=NOW + timedelta(minutes=10), source=limits.MARK_CLI)}
+        start = self.plan(["T"], set(), {"T": "fable"}, marks, MUTUAL)
+        self.assertEqual((start.defer, start.wait.seconds), (("T",), 600))
+
+    def test_runnable_work_beside_held_work_asks_for_no_wait(self):
+        start = self.plan(["A", "C"], set(), {"A": "fable", "C": "sonnet"},
+                          {"fable": fallback_mark()})
+        self.assertIsNone(start.wait)
+        self.assertEqual(start.defer, ("A",))
+
+    def test_no_marks_leave_everything_as_it_was(self):
+        start = self.plan(["A", "B", "C"], {"B", "C"},
+                          {"A": "fable", "B": "opus", "C": "sonnet"}, {})
+        self.assertEqual((start.moves, start.defer, start.held), ((), (), ()))
+        self.assertEqual(start.retry, ("B", "C"))
+        self.assertEqual((start.room, start.wait), (0, None))
+
+    def test_a_task_listed_with_no_model_is_read_on_the_default(self):
+        start = limits.plan_cycle_start(["T"], ["T"], {}, {"opus": fallback_mark()}, {}, NOW,
+                                        SETTINGS, default_model="opus")
+        self.assertEqual((start.retry, start.held), ((), (("T", "opus"),)))
+
+    def test_retries_keep_the_order_they_were_given(self):
+        start = self.plan([], ["9", "10"], {}, {})
+        self.assertEqual(start.retry, ("9", "10"))
+
+    def test_an_expired_mark_holds_nothing(self):
+        stale = fallback_mark(NOW - FIVE_HOURS - timedelta(minutes=1))
+        start = self.plan(["T"], set(), {"T": "fable"}, {"fable": stale})
+        self.assertEqual((start.moves, start.defer, start.room), ((), (), 2))
+
+
+class ResolveFallback(unittest.TestCase):
+    def test_the_chain_is_walked_once_and_never_loops(self):
+        table = {"a": "b", "b": "c", "c": "a"}
+        self.assertEqual(limits.resolve_fallback("a", table, set()), "b")
+        self.assertEqual(limits.resolve_fallback("a", table, {"b"}), "c")
+        self.assertIsNone(limits.resolve_fallback("a", table, {"b", "c"}))
+        self.assertIsNone(limits.resolve_fallback("z", table, set()))
 
 
 if __name__ == "__main__":
