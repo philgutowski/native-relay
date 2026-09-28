@@ -1080,6 +1080,272 @@ class HeldModel(FeederCase):
         self.assertNotIn("would offer 2", out)
 
 
+# The first line of an attempt, which the reader needs to find where the last attempt begins.
+INIT_LINE = {"type": "system", "subtype": "init", "session_id": "s"}
+
+
+def reset_log(reset):
+    """A limit death's log whose rejected `rate_limit_event` says the limit lifts at `reset`, a
+    local time, the shape of the real log the plan's Sources record."""
+    rejected = {"type": "rate_limit_event",
+                "rate_limit_info": {"status": "rejected", "resetsAt": int(reset.timestamp()),
+                                    "rateLimitType": "five_hour"}}
+    return "".join(json.dumps(line) + "\n" for line in (INIT_LINE, rejected, LIMIT_RESULT))
+
+
+def mark(until, since="2026-09-19T08:00:00", source="fallback_hours"):
+    return {"since": since, "until": until, "source": source}
+
+
+class LimitMachine(FeederCase):
+    """U4 of the usage limit plan: the Feeder applies the machine's decisions at the start of a
+    Cycle and after its run. Every wait here moves the clock, since a mark's expiry is what ends
+    a `model_held` wait."""
+    clock_moves = True
+    blocked = BlockedLimit.blocked
+    MUTUAL = feeder.Config(default_model="sonnet",
+                           model_fallback={"fable": "opus", "opus": "fable"})
+
+    def listing(self, *pairs, **records):
+        """A manifest listing (id, model) pairs, and a summary record for each id in `records`."""
+        self.write(self.manifest_path, self.head + "".join(
+            '[[tasks]]\nid = "%s"\nmodel = "%s"\neffort = "high"\n\n' % pair for pair in pairs))
+        for task_id, record in records.items():
+            self.records[task_id.lstrip("_")] = dict(record, id=task_id.lstrip("_"))
+
+    def test_ae2_an_unconfirmed_death_beside_a_landing_is_one_blocked_report(self):
+        """Covers AE2, defect 1. Mutual fallback, a block in eight seconds with nothing in its
+        log, and landings beside it: no mark, no move, one report, and no relaunch after."""
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.blocked(8, log="")}, {}, {}]
+        self.feed(self.MUTUAL)
+        self.assertEqual(self.ran_on[0]["1"], "fable")
+        self.assertTrue(all("1" not in launched for launched in self.ran_on[1:]))
+        self.assertEqual(self.retries, [[]] * len(self.runs))
+        self.assertEqual(self.models()["1"], "fable")
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["retry_blocked"], {})
+        hits = [note for note in self.notes if "1 blocked; a later run will not retry it" in note]
+        self.assertEqual(len(hits), 1, self.notes)
+        self.assertEqual(self.events("limit"), [])
+
+    def test_a_queued_retry_on_a_marked_model_relaunches_on_its_free_fallback(self):
+        self.listing(("1", "fable"), _1={"status": "blocked", "model": "fable",
+                                         "started_at": "old", "wall_seconds": 4})
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), retry_blocked={"1": "old"},
+            exhausted={"fable": mark("2026-09-19T12:00:00")})))
+        self.adapter.ready_cards = []
+        self.plans = [{}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}))
+        self.assertEqual(self.retries, [["1"]])
+        self.assertEqual(self.ran_on[0], {"1": "opus"})
+        self.assertEqual(self.models(), {"1": "opus"})
+        self.assertEqual(self.records["1"]["status"], "landed")
+        [move] = self.events("limit")
+        self.assertEqual((move["action"], move["model"], move["to"], move["tasks"],
+                          move["until"]), ("move", "fable", "opus", ["1"], "2026-09-19T12:00:00"))
+
+    def test_a_move_the_manifest_edit_refuses_leaves_the_task_held_and_the_mark_made(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.plans = [{"1": self.limit_halt()}, {}]
+        config = feeder.Config(model_fallback={"fable": "opus"})
+        refusal = manifestedit.EditError("the edit was refused")
+        with mock.patch.object(feeder.manifestedit, "set_model", side_effect=refusal):
+            self.feed(config, once=True)
+            self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+            self.assertEqual(self.models()["1"], "fable")
+            self.assertEqual(self.state()["halts"], {})
+            self.assertIn("1 could not be moved from fable to opus, so it is held on fable: the "
+                          "edit was refused", self.log_text())
+            self.assertEqual([(event["action"], event["tasks"]) for event in self.events("limit")],
+                             [("mark", ["1"]), ("hold", ["1"])])
+            # The next Cycle tries the move again, is refused again, and leaves 1 alone.
+            self.adapter.ready_cards = [card(1), card(2), card(3)]
+            self.feed(config, once=True)
+        self.assertEqual(self.defers[-1], ["1"])
+        self.assertEqual(self.ran_on[-1], {"3": "opus"})
+        self.assertEqual(self.state()["halts"], {})
+
+    def test_only_held_work_waits_once_no_longer_than_the_earliest_mark(self):
+        self.listing(("7", "fable"), ("8", "opus"))
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), exhausted={
+            "fable": mark("2026-09-19T09:10:00"), "opus": mark("2026-09-19T10:00:00")})))
+        self.adapter.ready_cards = []
+        self.plans = [{}]
+        self.feed(feeder.Config(default_model="sonnet"))
+        # Twenty minutes to fable's expiry, under the half hour a wait is capped at.
+        waits = self.events("waiting")
+        self.assertEqual([(event["reason"], event["seconds"]) for event in waits],
+                         [("model_held", 1200)])
+        # fable's mark is gone by the Cycle after the wait; opus's is not.
+        self.assertEqual(self.ran_on, [{"7": "fable"}])
+        self.assertEqual(self.defers, [["8"]])
+
+    def test_a_mark_a_move_and_a_hold_each_write_one_limit_event(self):
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        self.write(self.paths.routing, "1 fable\n2 sonnet\n")
+        self.plans = [{"1": self.limit_halt(), "2": self.limit_halt()}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        events = self.events("limit")
+        self.assertEqual([(event["action"], event["model"], event["to"], event["tasks"])
+                          for event in events],
+                         [("mark", "fable", None, ["1"]), ("mark", "sonnet", None, ["2"]),
+                          ("move", "fable", "opus", ["1"]), ("hold", "sonnet", None, ["2"])])
+        for event in events:
+            self.assertTrue({"action", "model", "to", "tasks", "until"} <= set(event), event)
+            self.assertEqual(event["until"], "2026-09-19T13:50:00")
+            # The five reserved names are the feeder's own, untouched by the event's fields.
+            self.assertEqual((event["event"], event["manifest"], event["pid"], event["cycle"],
+                              event["at"]),
+                             ("limit", self.paths.manifest, os.getpid(), 1,
+                              "2026-09-19T08:50:00"))
+
+    def test_a_waited_cycle_beside_a_hook_that_holds_is_held_and_notified(self):
+        self.plans = [{"1": halted(30), "2": halted(30), "3": halted(30)}, {}]
+        config = feeder.Config(post_cycle_command=("python3", "-c", "import sys; sys.exit(1)"),
+                               post_cycle_hold=True)
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.state()["limit_waits"], 1)
+        self.assertEqual(self.events()[-1]["reason"], "post_cycle_held")
+        self.assertTrue(any("post_cycle_hold is on" in note for note in self.notes), self.notes)
+
+    def test_a_run_that_exits_3_or_1_applies_no_decision(self):
+        for code in (feeder.EXIT_LEASE, feeder.EXIT_CONFIG):
+            with self.subTest(code=code):
+                self.tearDown()
+                self.setUp()
+                self.listing(("1", "opus"))
+                marks = {"fable": mark("2026-09-19T12:00:00")}
+                self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                             exhausted=marks)))
+                self.adapter.ready_cards = []
+                death = dict(self.limit_halt(), id="1", model="opus", started_at="during")
+                self.before_run = lambda: self.records.update({"1": death})
+                self.plans = [code]
+                self.feed(feeder.Config(model_fallback={"opus": "fable"}))
+                self.assertEqual(self.state()["exhausted"], marks)
+                self.assertEqual(self.state()["halts"], {})
+                self.assertEqual(self.models(), {"1": "opus"})
+                self.assertEqual(self.events("limit"), [])
+
+    def test_ae8_a_halt_refused_before_launch_twice_is_counted_twice_and_excluded(self):
+        """Covers AE8. Its log is the old attempt's and carries a 429, which is no evidence
+        now: the run never launched it."""
+        self.listing(("2", "fable"), _2=dict(self.limit_halt(), model="fable",
+                                             started_at="old"))
+        self.adapter.ready_cards = []
+        self.plans = [{"2": UNREACHED}, {"2": UNREACHED}]
+        self.feed(feeder.Config(model_fallback={"fable": "opus"}))
+        self.assertEqual(self.state()["halts"], {"2": 2})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), {"2"})
+        self.assertTrue(any("2 excluded after 2 halts" in note for note in self.notes),
+                        self.notes)
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.models(), {"2": "fable"})
+
+    def test_ae10_held_tasks_take_no_room_in_the_batch(self):
+        """Covers AE10. Two never launched Tasks on held fable are deferred, and all three sonnet
+        cards are appended."""
+        self.listing(("7", "fable"), ("8", "fable"))
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"fable": mark("2026-09-19T12:00:00")})))
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        self.plans = [{}]
+        self.feed(feeder.Config(default_model="sonnet"))
+        self.assertEqual(self.defers, [["7", "8"]])
+        self.assertEqual(self.runs, [["7", "8", "1", "2", "3"]])
+        self.assertEqual(self.ran_on, [{"1": "sonnet", "2": "sonnet", "3": "sonnet"}])
+
+    def passed_over_once(self):
+        """1, 2, and 3 listed on fable, 2 and 3 halted once already. The first run: 1 blocks with
+        a 429 and the run passes over 2 and 3 under R11."""
+        slow = dict(halted(5000), model="fable", started_at="old")
+        self.listing(("1", "fable"), ("2", "fable"), ("3", "fable"), _2=slow, _3=slow)
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     halts={"2": 1, "3": 1})))
+        self.adapter.ready_cards = []
+        self.config = feeder.Config(max_halts=5, model_fallback={"fable": "opus"})
+        self.feed(self.config, once=True)
+        self.assertEqual(self.state()["halts"], {"2": 1, "3": 1})
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+
+    def test_a_task_the_run_passed_over_is_not_counted_and_the_next_cycle_moves_it(self):
+        self.plans = [{"1": self.blocked(4), "2": PASSED_OVER, "3": PASSED_OVER}, {}]
+        self.passed_over_once()
+        self.feed(self.config, once=True)
+        self.assertEqual(self.ran_on[1], {"1": "opus", "2": "opus", "3": "opus"})
+        self.assertEqual(self.retries[1], ["1"])
+        self.assertEqual(self.state()["halts"], {"2": 1, "3": 1})
+
+    def test_a_run_that_wrote_no_terminal_record_is_not_read_through_the_one_before(self):
+        # The second run never reached 2 or 3 and left the first run's terminal record in
+        # place, which still names them: they are halts the run refused, and counted.
+        self.plans = [{"1": self.blocked(4), "2": PASSED_OVER, "3": PASSED_OVER},
+                      {"2": UNREACHED, "3": UNREACHED, NO_TERMINAL: True}]
+        self.passed_over_once()
+        self.feed(self.config, once=True)
+        self.assertEqual(self.run_record["limit_passed_over"],
+                         [{"task": "2", "model": "fable"}, {"task": "3", "model": "fable"}])
+        self.assertEqual(self.state()["halts"], {"2": 2, "3": 2})
+
+    def test_a_live_run_status_is_never_read_for_passed_over_ids(self):
+        data = {"run_status": "running", "terminal_written_at": "new",
+                "limit_passed_over": [{"task": "2", "model": "fable"}]}
+        start = feeder.CycleContext(terminal="old")
+        self.assertEqual(feeder.Feeder.passed_over(data, start), frozenset())
+        self.assertEqual(feeder.Feeder.passed_over(dict(data, run_status="completed"), start),
+                         frozenset({"2"}))
+        self.assertEqual(feeder.Feeder.passed_over(dict(data, run_status="completed",
+                                                        terminal_written_at="old"), start),
+                         frozenset())
+
+    def test_a_run_scoped_halt_whose_log_carries_a_429_is_the_limit(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.run_record = {"run_status": "halted", "halt_task": "1",
+                           "halt_class": "unexpected_error"}
+        self.plans = [{"1": self.limit_halt(halt_class="unexpected_error")}]
+        code = self.feed(feeder.Config(model_fallback={"fable": "opus"}), once=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+        self.assertEqual(self.models(), {"1": "opus"})
+        self.assertEqual(self.state()["halts"], {})
+        self.assertIn("its log confirms a usage limit", self.log_text())
+
+    def test_a_run_scoped_halt_with_no_429_still_stops_the_feeder(self):
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        self.run_record = {"run_status": "halted", "halt_task": "1",
+                           "halt_class": "unexpected_error"}
+        self.plans = [{"1": halted(8, "unexpected_error")}, {}]
+        self.assertEqual(self.feed(feeder.Config(model_fallback={"fable": "opus"})), 1)
+        self.assertEqual(self.events()[-1]["reason"], "run_scoped_halt")
+        self.assertEqual(self.state()["exhausted"], {})
+        self.assertEqual(self.state()["halts"], {})
+
+    def test_a_mark_sized_from_the_cli_reset_holds_until_the_reset_only(self):
+        """Covers AE9 through the Feeder. The reset is 14 minutes ahead, so the wait is 14
+        minutes and not five hours, and the task relaunches in the Cycle after it."""
+        self.adapter.ready_cards = [card(1)]
+        self.write(self.paths.routing, "1 fable\n")
+        reset = self.clock + timedelta(minutes=14)
+        self.plans = [{"1": self.blocked(4, log=reset_log(reset))}, {}]
+        self.feed(feeder.Config())
+        self.assertEqual(self.sleeps, [840])
+        self.assertEqual([(event["reason"], event["seconds"])
+                          for event in self.events("waiting")], [("model_held", 840)])
+        self.assertEqual(self.retries, [[], ["1"]])
+        self.assertEqual(self.ran_on[1], {"1": "fable"})
+        self.assertEqual(self.records["1"]["status"], "landed")
+        [marked] = [event for event in self.events("limit") if event["action"] == "mark"]
+        self.assertEqual(marked["until"], "2026-09-19T09:04:00")
+        self.assertTrue(any("marked until 2026-09-19T09:04:00, the reset the CLI printed" in note
+                            for note in self.notes), self.notes)
+
+
 class Exits(FeederCase):
     def test_the_stop_file_is_honoured_between_cycles(self):
         self.plans = [{}, {}, {}]
@@ -2483,6 +2749,40 @@ class RealRunner(FeederCase):
                                 "RELAY_MERGE_RANGE": "%s..%s" % (base, head)})
         self.assertNotEqual(base, head)
         self.assertIn("the post cycle hook exited 0", out.getvalue())
+
+    def test_a_limit_death_moves_to_its_fallback_through_the_real_runner(self):
+        """Usage limit plan, U4. The stub ends T-1 the way the CLI ends a turn at its limit, an
+        `init` line and a 429 `result`, and the runner records it blocked. The feeder reads the
+        log the runner wrote, marks fable, moves T-1 to opus, and the next Cycle retries it
+        there through the real `--retry-blocked`."""
+        self.queue_entry("no_envelope.jsonl", init=True, result_lines=[LIMIT_RESULT])
+        self.closeout_blocked("T-1")
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        env = self.base_env()
+        self.write(self.paths.routing, "T-1 fable\n")
+        config = feeder.Config(batch=1, caffeinate=False, default_model="sonnet",
+                               default_effort="low", model_fallback={"fable": "opus"})
+        deps = feeder.build_deps(config, env, sleep=self.sleeps.append,
+                                 child_stdout=subprocess.DEVNULL)
+        out = io.StringIO()
+        self.assertEqual(feeder.Feeder(self.paths, config, deps, env, out, once=True).run(), 0,
+                         out.getvalue())
+        self.assertIn("cycle result: landed [], halted [], blocked ['T-1']", out.getvalue())
+        self.assertIn("T-1 died of fable's usage limit, a 429 in the log", out.getvalue())
+        self.assertEqual(self.models(), {"T-1": "opus"})
+        self.assertEqual(set(feeder.read_state(self.paths)["exhausted"]), {"fable"})
+        self.assertEqual(set(feeder.read_state(self.paths)["retry_blocked"]), {"T-1"})
+
+        out = io.StringIO()
+        self.assertEqual(feeder.Feeder(self.paths, config, deps, env, out, once=True).run(), 0,
+                         out.getvalue())
+        self.assertIn("relaunching blocked ['T-1'] with --retry-blocked", out.getvalue())
+        self.assertIn("cycle result: landed ['T-1']", out.getvalue())
+        [record] = [task for task in deps.read_summary(mf.load(self.manifest_path))["tasks"]
+                    if task["id"] == "T-1"]
+        self.assertEqual((record["status"], record["model"]), ("landed", "opus"))
+        self.assertEqual(self.sleeps, [])
 
 
 class ReadyQueue(FeederCase):
