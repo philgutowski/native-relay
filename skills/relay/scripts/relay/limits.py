@@ -14,11 +14,17 @@ and class are never consulted, so a halted death is read exactly like a blocked 
 Beside a confirmed reading comes the reset time the CLI printed, when the last attempt carries a
 `rate_limit_event` whose status is `rejected` (KTD10), so a mark can end when the limit does.
 
+An attempt starts at whichever comes last of two lines: the CLI's own `init`, and the line the
+launcher appends before every launch (`attempt_line`). The second exists because an attempt that
+prints nothing, a binary that would not start or a CLI that died on a bad flag with plain text,
+has no `init` of its own, and without a line of the runner's the walk back would read the
+attempt before it as this death. A log written before that line existed reads as it always did.
+
 This module imports nothing from the feeder or the runner. Both read deaths through it.
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 # The HTTP status the CLI's `result` line carries as `api_error_status` when the account's
 # limit for the model is spent. Not `terminal_reason: api_error` alone: a model the account
@@ -33,6 +39,30 @@ UNCONFIRMED = "unconfirmed"
 # The `rate_limit_info.status` of the event the CLI prints when it refuses the turn. Not
 # `overageStatus`, which reads rejected on an account with overage off while the turn runs.
 RATE_LIMIT_REJECTED = "rejected"
+
+# The `subtype` of the `system` line the launcher writes to a process's log before starting it.
+# The runner's own name, so no CLI's event can be mistaken for it. Every reader of the log that
+# counts or prints lines passes it over; see `is_attempt_boundary`.
+ATTEMPT_SUBTYPE = "relay_attempt"
+
+
+def attempt_line(now=None):
+    """The boundary line for one launch, newline terminated: a `system` object with the runner's
+    own subtype and the launch time in UTC."""
+    moment = now or datetime.now(timezone.utc)
+    return json.dumps({"type": "system", "subtype": ATTEMPT_SUBTYPE,
+                       "at": moment.isoformat()}) + "\n"
+
+
+def is_attempt_boundary(event):
+    """True for the line `attempt_line` writes, and for nothing a CLI prints."""
+    return (isinstance(event, dict) and event.get("type") == "system"
+            and event.get("subtype") == ATTEMPT_SUBTYPE)
+
+
+def _is_attempt_start(event):
+    return is_attempt_boundary(event) or (
+        event.get("type") == "system" and event.get("subtype") == "init")
 
 
 def log_tail(path):
@@ -51,8 +81,9 @@ def log_tail(path):
 
 def _last_attempt(log_text):
     """The JSON events of the last attempt, newest first. The runner appends every attempt of a
-    task to one log, so the walk stops at the last attempt's own `init` line. A line that is
-    not a JSON object, a torn first line of a tail above all, is passed over."""
+    task to one log, so the walk stops at the last attempt's own `init` line or the launcher's
+    boundary line above it, whichever it meets first. A line that is not a JSON object, a torn
+    first line of a tail above all, is passed over."""
     for line in reversed((log_text or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -63,7 +94,7 @@ def _last_attempt(log_text):
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") == "system" and event.get("subtype") == "init":
+        if _is_attempt_start(event):
             return
         yield event
 

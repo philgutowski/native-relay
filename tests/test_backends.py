@@ -9,12 +9,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import fields
+from types import SimpleNamespace
 from unittest import mock
 
 import _paths  # noqa: F401
-from relay import backends, contracts, manifest as mf
+from relay import backends, classify, contracts, limits, manifest as mf
 
 
 PLACEHOLDERS = ("", "TODO", "TBD")
@@ -228,6 +230,68 @@ class ClaudeEvidence(unittest.TestCase):
         real = os.path.join(_paths.FIXTURES_DIR, "transcripts", "success.jsonl")
         evidence = module.normalize_transcript(real)
         self.assertTrue(evidence.opened)
+
+
+class AttemptBoundaryInTheLog(unittest.TestCase):
+    """Issue #94: the launcher writes its own boundary line into the stdout log before each
+    launch. The normalizers that read that log pass it over, so a Task classifies exactly as it
+    did before the line existed."""
+
+    CODEX = os.path.join(_paths.FIXTURES_DIR, "backends", "codex")
+    TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def logs(self, source):
+        """Two copies of one stdout log, the second with the boundary line above it."""
+        with open(source, encoding="utf-8") as handle:
+            body = handle.read()
+        plain = os.path.join(self.tmp.name, "plain.stdout.log")
+        marked = os.path.join(self.tmp.name, "marked.stdout.log")
+        with open(plain, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        with open(marked, "w", encoding="utf-8") as handle:
+            handle.write(limits.attempt_line() + body)
+        return plain, marked
+
+    def classify(self, transcript, log_path, backend):
+        launched = SimpleNamespace(timed_out=False, exit_code=0, log_path=log_path)
+        result = classify.classify(transcript, launched, backend=backend)
+        # The claude fallback names the log it read, and the two logs are two files.
+        if result["transcript_path"] == log_path:
+            result["transcript_path"] = "<log>"
+        return result
+
+    def test_a_claude_run_read_from_its_log_classifies_as_before(self):
+        missing = os.path.join(self.tmp.name, "no-transcript.jsonl")
+        plain, marked = self.logs(os.path.join(self.TRANSCRIPTS, "success.jsonl"))
+        before = self.classify(missing, plain, "claude")
+        self.assertEqual(before["envelope"]["status"], "complete")
+        self.assertEqual(self.classify(missing, marked, "claude"), before)
+
+    def test_a_codex_run_classifies_as_before(self):
+        last = os.path.join(self.CODEX, "last-message-complete.txt")
+        plain, marked = self.logs(os.path.join(self.CODEX, "stdout-complete.jsonl"))
+        before = self.classify(last, plain, "codex")
+        self.assertEqual(before["envelope"]["status"], "complete")
+        self.assertEqual(self.classify(last, marked, "codex"), before)
+
+    def test_a_log_holding_only_the_boundary_is_evidence_of_nothing(self):
+        path = os.path.join(self.tmp.name, "only.stdout.log")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(limits.attempt_line())
+        last = os.path.join(self.CODEX, "last-message-complete.txt")
+        codex = backends.build("codex")
+        evidence = codex.normalize_transcript(last, log_path=path)
+        self.assertEqual((evidence.decoded_events, evidence.lines[:-1]), (0, []))
+        self.assertFalse(codex.readable(last, evidence))
+        claude = backends.build("claude")
+        evidence = claude.normalize_transcript(os.path.join(self.tmp.name, "none"), log_path=path)
+        self.assertEqual((evidence.lines, evidence.source), ([], None))
 
 
 if __name__ == "__main__":

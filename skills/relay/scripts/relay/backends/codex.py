@@ -2,7 +2,7 @@
 import os
 import shlex
 
-from .. import contracts
+from .. import contracts, limits
 from . import (Evidence as _Evidence, TEXT_CHARS as _TEXT_CHARS, _decode_stream_line,
                _last_message_path, _parse_after_name_token, _read_jsonl, _record,
                _tool_call_event)
@@ -49,6 +49,10 @@ def normalize_transcript(transcript_path, log_path=None):
     decoded_events = 0
     if log_path:
         raw_lines, malformed, _log_opened = _read_jsonl(log_path)
+        # The launcher's attempt boundary is the runner's line, not an event Codex decoded, so a
+        # log holding only that line is still a log the process wrote nothing to (KTD4).
+        raw_lines = [(number, obj) for number, obj in raw_lines
+                     if not limits.is_attempt_boundary(obj)]
         decoded_events = len(raw_lines)
         for number, obj in raw_lines:
             for block in _tool_uses_of(obj):

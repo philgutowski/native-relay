@@ -1,5 +1,5 @@
 """Claude backend. Capability record from origin U1 pins."""
-from .. import contracts
+from .. import contracts, limits
 from . import (Evidence as _Evidence, TEXT_CHARS as _TEXT_CHARS, _argument_of,
                _decode_stream_line, _parse_leading_digit, _read_jsonl, _record, _tool_call_event)
 
@@ -34,6 +34,9 @@ def normalize_transcript(transcript_path, log_path=None):
         return _Evidence(lines=lines, malformed_lines=malformed, decoded_events=len(lines),
                          undetectable=frozenset(), opened=opened)
     fallback, fallback_malformed, fallback_opened = _read_jsonl(log_path)
+    # The launcher's attempt boundary is the runner's line, not the process's, so it neither
+    # counts toward the digest's line count nor stands as evidence of anything the CLI printed.
+    fallback = [(number, obj) for number, obj in fallback if not limits.is_attempt_boundary(obj)]
     if not any(obj.get("type") == contracts.TRANSCRIPT_TYPE_ASSISTANT for _, obj in fallback):
         # Opening the log is not the test, and neither is decoding it. The envelope lives in
         # the last assistant text block, so a capture holding no assistant record contains

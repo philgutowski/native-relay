@@ -145,6 +145,54 @@ class ReadDeath(unittest.TestCase):
                                  (limits.CONFIRMED, None))
 
 
+class AttemptBoundary(unittest.TestCase):
+    """Issue #94: the launcher's own line starts an attempt exactly as `init` does, so an attempt
+    that printed nothing is not read as the one before it."""
+
+    BOUNDARY = json.loads(limits.attempt_line())
+
+    def read(self, text, wall=0.01):
+        return limits.read_death(died(wall), text, QUICK)
+
+    def test_the_line_is_a_system_object_with_the_runners_subtype_and_the_time(self):
+        line = limits.attempt_line()
+        self.assertTrue(line.endswith("\n"))
+        event = json.loads(line)
+        self.assertEqual((event["type"], event["subtype"]), ("system", limits.ATTEMPT_SUBTYPE))
+        self.assertIsNotNone(datetime.fromisoformat(event["at"]).tzinfo)
+        self.assertTrue(limits.is_attempt_boundary(event))
+        self.assertFalse(limits.is_attempt_boundary(INIT))
+
+    def test_an_attempt_that_printed_nothing_after_a_429_is_unconfirmed(self):
+        text = log(self.BOUNDARY, INIT, REJECTED, LIMIT_RESULT) + log(self.BOUNDARY)
+        self.assertEqual(self.read(text), (limits.UNCONFIRMED, None))
+
+    def test_an_attempt_that_printed_nothing_after_a_success_is_unconfirmed(self):
+        text = log(self.BOUNDARY, INIT, ASSISTANT, DONE_RESULT) + log(self.BOUNDARY)
+        self.assertEqual(self.read(text), (limits.UNCONFIRMED, None))
+
+    def test_an_attempt_that_printed_its_own_429_confirms_with_its_own_reset(self):
+        later = dict(REJECTED, rate_limit_info=dict(REJECTED["rate_limit_info"],
+                                                    resetsAt=RESET_EPOCH + 3600))
+        text = (log(self.BOUNDARY, INIT, REJECTED, LIMIT_RESULT)
+                + log(self.BOUNDARY, INIT, later, LIMIT_RESULT))
+        self.assertEqual(self.read(text, wall=8),
+                         (limits.CONFIRMED, datetime.fromtimestamp(RESET_EPOCH + 3600)))
+
+    def test_an_attempt_that_printed_only_plain_text_is_unconfirmed(self):
+        text = (log(self.BOUNDARY, INIT, REJECTED, LIMIT_RESULT)
+                + log(self.BOUNDARY) + "error: unknown option '--bogus'\n")
+        self.assertEqual(self.read(text), (limits.UNCONFIRMED, None))
+
+    def test_the_boundary_above_an_init_does_not_move_the_attempt(self):
+        # A warning between the boundary and `init` still belongs to no attempt.
+        self.assertEqual(self.read(log(self.BOUNDARY, REJECTED, INIT, LIMIT_RESULT), wall=8),
+                         (limits.CONFIRMED, None))
+        self.assertEqual(limits.result_event(log(self.BOUNDARY, INIT, LIMIT_RESULT)),
+                         LIMIT_RESULT)
+        self.assertIsNone(limits.result_event(log(INIT, LIMIT_RESULT, self.BOUNDARY)))
+
+
 class LogTail(unittest.TestCase):
     def test_a_missing_file_reads_empty(self):
         self.assertEqual(limits.log_tail(None), "")
