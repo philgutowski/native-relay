@@ -273,6 +273,58 @@ class StopRules(LoopCase):
         self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_OPEN_FINDINGS)
         self.assertEqual(self.loop()["passes"][0]["commented"], ["7", "8"])
 
+    def test_a_tour_that_filed_only_a_planning_card_beside_dropped_findings_stops_on_open_findings(self):
+        """Issue #115: the attended planning card is a person's, not a new card. Without this
+        the tour read as productive, the drain tour found no ready card, and the feeder left
+        on the empty queue with no stop record and no notice."""
+        # A loop that toured before, with an empty queue, so the one pass is the drain tour.
+        self.seed(rounds=1, stopped_areas=["Search"])
+        planning = dict(finding(title="Plan the Search area after repeated patches"),
+                        attended=True, cause_file="docs/tour.md")
+        dropped = dict(finding(), outcome=testloop.DROPPED)
+        self.pass_script = [{"findings": [dropped, planning],
+                             "filed": [filed(14, attended=True, cause="docs/tour.md")]}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_OPEN_FINDINGS)
+        self.assertEqual(self.loop()["passes"][0]["filed"], ["14"])
+        self.assertTrue(self.loop()["filed"]["14"]["attended"])
+        self.assertEqual(len(self.events(feeder.EVENT_TEST_LOOP_STOPPED)), 1)
+        self.assertTrue(any("stopped, open_findings" in note for note in self.notes), self.notes)
+
+    def test_a_tour_with_only_lows_and_a_planning_card_stops_clean(self):
+        self.seed(rounds=1, stopped_areas=["Search"])
+        planning = dict(finding(title="Plan the Search area after repeated patches"),
+                        attended=True, cause_file="docs/tour.md")
+        self.pass_script = [{"findings": [finding("low", area="Cart"), planning],
+                             "filed": [filed(14, attended=True, cause="docs/tour.md")]}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_CLEAN)
+        self.assertEqual(self.loop()["planned_areas"], ["Search"])
+
+    def test_a_planning_card_counts_toward_neither_the_budget_nor_the_budget_stop(self):
+        """R17's budget is spent by the cards the loop asks the feeder to build; the planning
+        card is filed outside the per pass cap and outside the budget too."""
+        self.seed(rounds=1, stopped_areas=["Search"])
+        planning = dict(finding(title="Plan the Search area after repeated patches"),
+                        attended=True, cause_file="docs/tour.md")
+        self.pass_script = [{"findings": [finding(area="Cart"), planning],
+                             "filed": [filed(14, attended=True, cause="docs/tour.md"),
+                                       filed(15, area="Cart", cause="src/cart.py")]},
+                            {}]
+        self.plans = [{}]
+        self.feed_loop(max_cards_total=2)
+        tour, check = self.passes[:2]
+        self.assertEqual(tour["budget"], 2)
+        # One card against a budget of two after the tour, so the check has one left and the
+        # loop did not stop on the budget.
+        self.assertEqual((check["kind"], check["cards"], check["budget"]),
+                         (testloop.CHECK, ["15"], 1))
+        self.assertEqual(feeder.loop_cards_filed(self.loop()), 1)
+        self.assertEqual(set(self.loop()["filed"]), {"14", "15"})
+        self.assertNotEqual((self.loop()["stop"] or {}).get("reason"), testloop.STOP_BUDGET)
+
 
 class Areas(LoopCase):
     def test_an_area_at_the_patch_cap_is_stopped_and_planned_once(self):
@@ -358,6 +410,36 @@ class Failures(LoopCase):
         self.assertIn("timed out at 10:12", self.log_text())
         reported = [key for key in self.state()["reported"] if key.startswith("test_pass:")]
         self.assertEqual(sorted(reported), ["test_pass:check:failed", "test_pass:tour:failed"])
+
+    def test_a_failed_filing_step_is_notified_once_counts_no_round_and_does_not_stop_the_loop(self):
+        """Issue #115: a pass whose Filing step did not complete comes back `failed` with the
+        filing sentence and serious findings and no filed card. It is not a tour whose findings
+        produced no card, so the loop goes on, and the next tour is asked for the same thing."""
+        self.adapter.ready_cards = [card(1), card(2)]
+        failed = {"status": testloop.FAILED, "findings": [finding(), finding(area="Cart")],
+                  "reason": "the filing process timed out after 600 seconds"}
+        self.pass_script = [failed, {}, tour_filing(filed(10))]
+        self.plans = [{}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        # A tour that failed is no tour that ran, so the next cycle tours again first, the way
+        # it does after a `not_run` tour.
+        self.assertEqual(self.kinds()[:3], [(testloop.TOUR, []), (testloop.CHECK, ["1"]),
+                                            (testloop.TOUR, [])])
+        self.assertTrue(any("10" in run for run in self.runs), self.runs)
+        loop = self.loop()
+        self.assertEqual(loop["passes"][0]["status"], testloop.FAILED)
+        self.assertEqual(loop["passes"][0]["reason"], "the filing process timed out after 600 seconds")
+        self.assertEqual(loop["passes"][0]["filed"], [])
+        self.assertEqual(loop["passes"][0]["planned"], [])
+        ran_tours = [entry for entry in loop["passes"]
+                     if entry["kind"] == testloop.TOUR and entry["status"] == testloop.RAN]
+        self.assertEqual(loop["rounds"], len(ran_tours))
+        self.assertGreaterEqual(len(ran_tours), 1)
+        stopped = self.events(feeder.EVENT_TEST_LOOP_STOPPED)
+        self.assertNotIn(testloop.STOP_OPEN_FINDINGS, [event["reason"] for event in stopped])
+        notices = [note for note in self.notes if "tour test pass failed" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertIn("the filing process timed out", notices[0])
 
     def test_a_failure_after_a_pass_of_that_kind_ran_is_news_again(self):
         self.adapter.ready_cards = [card(1), card(2)]

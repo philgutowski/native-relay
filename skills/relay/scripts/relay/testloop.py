@@ -39,6 +39,12 @@ FAILED = "failed"
 
 LAST_GENERATION = 2
 
+# A finding carrying this key as true is the planning card of R19: the loop's own request that a
+# person plan an area it has stopped testing. It is not a finding about the app, so it is not
+# serious to `should_stop`, and the card it becomes is a person's, counted toward neither the
+# new cards of a pass nor the loop's card budget (R17). `filing.py` reads the key from here.
+ATTENDED_KEY = "attended"
+
 # What `select_findings` did with each finding, in the order the report gave them.
 FILE = "file"
 OUTCOME_LOW = LOW
@@ -144,6 +150,12 @@ def is_serious(finding):
     """True for a finding of a severity that becomes a card. Anything that is not a finding
     object, an invalid entry a report carried among them, is not serious."""
     return isinstance(finding, dict) and finding.get("severity") in FILED_SEVERITIES
+
+
+def is_attended(finding):
+    """True for the planning finding of R19, marked with `ATTENDED_KEY` true. It is filed high so
+    a person sees it, and it is still not a defect the tour found."""
+    return isinstance(finding, dict) and finding.get(ATTENDED_KEY) is True
 
 
 def _positive(name, value):
@@ -279,8 +291,10 @@ def area_patches(filed, checks, cap):
 @dataclass(frozen=True)
 class PassResult:
     """One pass, as `should_stop` reads it. `kind` TOUR or CHECK; `status` RAN, NOT_RUN, or
-    FAILED; `findings` every finding the report gave, of any outcome; `new_cards` the count of
-    new cards the pass confirmed filed, a comment on an open card not among them."""
+    FAILED; `findings` every finding the report gave, of any outcome, and the planning finding
+    the pass synthesized, which `should_stop` sets aside by its mark; `new_cards` the count of
+    new cards the pass confirmed filed, a comment on an open card and an attended planning card
+    both not among them."""
     kind: str
     status: str
     findings: tuple = ()
@@ -295,14 +309,15 @@ def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
     this pass's included.
 
     In order: a report only tour that ran stops; a tour that ran with no high or medium finding
-    of any outcome stops clean; the card budget stops any pass, one that did not run among
-    them, once `max_cards_total` is reached, and so names the budget rather than open findings
-    for a tour whose findings it kept from filing; a tour that ran whose high and medium
-    findings produced no new card, all commented onto open cards or dropped for stopped areas,
-    stops on open findings rather than clean; the round cap stops a tour that ran at
-    `max_rounds`; and the clock stops any pass. A check pass never stops on what it found. A
-    pass kind or status outside the known words raises ValueError rather than reading as a
-    pass that did not run."""
+    of any outcome stops clean, the planning finding of R19 not counted, since it is the loop's
+    request for a person and not a defect the tour found; the card budget stops any pass, one
+    that did not run among them, once `max_cards_total` is reached, and so names the budget
+    rather than open findings for a tour whose findings it kept from filing; a tour that ran
+    whose high and medium findings produced no new card, all commented onto open cards or
+    dropped for stopped areas, stops on open findings rather than clean, and a planning card
+    filed beside them is no new card; the round cap stops a tour that ran at `max_rounds`; and
+    the clock stops any pass. A check pass never stops on what it found. A pass kind or status
+    outside the known words raises ValueError rather than reading as a pass that did not run."""
     if result.kind not in _KINDS:
         raise ValueError("pass kind must be one of %s, not %r"
                          % (", ".join(_KINDS), result.kind))
@@ -312,7 +327,8 @@ def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
     toured = result.status == RAN and result.kind == TOUR
     if toured and report_only:
         return STOP_REPORT_ONLY
-    if toured and not any(is_serious(finding) for finding in result.findings):
+    if toured and not any(is_serious(finding) and not is_attended(finding)
+                          for finding in result.findings):
         return STOP_CLEAN
     if cards_filed >= settings.max_cards_total:
         return STOP_BUDGET

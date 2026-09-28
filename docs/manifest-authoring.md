@@ -617,18 +617,24 @@ design_note = ""
   model must be in `models.allowed`. While it is marked by a usage limit a pass runs on its
   `[models] fallback`, and when every model on that chain is held the pass waits for the next
   pass point. The Filing process runs on the manifest's `[closeout] model` under its closeout
-  timeout.
+  timeout. A Filing process that could not launch, timed out, lost the lease, left no readable
+  `relay-filed` block, or had its commit reset by the scope check fails the pass with that
+  sentence as its reason: the pass is `ran` only when a readable block was confirmed, so a
+  filing that did not complete is never read as findings that produced no card.
 - **`timeout_minutes`** bounds one Test process; past it the pass is `failed`.
 - **`max_rounds`** caps full tours that ran, **`max_hours`** caps the loop's clock from its
-  first pass, and **`max_cards_total`** caps the cards the whole loop files. Each stops the loop
-  with its own reason, below.
+  first pass, and **`max_cards_total`** caps the cards the whole loop files, the planning card
+  of `max_patches_per_area` not counted. Each stops the loop with its own reason, below.
 - **`max_cards_per_pass`** caps the cards one pass files. The high and medium findings past it,
   or past what is left of `max_cards_total`, are named in the pass record as over the cap or
   over the budget, and never filed.
 - **`max_patches_per_area`** is how many times an area's loop cards may land and have their
   check file in the same area again. At the cap the loop stops testing that area, and the next
   pass files one planning card for it labelled `attended`, outside the per pass cap, for a
-  person to plan.
+  person to plan. The planning card is a person's: it counts toward neither the loop's card
+  budget nor a pass's new cards, and it is not a finding to the stop rules, so a tour with
+  only lows beside it stops clean and a tour whose other findings all went to open cards or
+  stopped areas stops on open findings.
 - **`labels`** are put on every card the loop files. The ready source must admit a card carrying
   them, or the loop files cards nothing builds: on GitHub, without a ready command, every
   `[ready] labels` value must also be in `test_loop.labels`, and `relay test` refuses the sidecar
@@ -676,12 +682,15 @@ that holds is the stop, with its own reason word, written to the state file's st
 `max_rounds` and brings the loop to `max_cards_total` stops on `budget`, not `round_cap`.
 
 - `report_only`: a report only loop ran its one full tour.
-- `clean`: a full tour found nothing above low. A check pass with only lows never stops the
-  loop.
-- `budget`: the loop has filed `max_cards_total` cards. This is also asked before a pass starts.
+- `clean`: a full tour found nothing above low, an attended planning card not counted. A check
+  pass with only lows never stops the loop.
+- `budget`: the loop has filed `max_cards_total` cards, attended planning cards not counted.
+  This is also asked before a pass starts.
 - `open_findings`: a full tour's high and medium findings produced no new card, each going to an
-  open card it was commented onto, a stopped area, or a claim the tracker never confirmed. This
-  is not a clean stop.
+  open card it was commented onto, a stopped area, or a claim the tracker never confirmed, and
+  an attended planning card filed beside them is no new card. This is not a clean stop. A tour
+  whose Filing step did not complete is `failed`, not a tour that produced no card, and never
+  stops the loop this way.
 - `round_cap`: `max_rounds` full tours ran.
 - `clock_cap`: `max_hours` have passed since the loop started. This is also asked before a pass
   starts, so it stops the loop at the next pass point.

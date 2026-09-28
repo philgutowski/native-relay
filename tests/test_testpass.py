@@ -14,11 +14,13 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime
+from unittest import mock
 
 import _paths
 import _repo
-from relay import (cli, contracts, feeder, filing, gitread, manifest as mf, state, testbrief,
-                   testloop, testpass)
+from relay import (cli, contracts, feeder, filing, gitread, launch, manifest as mf, state,
+                   testbrief, testloop, testpass)
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
@@ -370,17 +372,19 @@ class TourAndFiling(PassCase):
                             extra="mkdir -p src\necho 'fixed = True' > src/search.py\n")
         head = gitread.rev_parse(self.repo, "HEAD")
         outcome, _ = self.run_pass()
-        self.assertEqual(outcome.exit_code, testpass.EXIT_OK)
+        # A reset filing is a filing that did not complete, so the pass is failed (issue #115).
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(gitread.rev_parse(self.repo, "HEAD"), head)
         self.assertEqual(outcome.record["filed"], [])
-        notes = "\n".join(outcome.record["notes"])
-        self.assertIn("src/search.py", notes)
-        self.assertIn("reset to %s" % head[:12], notes)
+        reason = outcome.record["reason"]
+        self.assertIn("src/search.py", reason)
+        self.assertIn("reset to %s" % head[:12], reason)
         # The card it claimed is not on main after the reset, so the claim is a note too.
-        self.assertIn("card T-2 claimed filed could not be read", notes)
+        self.assertIn("card T-2 claimed filed could not be read", "\n".join(outcome.record["notes"]))
         self.assert_checkout_clean()
 
-    def test_a_markdown_filing_that_leaves_the_tracker_uncommitted_is_reset_and_noted_as_such(self):
+    def test_a_markdown_filing_that_leaves_the_tracker_uncommitted_is_reset_and_failed_as_such(self):
         """Code review: the in scope but uncommitted shape is a different sentence from a path
         outside the bound, as `_run_closeout` tells the two apart."""
         self.test_process([finding(1)])
@@ -390,20 +394,70 @@ class TourAndFiling(PassCase):
         head = gitread.rev_parse(self.repo, "HEAD")
         outcome, _ = self.run_pass()
         self.assertEqual(gitread.rev_parse(self.repo, "HEAD"), head)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(outcome.record["filed"], [])
-        notes = "\n".join(outcome.record["notes"])
-        self.assertIn("left tracker.md changed and uncommitted", notes)
-        self.assertNotIn("outside", notes)
+        self.assertIn("left tracker.md changed and uncommitted", outcome.record["reason"])
+        self.assertNotIn("outside", outcome.record["reason"])
         self.assert_checkout_clean()
 
-    def test_a_filing_process_with_no_block_files_nothing_and_notes_the_error(self):
+    def test_a_filing_process_with_no_block_fails_the_pass_naming_the_block(self):
+        """Issue #115: a pass that filed nothing because its block could not be read is not a
+        pass whose findings produced no card, so it is failed rather than ran."""
         self.test_process([finding(1)])
         self.queue_entry(self.transcript("I filed it and forgot the block.", "filing-2"),
                          git_sh=filing_sh(["- [ ] T-2 Finding 1 [loop]"]))
         outcome, _ = self.run_pass()
-        self.assertEqual(outcome.record["status"], testloop.RAN)
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(outcome.record["filed"], [])
-        self.assertIn(contracts.FILED_FENCE_TAG, "\n".join(outcome.record["notes"]))
+        self.assertIn(contracts.FILED_FENCE_TAG, outcome.record["reason"])
+        self.assertIn("could not be read", outcome.record["reason"])
+        with open(outcome.path) as handle:
+            self.assertEqual(json.load(handle)["status"], testloop.FAILED)
+
+    def test_a_filing_process_that_times_out_fails_the_pass_naming_the_timeout(self):
+        self.test_process([finding(1)])
+        self.queue_entry(self.transcript(filed_text([{"finding": 1, "action": "filed",
+                                                      "id": "T-2"}]), "filing-2"),
+                         git_sh=filing_sh(["- [ ] T-2 Finding 1 [loop]"]), sleep=30)
+        outcome, _ = self.run_pass(timeout_overrides={"filing_seconds": 1})
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"], "the filing process timed out after 1 seconds")
+        self.assertEqual(outcome.record["filed"], [])
+        self.assertEqual(self.entries_taken(), 2)
+        self.assert_checkout_clean()
+
+    def test_a_filing_process_that_could_not_launch_or_lost_the_lease_fails_the_pass(self):
+        """The two causes the stub cannot stage on its own, answered by `filing.run` itself:
+        each is the pass's reason, and the block's own error is not."""
+        cases = [
+            ({"launch_error": "could not start claude: not found"},
+             "the filing process could not be launched: could not start claude: not found"),
+            ({"lease_lost": True}, "the lease was lost while the filing process ran"),
+        ]
+        for fields, expected in cases:
+            with self.subTest(expected=expected):
+                self.test_process([finding(1)])
+                launched = launch.LaunchResult(session_id="filing", **fields)
+                answer = filing.FilingResult(filing.Filed(error="no assistant record"),
+                                             launch_result=launched)
+                with mock.patch.object(filing, "run", return_value=answer):
+                    outcome, _ = self.run_pass()
+                self.assertEqual(outcome.record["status"], testloop.FAILED)
+                self.assertEqual(outcome.record["reason"], expected)
+                self.assertEqual(outcome.record["filed"], [])
+                self.assert_checkout_clean()
+
+    def test_ran_is_kept_only_when_the_block_was_read_and_the_ids_confirmed(self):
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.RAN)
+        self.assertEqual(outcome.record["reason"], "")
+        self.assertIsNotNone(outcome.record["read_from"]["filing"])
+        self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2"])
 
 
 class ReadFromTheLog(PassCase):
@@ -777,6 +831,24 @@ class PlanArea(PassCase):
         self.assertEqual(testloop.validate_finding(shape), [])
         self.assertTrue(shape[filing.ATTENDED_KEY])
         self.assertEqual(shape["cause"], {"file": "docs/tour.md", "line": 5, "verdict": "intended"})
+
+    def test_the_planning_finding_is_marked_attended_in_the_record_and_set_aside_by_the_rules(self):
+        """Issue #115: the record's finding entry carries the mark the Feeder hands
+        `should_stop`, and the rules read it as no serious finding, so a tour with only lows
+        and a plan area reads as clean."""
+        self.test_process([finding(1, severity="low")])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Plan the Search area after repeated patches [loop] [attended]"])
+        outcome, _ = self.run_pass(testpass.Request(plan_areas=("Search",)))
+        entries = outcome.record["findings"]
+        self.assertEqual([entry["attended"] for entry in entries], [False, True])
+        self.assertTrue(testloop.is_attended(entries[1]))
+        self.assertFalse(testloop.is_attended(entries[0]))
+        started = datetime(2026, 9, 28, 9, 0)
+        self.assertEqual(testloop.should_stop(
+            testloop.PassResult(kind=testloop.TOUR, status=outcome.record["status"],
+                                findings=tuple(entries), new_cards=0),
+            rounds=1, started_at=started, now=started, cards_filed=0), testloop.STOP_CLEAN)
 
 
 class Rendering(PassCase):

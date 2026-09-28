@@ -23,7 +23,10 @@ so moving and restarting it lives only here.
 A pass takes both Leases for its whole length and renews them on the heartbeat, as `run` does
 (KTD8). A pass is not a Task and writes no Task record: its outcomes are the pass record's own
 `status` words, `ran`, `not_run`, and `failed`, plus notes, so the closed halt class set in
-`contracts.py` is untouched (KTD12).
+`contracts.py` is untouched (KTD12). `ran` means the Test process reported and, when there was
+something to file, the Filing process ended with a readable `relay-filed` block in bounds; a
+Filing step that did not complete fails the pass with its own sentence (`filing_failure`), so
+the Feeder never reads a filing failure as findings that produced no card.
 """
 import json
 import os
@@ -403,6 +406,37 @@ def _append(path, text):
         handle.write(text)
 
 
+def filing_failure(result, scope, allowed, pre_head, timeout_seconds):
+    """The sentence a pass fails with when its Filing step did not complete, or None when a
+    readable `relay-filed` block was read from a process that ran to its end in bounds (issue
+    #115). Five causes, first one wins: the process could not be launched, it timed out, the
+    Lease was lost while it ran, its block could not be read, or the scope check reset its
+    commit. Each is a filing failure and not an account of the findings: a pass recorded `ran`
+    with no new card on one of these would stop the loop on open findings that no card ever
+    answered, so the pass is `failed`, which the Feeder notifies once and counts as no round."""
+    launched = result.launch_result
+    if launched.launch_error:
+        return "the filing process could not be launched: %s" % launched.launch_error
+    if launched.timed_out:
+        return "the filing process timed out after %d seconds" % timeout_seconds
+    if launched.lease_lost:
+        return "the lease was lost while the filing process ran"
+    if not result.filed.ok:
+        return "the filing process's block could not be read: %s" % result.filed.error
+    if not scope.ok:
+        # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
+        # inside it left uncommitted. Both reset, and the sentence says which (code review).
+        if scope.offending:
+            what = "changed %s in the checkout, outside %s" % (
+                ", ".join(scope.offending), ", ".join(allowed) or "any path")
+        else:
+            what = "left %s changed and uncommitted in the checkout" % (
+                ", ".join(scope.changed) or "the tree")
+        return ("the filing process %s; the checkout was reset to %s and nothing it filed "
+                "there counts" % (what, pre_head[:12]))
+    return None
+
+
 def run(manifest, config, request, env, out=None, home=None, adapter=None, now=time.time,
         launch_kwargs=None, prepare_kwargs=None, timeout_overrides=None):
     """One pass. Returns an `Outcome`; never raises for anything the pass record can say.
@@ -410,8 +444,9 @@ def run(manifest, config, request, env, out=None, home=None, adapter=None, now=t
     `env` is the run level environment for git, the adapter, and `prepare`; the launched
     processes get their own copy through `launch.child_env`. `launch_kwargs` reach both
     launches, the way `run.py` passes its own through, `prepare_kwargs` reach `prepare`, and
-    `timeout_overrides` may carry `test_seconds` in place of the sidecar's minutes; all three
-    are the suite's way in."""
+    `timeout_overrides` may carry `test_seconds` in place of the sidecar's minutes and
+    `filing_seconds` in place of the Manifest's closeout minutes; all three are the suite's
+    way in."""
     stream = (lambda line: out.write(line + "\n")) if out is not None else (lambda line: None)
     launch_kwargs = dict(launch_kwargs or {})
     prepare_kwargs = dict(prepare_kwargs or {})
@@ -643,9 +678,10 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     pre_head = _rev_parse(repo, "HEAD")
     if pre_head is None:
         return finish(FAILED, "the checkout's HEAD does not resolve to a commit before filing")
+    filing_seconds = overrides.get("filing_seconds") or manifest.timeouts.closeout_minutes * 60
     result = filing.run(manifest, to_file, adapter, store, task.backend, pass_id,
                         labels=loop.labels, design_note=loop.design_note, home=home,
-                        base_env=env, stream=stream, **kwargs)
+                        base_env=env, stream=stream, timeout_seconds=filing_seconds, **kwargs)
     record["transcripts"]["filing"] = result.launch_result.transcript_path
     record["read_from"]["filing"] = result.filed.source
     record["briefs"]["filing"] = result.brief_path
@@ -654,24 +690,14 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         record["notes"].append("filing process: %s" % json.dumps(finding, sort_keys=True))
     allowed = ([manifest.tracker.file] if manifest.tracker.adapter == "markdown"
                and manifest.tracker.file else [])
+    # The scope check runs whatever the process did, so a commit outside the bound is reset
+    # before anything is read back or recorded.
     scope = gitwrite.closeout_scope_check(repo, pre_head, allowed, ops=store, task_id=pass_id,
                                           env=env)
-    if not scope.ok:
-        # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
-        # inside it left uncommitted. Both reset, and the note says which (code review).
-        if scope.offending:
-            what = "changed %s in the checkout, outside %s" % (
-                ", ".join(scope.offending), ", ".join(allowed) or "any path")
-        else:
-            what = "left %s changed and uncommitted in the checkout" % (
-                ", ".join(scope.changed) or "the tree")
-        record["notes"].append("the filing process %s; the checkout was reset to %s and nothing "
-                               "it filed there counts" % (what, pre_head[:12]))
-    if result.launch_result.lease_lost:
-        record["notes"].append("the lease was lost while the filing process ran")
-    if not result.filed.ok:
-        record["notes"].append("the filing process's block could not be read: %s"
-                               % result.filed.error)
+    failure = filing_failure(result, scope, allowed, pre_head, filing_seconds)
+    # The confirmation runs on a failed filing too, over whatever entries were read: on a
+    # tracker outside the checkout a card filed before the failure exists, and the record
+    # and the Feeder's filed map say so.
     confirmation = filing.confirm(result.filed.entries, adapter, known=known)
     record["notes"].extend(confirmation.notes)
     by_number = {index: finding for index, finding in enumerate(to_file, 1)}
@@ -698,6 +724,10 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     if record["filed"]:
         record["notes"].extend(_ready_notes(manifest, config, env, adapter,
                                             [entry["id"] for entry in record["filed"]]))
+    # `ran` only when a readable block was confirmed (issue #115): a pass that filed nothing
+    # because its Filing step did not complete is not a pass whose findings went unanswered.
+    if failure:
+        return finish(FAILED, failure)
     return finish(RAN)
 
 

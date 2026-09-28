@@ -171,10 +171,13 @@ named by its own reason word in the log, the `test_loop_stopped` event, one noti
 `feed <manifest> --status`:
 
 - `report_only`: a report only loop ran its one full tour.
-- `clean`: a full tour found nothing above low.
-- `budget`: the loop filed `max_cards_total` cards, 30 by default.
+- `clean`: a full tour found nothing above low. A planning card the tour filed for a stopped
+  area is a person's and does not count.
+- `budget`: the loop filed `max_cards_total` cards, 30 by default, planning cards not counted.
 - `open_findings`: a full tour's high and medium findings produced no new card, because each
-  went to an open card, a stopped area, or was never confirmed.
+  went to an open card, a stopped area, or was never confirmed. A planning card filed beside
+  them is no new card. A tour whose Filing process did not complete is `failed` instead, with
+  the filing sentence as its reason, and the feeder notifies once and goes on.
 - `round_cap`: `max_rounds` full tours ran, six by default.
 - `clock_cap`: `max_hours` passed since the loop's first pass, 24 by default.
 

@@ -1180,6 +1180,18 @@ def new_loop_state(now):
             "unchecked": [], "stop": None}
 
 
+def loop_cards_filed(loop):
+    """The cards the loop has filed against its budget (R17): every entry of the loop's `filed`
+    map but an attended planning card, which is a person's, filed outside the per pass cap
+    and counted toward neither the budget nor a pass's new cards (issue #115). `loop` is the
+    state file's `test_loop` dict."""
+    filed = loop.get("filed") if isinstance(loop, dict) else None
+    if not isinstance(filed, dict):
+        return 0
+    return sum(1 for record in filed.values()
+               if not (isinstance(record, dict) and record.get("attended") is True))
+
+
 def loop_stop_sentence(reason, loop, settings):
     """The sentence for a `testloop` stop word, for the log, the notice, and the stop record."""
     if reason == testloop.STOP_CLEAN:
@@ -1194,7 +1206,7 @@ def loop_stop_sentence(reason, loop, settings):
         return "the loop started at %s and max_hours is %d" % (loop.get("started_at"),
                                                                settings.max_hours)
     if reason == testloop.STOP_BUDGET:
-        return "%d cards filed, the max_cards_total cap of %d" % (len(loop.get("filed") or {}),
+        return "%d cards filed, the max_cards_total cap of %d" % (loop_cards_filed(loop),
                                                                   settings.max_cards_total)
     if reason == testloop.STOP_REPORT_ONLY:
         return ("report only mode runs one full tour, and its findings are in the findings "
@@ -2102,7 +2114,7 @@ class Feeder:
         # here is asking whether either has run out before this pass starts.
         reason = testloop.should_stop(testloop.PassResult(kind=kind, status=testloop.NOT_RUN),
                                       loop["rounds"], self.loop_started_at(loop),
-                                      self.deps.now(), len(loop["filed"]),
+                                      self.deps.now(), loop_cards_filed(loop),
                                       report_only=settings.report_only, settings=settings)
         if reason:
             self.stop_loop(reason)
@@ -2123,7 +2135,7 @@ class Feeder:
                              % ", ".join(gone))
             stopped = tuple(area for area in stopped if area in headings)
         plan = tuple(area for area in stopped if area not in loop["planned_areas"])
-        budget = max(0, settings.max_cards_total - len(loop["filed"]))
+        budget = max(0, settings.max_cards_total - loop_cards_filed(loop))
         self.log("starting a %s test pass on %s%s, stopped areas %s, planning %s, budget %d"
                  % (kind, model, " of %s" % _ids(cards) if cards else "", _ids(stopped),
                     _ids(plan), budget))
@@ -2138,7 +2150,9 @@ class Feeder:
         confirmed card with its generation, area, design flag, and cause file; the areas each
         checked card's check filed in, and from them the patch counts and the areas newly at
         the cap (R19); the round, for a tour that ran; one `test_pass` event. A pass that did not
-        run or failed is notified once per reason and counts as no round."""
+        run or failed is notified once per reason and counts as no round. An attended planning
+        card is recorded in the filed map so the loop knows it, and is not a new card to the
+        stop rule nor a card against the budget (issue #115)."""
         loop, settings, now = self.loop_state(), self.config.test_loop, self.deps.now()
         status = record.get("status")
         reason = str(record.get("reason") or "")
@@ -2209,14 +2223,14 @@ class Feeder:
                   record_path=record.get("record_path"),
                   transcripts=record.get("transcripts") or {},
                   read_from=record.get("read_from") or {})
-        ready = self.ready_filed([card_id for card_id in new if card_id not in attended],
-                                 manifest)
+        unattended = [card_id for card_id in new if card_id not in attended]
+        ready = self.ready_filed(unattended, manifest)
         result = testloop.PassResult(
-            kind=kind, status=status, new_cards=len(new),
+            kind=kind, status=status, new_cards=len(unattended),
             findings=tuple(finding for finding in record.get("findings") or ()
                            if isinstance(finding, dict)))
         stop = testloop.should_stop(result, loop["rounds"], self.loop_started_at(loop), now,
-                                    len(loop["filed"]), report_only=settings.report_only,
+                                    loop_cards_filed(loop), report_only=settings.report_only,
                                     settings=settings)
         if stop:
             self.stop_loop(stop, record)
@@ -2268,7 +2282,7 @@ class Feeder:
         self.notify(message)
         self.emit(EVENT_TEST_LOOP_STOPPED, reason=reason, message=sentence,
                   pass_number=(record or {}).get("pass"), rounds=loop["rounds"],
-                  cards_filed=len(loop["filed"]))
+                  cards_filed=loop_cards_filed(loop))
         self.save_state()
 
     # Blocked tasks and their retries (issue #39).
