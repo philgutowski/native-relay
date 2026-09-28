@@ -2207,7 +2207,8 @@ class Feeder:
                   pass_number=record.get("pass"), cards=list(sent), filed=new,
                   commented=commented, planned=list(plan) if status == testloop.RAN else [],
                   record_path=record.get("record_path"),
-                  transcripts=record.get("transcripts") or {})
+                  transcripts=record.get("transcripts") or {},
+                  read_from=record.get("read_from") or {})
         ready = self.ready_filed([card_id for card_id in new if card_id not in attended],
                                  manifest)
         result = testloop.PassResult(

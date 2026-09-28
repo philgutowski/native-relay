@@ -8,7 +8,7 @@ filing instructions, so the Runner and the Feeder still never write to a Tracker
 Tracker write in this module is a sentence handed to a launched process, never a call.
 
 The process ends with one fenced block tagged `contracts.FILED_FENCE_TAG` holding a JSON array
-of `{finding, action, id}`. `parse` reads it through `testbrief.final_message`, the reader for
+of `{finding, action, id}`. `parse` reads it through `testbrief.read_final_message`, the reader for
 any block that can outgrow the digest's 200 character tail, and `confirm` reads every named id
 back through the adapter's `read`: a claim the Tracker does not answer is a note on the pass
 record, never a filed card (KTD5).
@@ -24,7 +24,7 @@ import json
 import os
 import re
 import string
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import brief, classify, closeout, contracts, launch, state, testbrief, testloop
 
@@ -79,9 +79,12 @@ class Filed:
     """One parsed `relay-filed` block. `error` is a sentence naming the first problem, and then
     `entries` is empty; otherwise `entries` holds one `{finding, action, id}` dict per entry in
     the block's order, with `finding` an int, `action` one of `ACTIONS`, and `id` a stripped
-    non empty string."""
+    non empty string. `source` is the file the block was read from, the transcript or the
+    process's stdout log, the way `testbrief.Report.source` names it; None when neither held
+    an assistant record."""
     entries: tuple = ()
     error: str | None = None
+    source: str | None = None
 
     @property
     def ok(self):
@@ -325,12 +328,14 @@ def parse_text(text, count=None):
 
 
 def parse(transcript_path, backend="claude", log_path=None, count=None):
-    """Read the filed block from the process's transcript: the full final message through the
-    reader `testbrief` owns, then `parse_text`."""
-    text = testbrief.final_message(transcript_path, backend=backend, log_path=log_path)
-    if text is None:
-        return Filed(error="the transcript holds no final message")
-    return parse_text(text, count=count)
+    """Read the filed block from the process's transcript, or from its stdout log when the
+    transcript is absent: the full final message through the reader `testbrief` owns, then
+    `parse_text`. The result's `source` names the file read."""
+    read = testbrief.read_final_message(transcript_path, backend=backend, log_path=log_path)
+    if read.text is None:
+        return Filed(error="the filing process left no transcript to read: %s"
+                     % read.no_message_reason)
+    return replace(parse_text(read.text, count=count), source=read.source)
 
 
 def confirm(entries, adapter, known=()):
@@ -408,9 +413,10 @@ def run(manifest, findings, adapter, store, backend, process_id, labels=(), desi
                     if finding.get("class") != contracts.HALT_NO_ENVELOPE]
     if launch_result.timed_out:
         filed = Filed(error="the filing process timed out before its final message")
-    elif not launch_result.transcript_path:
-        filed = Filed(error="the filing process left no transcript to read")
     else:
+        # Not guarded on the transcript being present at the predicted path: `parse` reads
+        # the stdout log when it is not, the way the Test pass and the Runner's Task path do
+        # (issue #113), and its `source` says which file answered.
         filed = parse(launch_result.transcript_path, backend=backend,
                       log_path=launch_result.log_path, count=len(findings))
     return FilingResult(filed, findings_out, digest, launch_result, brief_path,

@@ -13,7 +13,7 @@ the last 200 characters of the message, and a report with ten findings is longer
 same way the first live run's Closeout terminal line fell past the digest's head
 (`docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`).
 Only the last block counts, and prose after it is allowed, since the pass code decides what to
-file and needs the findings rather than a tidy ending. `final_message` is the reader for any
+file and needs the findings rather than a tidy ending. `read_final_message` is the reader for any
 block that can outgrow the digest's tail; the plan's U4 has `filing.py` read its `relay-filed`
 block through it rather than through a second reader.
 
@@ -24,7 +24,7 @@ import json
 import os
 import re
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import backends, brief, contracts, testloop
 
@@ -76,6 +76,10 @@ class Report:
     findings: tuple = ()
     approval_steps: tuple = ()
     error: str | None = None
+    # The file the final message was read from: the transcript, or the process's stdout log
+    # when the reader fell back to it (issue #113). None when neither held an assistant
+    # record, which is the one case a pass may call "no transcript to read".
+    source: str | None = None
 
     @property
     def ok(self):
@@ -190,17 +194,50 @@ def render(kind, url, commit, tour, cards=(), stopped_areas=()):
         raise brief.BriefError("test brief template names an unknown placeholder %s" % exc)
 
 
-def final_message(transcript_path, backend="claude", log_path=None):
-    """The full text of the last assistant message in a process's transcript, or None when
-    there is none. Read through the backend's normalizer, the same lines `classify` reads, and
-    joined the same way, but kept whole: this is the reader for any block that can be longer
-    than the digest's tail. A sidechain message is not the process's own final word and is
-    skipped, as `classify` skips it."""
+@dataclass(frozen=True)
+class FinalMessage:
+    """What `read_final_message` found. `text` is the last assistant message whole, or None;
+    `source` the file it came from, or None; `transcript_opened` whether the transcript at the
+    handed path opened at all, which is what the failure sentence turns on when nothing was
+    read."""
+    text: str | None = None
+    source: str | None = None
+    transcript_opened: bool = False
+
+    @property
+    def no_message_reason(self):
+        """Why there is no final message, true to what was read. A transcript that opened is
+        the process's own file, and the normalizer reads nothing past it, so the log is named
+        only when the transcript was not there to open (backends/claude.py)."""
+        if self.text is not None:
+            return None
+        if self.transcript_opened:
+            return "the transcript holds no assistant record"
+        return "no final message in the transcript or the stdout log"
+
+
+def read_final_message(transcript_path, backend="claude", log_path=None):
+    """The full text of the last assistant message in a process's transcript, and the file it
+    was read from, as a `FinalMessage`. Read through the backend's normalizer, the same lines
+    `classify` reads, and joined the same way, but kept whole: this is the reader for any block
+    that can be longer than the digest's tail. A subagent's message is not the process's own
+    final word and is skipped: the transcript marks one `isSidechain`, and the stdout log
+    marks it with a `parent_tool_use_id`, as `tests/fixtures/stdout/_make.py` records.
+
+    The normalizer decides where the lines come from. When the transcript is not at the path
+    the runner predicted, the claude one reads the run's own stdout log instead, which holds
+    the same assistant records under stream-json (issue #113: a CLI running under
+    `CLAUDE_CONFIG_DIR` writes its transcript under that directory's projects folder, and both
+    the prediction and the glob miss it). `source` is then the log; otherwise it is the
+    transcript. A caller that refuses to parse until the transcript exists at the predicted
+    path bypasses that fallback, so no caller should."""
     module = backends.build(backend)
     evidence = module.normalize_transcript(transcript_path, log_path=log_path)
     last_text = None
     for _number, obj in evidence.lines:
-        if obj.get("type") != contracts.TRANSCRIPT_TYPE_ASSISTANT or obj.get("isSidechain"):
+        if obj.get("type") != contracts.TRANSCRIPT_TYPE_ASSISTANT:
+            continue
+        if obj.get("isSidechain") or obj.get("parent_tool_use_id"):
             continue
         message = obj.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -210,7 +247,13 @@ def final_message(transcript_path, backend="claude", log_path=None):
                  if isinstance(block, dict) and block.get("type") == "text"]
         if texts:
             last_text = "\n".join(texts)
-    return last_text
+    # `evidence.opened` is the file the lines came from: on a fallback that is the log, and
+    # `source` names it, so the transcript opened only when there was no fallback.
+    transcript_opened = evidence.opened and not evidence.source
+    if last_text is None:
+        return FinalMessage(transcript_opened=transcript_opened)
+    return FinalMessage(text=last_text, source=evidence.source or transcript_path,
+                        transcript_opened=transcript_opened)
 
 
 def last_block(text):
@@ -273,9 +316,12 @@ def parse_text(text):
 
 
 def parse(transcript_path, backend="claude", log_path=None):
-    """Read the Test report from the process's transcript: the full final message, then
-    `parse_text`. A transcript with no assistant message at all is an error like any other."""
-    text = final_message(transcript_path, backend=backend, log_path=log_path)
-    if text is None:
-        return Report(error="the transcript holds no final message")
-    return parse_text(text)
+    """Read the Test report from the process's transcript, or from its stdout log when the
+    transcript is absent: the full final message, then `parse_text`. The report's `source`
+    names the file read. A process that left no assistant record to read is an error like any
+    other, worded by `FinalMessage.no_message_reason`, with `source` None so a caller can tell
+    it from a bad block."""
+    read = read_final_message(transcript_path, backend=backend, log_path=log_path)
+    if read.text is None:
+        return Report(error=read.no_message_reason)
+    return replace(parse_text(read.text), source=read.source)

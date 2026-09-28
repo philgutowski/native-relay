@@ -279,7 +279,7 @@ class ParseFromTheTranscript(unittest.TestCase):
         self.assertEqual([f["title"][:9] for f in report.findings], ["Finding 1"])
 
     def test_a_block_followed_by_more_prose_is_still_read(self):
-        text = testbrief.final_message(fixture("test_report.jsonl"))
+        text = testbrief.read_final_message(fixture("test_report.jsonl")).text
         self.assertFalse(text.rstrip().endswith("```"), "the fixture should end in prose")
         self.assertTrue(testbrief.parse(fixture("test_report.jsonl")).ok)
 
@@ -303,7 +303,7 @@ class ParseFromTheTranscript(unittest.TestCase):
 
     def test_a_report_longer_than_the_digest_tail_with_ten_findings_parses_whole(self):
         path = fixture("test_report_ten.jsonl")
-        text = testbrief.final_message(path)
+        text = testbrief.read_final_message(path).text
         self.assertGreater(len(text), classify.LAST_MESSAGE_CHARS)
         # The digest's tail cannot hold it: what classify keeps has no block in it.
         tail = text[-classify.LAST_MESSAGE_CHARS:]
@@ -328,6 +328,44 @@ class ParseFromTheTranscript(unittest.TestCase):
         report = testbrief.parse(os.path.join(TRANSCRIPTS, "does-not-exist.jsonl"))
         self.assertFalse(report.ok)
         self.assertIn("no final message", report.error)
+        self.assertIsNone(report.source)
+
+    def test_the_report_names_the_transcript_it_was_read_from(self):
+        report = testbrief.parse(fixture("test_report.jsonl"))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.source, fixture("test_report.jsonl"))
+
+    def test_a_missing_transcript_falls_back_to_the_stdout_log_and_names_it(self):
+        """Issue #113: the log holds the same assistant records under stream-json, so the
+        report is read from it when the transcript is not where the runner predicted."""
+        missing = os.path.join(TRANSCRIPTS, "does-not-exist.jsonl")
+        report = testbrief.parse(missing, log_path=fixture("test_report.jsonl"))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.source, fixture("test_report.jsonl"))
+        read = testbrief.read_final_message(missing, log_path=fixture("test_report.jsonl"))
+        self.assertIsNotNone(testbrief.last_block(read.text))
+        self.assertEqual(read.source, fixture("test_report.jsonl"))
+        self.assertFalse(read.transcript_opened)
+        neither = testbrief.read_final_message(missing, log_path=missing + ".log")
+        self.assertEqual((neither.text, neither.source, neither.transcript_opened),
+                         (None, None, False))
+        self.assertIn("stdout log", neither.no_message_reason)
+
+    def test_a_transcript_that_opened_with_no_assistant_record_is_named_not_the_log(self):
+        """The normalizer reads nothing past a transcript that opened, so the sentence must not
+        claim the log was consulted (code review)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        empty = os.path.join(tmp.name, "empty.jsonl")
+        with open(empty, "w") as handle:
+            handle.write(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+        read = testbrief.read_final_message(empty, log_path=fixture("test_report.jsonl"))
+        self.assertEqual((read.text, read.source, read.transcript_opened), (None, None, True))
+        self.assertNotIn("stdout log", read.no_message_reason)
+        self.assertIn("no assistant record", read.no_message_reason)
+        report = testbrief.parse(empty, log_path=fixture("test_report.jsonl"))
+        self.assertEqual((report.ok, report.source), (False, None))
+        self.assertEqual(report.error, read.no_message_reason)
 
 
 class ApprovalSteps(unittest.TestCase):
@@ -346,7 +384,7 @@ class ApprovalSteps(unittest.TestCase):
         # Recorded as reached and left, not as a finding and not as an action taken.
         for item in report.findings:
             self.assertNotIn("approved", item["title"].lower())
-        text = testbrief.final_message(fixture("test_report.jsonl"))
+        text = testbrief.read_final_message(fixture("test_report.jsonl")).text
         self.assertRegex(text, r"(?i)without approving")
 
     def test_a_report_with_no_approval_steps_records_none(self):
@@ -447,30 +485,44 @@ class FinalMessage(unittest.TestCase):
         return path
 
     @staticmethod
-    def assistant(text, sidechain=False):
-        return {"type": "assistant", "isSidechain": sidechain,
+    def assistant(text, sidechain=False, parent_tool_use_id=None):
+        line = {"type": "assistant", "isSidechain": sidechain,
                 "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+        if parent_tool_use_id:
+            line["parent_tool_use_id"] = parent_tool_use_id
+        return line
 
     def test_the_last_assistant_text_is_returned_whole(self):
         long = "x" * 5000
         path = self.write([self.assistant("first"), {"type": "user", "message": {"content": "hi"}},
                            self.assistant(long)])
-        self.assertEqual(testbrief.final_message(path), long)
+        self.assertEqual(testbrief.read_final_message(path).text, long)
 
     def test_a_sidechain_message_after_the_final_one_is_skipped(self):
         path = self.write([self.assistant("final"), self.assistant("subagent", sidechain=True)])
-        self.assertEqual(testbrief.final_message(path), "final")
+        self.assertEqual(testbrief.read_final_message(path).text, "final")
+
+    def test_a_subagent_line_in_the_stdout_log_is_skipped_by_its_parent_tool_use_id(self):
+        """The stream-json log marks a subagent's line with `parent_tool_use_id`, not
+        `isSidechain` (code review; `tests/fixtures/stdout/_make.py`)."""
+        path = self.write([self.assistant("final"),
+                           self.assistant("subagent", parent_tool_use_id="toolu_01")])
+        self.assertEqual(testbrief.read_final_message(path).text, "final")
+        log = self.write([self.assistant("from the log"),
+                          self.assistant("subagent", parent_tool_use_id="toolu_01")])
+        read = testbrief.read_final_message(path + ".missing", log_path=log)
+        self.assertEqual((read.text, read.source), ("from the log", log))
 
     def test_text_blocks_of_one_message_are_joined_like_the_classifier_joins_them(self):
         path = self.write([{"type": "assistant", "message": {"content": [
             {"type": "text", "text": "a"}, {"type": "tool_use", "id": "t", "name": "Read",
                                             "input": {}}, {"type": "text", "text": "b"}]}}])
-        self.assertEqual(testbrief.final_message(path), "a\nb")
+        self.assertEqual(testbrief.read_final_message(path).text, "a\nb")
 
     def test_no_assistant_text_at_all_is_none(self):
         path = self.write([{"type": "user", "message": {"content": "hi"}}])
-        self.assertIsNone(testbrief.final_message(path))
-        self.assertIsNone(testbrief.final_message(path + ".missing"))
+        self.assertIsNone(testbrief.read_final_message(path).text)
+        self.assertIsNone(testbrief.read_final_message(path + ".missing").text)
 
 
 if __name__ == "__main__":

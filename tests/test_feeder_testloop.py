@@ -74,6 +74,7 @@ class LoopCase(FeederCase):
                   "status": testloop.RAN, "reason": "", "findings": [], "filed": [],
                   "commented": [], "transcripts": {"test": "/t/pass-%d.test.jsonl" % number,
                                                    "filing": None},
+                  "read_from": {"test": "/t/pass-%d.test.stdout.log" % number},
                   "exit_code": 0, "record_path": "/t/pass-%d.json" % number}
         record.update(script)
         for entry in record["filed"]:
@@ -209,6 +210,7 @@ class CallSites(LoopCase):
                          [(testloop.TOUR, testloop.RAN), (testloop.CHECK, testloop.RAN)])
         self.assertEqual(events[0]["filed"], ["10"])
         self.assertEqual(events[0]["transcripts"]["test"], "/t/pass-1.test.jsonl")
+        self.assertEqual(events[0]["read_from"], {"test": "/t/pass-1.test.stdout.log"})
         self.assertEqual(events[0]["record_path"], "/t/pass-1.json")
         self.assertEqual(events[0]["pass_number"], 1)
 

@@ -483,6 +483,10 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         "findings": [], "filed": [], "commented": [], "over_cap": [], "over_budget": [],
         "dropped": [], "lows": [], "invalid": [], "planning": [], "approval_steps": [],
         "notes": [], "transcripts": {"test": None, "filing": None},
+        # The file each process's block was actually read from: its transcript, or its stdout
+        # log when the transcript was not at the predicted path (issue #113). `transcripts`
+        # stays the launcher's answer, so the two can differ and a reader can see the fallback.
+        "read_from": {"test": None, "filing": None},
         "briefs": {"test": None, "filing": None}, "checkout": {}, "worktree_removed": None,
         "timings": {"started_at": state._iso(started_at), "ended_at": None,
                     "prepare_seconds": None, "test_wall_seconds": None,
@@ -589,10 +593,15 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         return finish(FAILED, launched.launch_error)
     if launched.timed_out:
         return finish(FAILED, "the test process timed out after %d seconds" % test_seconds)
-    if not launched.transcript_path or not launched.transcript_present:
-        return finish(FAILED, "the test process left no transcript to read")
+    # No guard on `launched.transcript_present` here (issue #113): a CLI running under
+    # `CLAUDE_CONFIG_DIR` writes its transcript where neither the prediction nor the glob
+    # looks, and the stdout log holds the same final message. `testbrief.parse` reads
+    # whichever file has it, and `source` is None only when neither does.
     report = testbrief.parse(launched.transcript_path, backend=task.backend,
                              log_path=launched.log_path)
+    record["read_from"]["test"] = report.source
+    if report.source is None:
+        return finish(FAILED, "the test process left no transcript to read: %s" % report.error)
     if not report.ok:
         return finish(FAILED, report.error)
     record["approval_steps"] = list(report.approval_steps)
@@ -638,6 +647,7 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
                         labels=loop.labels, design_note=loop.design_note, home=home,
                         base_env=env, stream=stream, **kwargs)
     record["transcripts"]["filing"] = result.launch_result.transcript_path
+    record["read_from"]["filing"] = result.filed.source
     record["briefs"]["filing"] = result.brief_path
     record["timings"]["filing_wall_seconds"] = round(result.launch_result.wall_seconds, 3)
     for finding in result.findings:
