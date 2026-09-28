@@ -13,6 +13,7 @@ import os
 import tempfile
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import _paths
 from relay import feeder, testloop
@@ -302,6 +303,18 @@ class Areas(LoopCase):
         self.assertIn("filed 13 ", unready[0])
         self.assertNotIn("14", unready[0])
 
+    def test_a_stopped_area_no_longer_a_heading_is_not_passed_on(self):
+        # The fixture repository's README is the tour document here: its one heading is
+        # "fixture", so a stopped "Search" left from an older tour document would be refused by
+        # `relay test` at every pass.
+        self.seed(rounds=1, stopped_areas=["Search", "fixture"])
+        self.adapter.ready_cards = [card(1)]
+        self.plans = [{}]
+        self.feed_loop(tour="README.md")
+        self.assertEqual((self.passes[0]["stopped"], self.passes[0]["plan"]),
+                         (["fixture"], ["fixture"]))
+        self.assertTrue(any("Search are no longer headings" in note for note in self.notes))
+
     def test_a_plan_area_on_a_pass_that_did_not_run_is_asked_for_again(self):
         self.seed(rounds=1, stopped_areas=["Search"])
         self.adapter.ready_cards = [card(1), card(2)]
@@ -327,16 +340,67 @@ class Failures(LoopCase):
         self.assertEqual(len(notices), 1, self.notes)
         self.assertIn("prepare exited 1", notices[0])
 
-    def test_each_reason_is_notified_once_and_every_pass_is_logged(self):
+    def test_a_streak_of_failures_is_notified_once_per_kind_and_every_pass_is_logged(self):
+        # The reasons differ, as a real one's last output line does, and still one notice each
+        # for the tour and the check: never one per pass.
         self.adapter.ready_cards = [card(1), card(2)]
-        timed_out = {"status": testloop.FAILED, "reason": "the test process timed out"}
-        no_block = {"status": testloop.FAILED, "reason": "no relay-test-report block"}
-        self.pass_script = [timed_out, no_block, timed_out, no_block]
+        self.pass_script = [{"status": testloop.FAILED, "reason": "timed out at 09:01"},
+                            {"status": testloop.FAILED, "reason": "no report block, pass 2"},
+                            {"status": testloop.FAILED, "reason": "timed out at 10:12"},
+                            {"status": testloop.FAILED, "reason": "no report block, pass 4"}]
         self.plans = [{}, {}]
         self.feed(self.loop_config(config={"batch": 1}))
         failed = [note for note in self.notes if "test pass failed" in note]
         self.assertEqual(len(failed), 2, self.notes)
-        self.assertEqual(self.log_text().count("the test process timed out"), 2)
+        self.assertIn("timed out at 10:12", self.log_text())
+        reported = [key for key in self.state()["reported"] if key.startswith("test_pass:")]
+        self.assertEqual(sorted(reported), ["test_pass:check:failed", "test_pass:tour:failed"])
+
+    def test_a_failure_after_a_pass_of_that_kind_ran_is_news_again(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        failed = {"status": testloop.FAILED, "reason": "the test process timed out"}
+        self.pass_script = [tour_filing(filed(10)), failed, {}, failed]
+        self.plans = [{}, {}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:4]], [["1"], ["2"], ["10"]])
+        self.assertEqual(len([note for note in self.notes if "test pass failed" in note]), 2)
+
+    def test_a_start_tour_that_did_not_run_is_not_repeated_before_leaving(self):
+        # The queue is empty and nothing has run since the start tour, so a drain tour would
+        # only try the same commit again.
+        self.pass_script = [{"status": testloop.NOT_RUN, "reason": "prepare exited 1"}]
+        self.plans = [{}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertIn("a tour already ran since the last run", self.log_text())
+        self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
+
+    def test_a_check_that_did_not_run_carries_its_cards_to_the_next_check(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.pass_script = [tour_filing(filed(10)),
+                            {"status": testloop.NOT_RUN, "reason": "prepare exited 1"}, {}]
+        self.plans = [{}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["1", "2"]])
+        self.assertEqual(self.loop()["unchecked"], [])
+
+    def test_a_check_that_failed_does_not_carry_its_cards(self):
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.pass_script = [tour_filing(filed(10)),
+                            {"status": testloop.FAILED, "reason": "card 1 could not be read"}, {}]
+        self.plans = [{}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["2"]])
+
+    def test_a_held_post_cycle_hook_runs_no_check_and_the_cards_wait(self):
+        self.adapter.ready_cards = [card(1)]
+        self.pass_script = [tour_filing(filed(10))]
+        self.plans = [{}, {}]
+        config = self.loop_config(config={"post_cycle_command": ("false",),
+                                          "post_cycle_hold": True})
+        self.assertEqual(self.feed(config), feeder.EXIT_HALTED)
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertEqual(sorted(self.loop()["unchecked"]), ["1", "10"])
 
     def test_a_drain_tour_whose_cards_the_ready_source_lacks_notifies_once_and_leaves(self):
         self.pass_script = [tour_filing(filed(10)), {}, tour_filing(filed(11, unready=True))]
@@ -456,6 +520,31 @@ class Helpers(unittest.TestCase):
         self.assertEqual(gone["status"], testloop.FAILED)
         self.assertIn("could not be read", gone["reason"])
         self.assertEqual(feeder.read_pass_output(0, "")["status"], testloop.FAILED)
+
+    def test_the_real_run_test_pass_streams_the_output_and_reads_the_record(self):
+        # A stand in for `relay_cli.py`: it prints its arguments and a record path, exits 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, "pass-1.json")
+            with open(record, "w") as handle:
+                json.dump({"pass": 1, "status": "not_run", "reason": "prepare exited 1"}, handle)
+            entry = os.path.join(tmp, "entry.py")
+            with open(entry, "w") as handle:
+                handle.write("import sys\nprint('args', ' '.join(sys.argv[1:]))\n"
+                             "print(%r)\nsys.exit(2)\n" % record)
+            sink = os.path.join(tmp, "out.log")
+            deps_env = dict(os.environ)
+            with open(sink, "wb") as out, mock.patch.object(feeder, "runner_entry",
+                                                            return_value=entry):
+                deps = feeder.build_deps(feeder.Config(caffeinate=False), deps_env,
+                                         child_stdout=out)
+                answer = deps.run_test_pass("/m.toml", testloop.CHECK, cards=("7",),
+                                            budget=5, model="opus")
+            with open(sink, encoding="utf-8") as handle:
+                streamed = handle.read()
+        self.assertEqual((answer["status"], answer["exit_code"], answer["record_path"]),
+                         ("not_run", 2, record))
+        self.assertIn("args test /m.toml --budget 5 --model opus --cards 7", streamed)
+        self.assertIn(record, streamed)
 
     def test_every_stop_word_has_its_own_sentence(self):
         loop = feeder.new_loop_state(__import__("datetime").datetime(2026, 9, 28))
