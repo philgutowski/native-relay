@@ -67,6 +67,9 @@ class _Run:
     now: object
     allowed_paths: tuple
     used_backends: set = field(default_factory=set)
+    # `--defer ID` (KTD6, R10): listed tasks this run leaves exactly as they were. Wins over
+    # `retry_blocked`, which names the blocked records to launch.
+    defer: frozenset = frozenset()
     # Dispatch only. SHA of the default branch after the last landing this coordinator made.
     # The merge tail compares against this so a sibling landing is not a foreign mover.
     expected_default: str | None = None
@@ -643,7 +646,7 @@ def _triple_close_blocked(cfg, item, integration_lease, expected_remote):
 def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
                retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
                notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
-               sleep=time.sleep, clock=time.monotonic):
+               sleep=time.sleep, clock=time.monotonic, defer=frozenset()):
     """Run exactly three declared cards concurrently, then integrate them in manifest order.
 
     This is intentionally a coordinator rather than a parallel version of ``run``: the workers
@@ -651,13 +654,18 @@ def run_triple(manifest, adapter=None, store=None, home=None, base_env=None, str
     atomic remote claim; all subsequent repository writes are serial and atomically rotate the
     remote integration token.  A refusal leaves evidence and branches in place instead of trying
     a best-effort cleanup that could erase an active worker's work.
+
+    `defer` is taken only to refuse it: a triple is three cards run together, so leaving one
+    alone is not a triple. The refusal comes before the lease, like every configuration exit.
     """
     if manifest.execution.mode != "triple":
         return run(manifest, adapter=adapter, store=store, home=home, base_env=base_env,
                    stream=stream, retry_blocked=retry_blocked,
                    timeout_overrides=timeout_overrides, launch_kwargs=launch_kwargs, now=now,
                    notifier=notifier, wait_for_lease_seconds=wait_for_lease_seconds,
-                   lease_poll_seconds=lease_poll_seconds, sleep=sleep, clock=clock)
+                   lease_poll_seconds=lease_poll_seconds, sleep=sleep, clock=clock, defer=defer)
+    if defer:
+        return RunOutcome(EXIT_CONFIG, message=TRIPLE_DEFER_REFUSAL)
     repo, default = manifest.project.repo, verify.default_branch_of(manifest)
     overrides, launch_kwargs = timeout_overrides or {}, dict(launch_kwargs or {})
     env = launch.child_env(manifest, base_env, home)
@@ -932,13 +940,16 @@ def _acquire(store, stream, wait_seconds, poll_seconds, sleep, clock):
 def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
         retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
         notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
-        sleep=time.sleep, clock=time.monotonic):
+        sleep=time.sleep, clock=time.monotonic, defer=frozenset()):
     """Drive one manifest to completion or to a named halt. Returns a RunOutcome; never raises
     for a task level failure, because every one of those is a class an operator can act on.
 
     `wait_for_lease_seconds` (issue #23) queues this run behind a live holder of either lease
     instead of refusing at once, up to that bound. The refusal after the bound is the same one an
-    unqueued run gets."""
+    unqueued run gets.
+
+    `defer` (R10) is the ids of listed tasks this run passes over. The caller has checked each is
+    listed; `cmd_run` refuses one that is not, before the lease, as it does for `retry_blocked`."""
     repo = manifest.project.repo
     default = verify.default_branch_of(manifest)
     overrides = timeout_overrides or {}
@@ -976,12 +987,14 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
     # against (R53, KTD15).
     allowed_paths = tuple(manifest_module.completed_allowed_paths(manifest))
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
-                  retry_blocked, overrides, launch_kwargs, now, allowed_paths)
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths,
+                  defer=frozenset(defer))
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
         store.validate()
-        verify.startup_reverify(manifest, store, adapter, env=env, now=now)
+        verify.startup_reverify(manifest, _undeferred(store, config.defer), adapter, env=env,
+                                now=now)
         for index, task in enumerate(manifest.tasks):
             try:
                 _one_task(config, task)
@@ -1065,7 +1078,7 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
 def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, stream=print,
              retry_blocked=False, timeout_overrides=None, launch_kwargs=None, now=time.time,
              notifier=None, wait_for_lease_seconds=None, lease_poll_seconds=LEASE_POLL_SECONDS,
-             sleep=time.sleep, clock=time.monotonic, policy="serial"):
+             sleep=time.sleep, clock=time.monotonic, policy="serial", defer=frozenset()):
     """Drive a manifest under a frozen conservative serial or parallel schedule.
 
     Parallel is opt-in and still fail-closed: only a scheduler wave with no conflict edge may
@@ -1133,12 +1146,14 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
         for line in scheduler.render(schedule).splitlines():
             stream(line)
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
-                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule)
+                  retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule,
+                  defer=frozenset(defer))
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
         store.validate()
-        verify.startup_reverify(manifest, store, adapter, env=env, now=now)
+        verify.startup_reverify(manifest, _undeferred(store, config.defer), adapter, env=env,
+                                now=now)
         halted = _concurrent_loop(config, announce)
         if halted is not None:
             wrote_terminal = True
@@ -1420,6 +1435,38 @@ def retry_blocked_argv(retry_blocked):
     return ["--retry-blocked"] if retry_blocked else []
 
 
+def defer_argv(defer):
+    """The flags that carry `defer` to a child `run`: one `--defer ID` per id, in a stable
+    order, and nothing for an empty set. Unlike `--retry-blocked` there is no bare form."""
+    return [part for task_id in sorted(defer or ()) for part in ("--defer", task_id)]
+
+
+# One sentence for both refusals, `cmd_run`'s before a detach and `run_triple`'s before the lease.
+TRIPLE_DEFER_REFUSAL = ("--defer is unavailable under execution.mode triple, which runs its "
+                        "three cards together; run without it")
+
+
+class _Undeferred:
+    """The store as the startup re-verify sees it on a run with `--defer`: every record but the
+    deferred ones, and every other call passed straight through. The re-verify runs before any
+    task is begun and restamps each halted record's `verify` and reads its card, so the early
+    return in `_begin_task` alone would still leave a deferred halted record rewritten (R10)."""
+
+    def __init__(self, store, defer):
+        self._store, self._defer = store, defer
+
+    def records(self):
+        return {task_id: record for task_id, record in self._store.records().items()
+                if task_id not in self._defer}
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def _undeferred(store, defer):
+    return _Undeferred(store, defer) if defer else store
+
+
 def _one_task(cfg, task):
     begun = _begin_task(cfg, task)
     if begun is None:
@@ -1443,6 +1490,13 @@ def _begin_task(cfg, task):
     if task.excluded:
         store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=task.reason,
                      skip_reason=None)
+        return
+    # KTD6, R10. Before anything is read or written for it: no upsert, no branch, no card read,
+    # so the record, the branch, and the card are what they were. Ahead of the blocked check, so
+    # an id also given to `--retry-blocked` is deferred.
+    if task.id in cfg.defer:
+        if stream is not None:
+            stream("%s deferred by --defer; left as it was for this run" % task.id)
         return
     if status == contracts.STATUS_LANDED:
         return
