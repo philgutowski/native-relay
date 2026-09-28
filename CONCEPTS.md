@@ -497,15 +497,22 @@ every unchecked box in a markdown tracker. A ready command that prints cards as 
 that read for a project whose rule labels cannot say. What ready means is the project's policy
 and lives in the sidecar, never in an adapter.
 
-A Cycle that finds nothing new to append reads as one of three different answers, and the Feeder
-tells them apart rather than treating all three as an empty queue. A source with no policy
+A Cycle that finds nothing new to append reads as one of four different answers, and the Feeder
+tells them apart rather than treating all four as an empty queue. A source with no policy
 configured at all, GitHub or Jira with nothing named for what ready means, is refused before a
 single Cycle runs, since no amount of waiting configures it. A source that answers but fails to,
 a real read error, is logged and offers nothing new that Cycle, waited on and asked again, and
 stops for a person only after enough failures in a row, because this one might resolve on its
-own. Only when the source is readable and genuinely has nothing new is it an empty queue: a Cycle
-with an empty queue, nothing left to run in the Manifest, and no Lease held ends the Feeder, at
-once by default, so no process is left polling an empty board.
+own. Ready cards that validate refuses outright, every one routed to a model its own Manifest will
+not accept, are not an empty queue either: only a person changing the routing releases them, so
+the Feeder stops there and names them. Ready cards the launch scan refuses are a fourth answer of
+their own, since issue #58: they wait like an empty queue, a card wanting a reword being a lesser
+urgency than a routing mismatch, but the Feeder's own leaving reason says `empty_queue_scanned`
+rather than `empty_queue` and names the cards, so a watcher never reads a board that in fact held
+work as one that was never ready. Only when the source is readable and every ready card clears
+both checks, and genuinely nothing new is left, is it a true empty queue: a Cycle with an empty
+queue, nothing left to run in the Manifest, and no Lease held ends the Feeder, at once by default,
+so no process is left polling an empty board.
 
 ### Model routing
 How the Feeder chooses a Task's model when it appends one. A routing file beside the Manifest

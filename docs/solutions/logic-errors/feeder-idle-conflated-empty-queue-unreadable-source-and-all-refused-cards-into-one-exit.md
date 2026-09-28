@@ -294,8 +294,39 @@ code has to keep distinguishable, and a persisted "already told you" table is it
 the same root cause: a boolean-shaped memory (`reported`) standing in for a question that
 actually has a lifetime attached to it, a process's, not a state file's.
 
+## Update (2026-09-27, task #75): the fourth cause still went generic on the way there
+
+Issue #58 above gave the *terminal* leaving event its own reason, `empty_queue_scanned`, so a
+watcher reading the last event of a run could tell a scanned out queue from a true empty one. It
+did not carry that fact on the *waits along the way* to that terminal event: with
+`idle_waits_max` above zero, every `waiting` event before the strike finally tripped still read
+the bare `idle`, the same word a genuinely empty queue waits under, and a `--once` run that met a
+scanned out queue before `idle_waits_max` forced the terminal branch left with the generic `once`
+reason, both silently dropping which cards were involved. A watcher following the events file, or
+reading a `--once` cron run's log, saw nothing to distinguish the two cases until the very last
+line, if `idle_waits_max` even let it get that far in one process's life.
+
+The fix threads the same `scan_refused` list `idle()` already has into `wait()` as an optional
+argument, which folds it into the `waiting` event's fields and, when `--once` shortcuts straight
+to leaving, into the `leaving` event's fields too, through a new `leave_extra` dict `wait()` sets
+beside `leave_reason`. The reason word also changes, from the bare `idle` to `idle_scanned`, so a
+reader does not need to inspect the fields to notice the difference. `CONCEPTS.md`'s Ready source
+entry, which had drifted to describe only three answers by name even though `idle()`'s own
+docstring already said four, was corrected in the same task to list the fourth explicitly.
+
+This is the same lesson as the fourth-cause update above, one layer further out: the union does
+not end at the exit code or even at the terminal reason word, it extends to every intermediate
+event a long running process emits about the same undecided state, and each one needs the same
+distinguishing fact if a watcher is expected to read it. Tests:
+`test_idle_waits_max_carries_the_scanned_out_fact_on_the_waiting_event` and
+`test_once_against_a_scanned_out_queue_carries_the_fact_on_the_leaving_event`
+(`tests/test_feeder.py`).
+
 ## Related Issues
 
+- `docs/solutions/logic-errors/a-hold-beside-a-rules-stop-was-recorded-and-logged-but-never-notified.md`
+  is a see-also from the same task: an unrelated root cause (an early return skipping a later
+  unconditional notify, in `settle()` rather than `idle()`), found in the same review round.
 - `docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`
   is a see-also, not a duplicate: no dimension of the problem, root cause, files, or solution
   overlaps, but its prevention section gestures at the same meta-level shape as this one, a

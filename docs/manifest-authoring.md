@@ -370,7 +370,8 @@ rendered brief. The launch scan is the one that decides; the dry run only previe
 `--dry-run`, a scanned card the feeder leaves out of the batch is logged once in
 `<stem>.feeder.log`, `<id> would be skipped at launch and is left out of the batch: <reason>`,
 named again at every feeder start and again if it scans clean and later trips the scan a second
-time.
+time. A card that drops off the ready list entirely and comes back still naming the same path
+keeps its old key instead: it is not named again until the feeder's next start.
 Each block the feeder appends carries a comment line with the time and the card's title, and a
 task it excludes gains `excluded = true` and a `reason` naming the halt class and cause line.
 Do not reorder or renumber what it wrote; order lives in the order file.
@@ -444,6 +445,11 @@ post_cycle_timeout_seconds = 3600
   not know, `hooks.post_cycle` before issue #37 for one, refuses that extract's `feed` with exit
   1 and refuses `validate` run from the same extract the same way. Pin an extract at least as new
   as every key the sidecar names.
+- An extract older than issue #53 carries no such protection either, but silently rather than
+  with a refusal: it has no hold check at all, so a feeder started from one, by hand or by
+  `--pin`, never refuses a start under a hold and runs a cycle over whatever the default branch
+  holds instead of stopping for a person to repair it. Pin an extract new enough to carry the
+  hold check too.
 - `ready.command`, `hooks.pre_cycle`, and `hooks.post_cycle` are argument lists, never shell
   strings, the same rule as `gate.command`. All three run in the target repository. The ready
   command prints a JSON array of cards, each with `id` or `number`, `title`, `body` or
@@ -474,13 +480,17 @@ post_cycle_timeout_seconds = 3600
   hook must leave the checkout on its default branch and clean, or the next cycle stops there.
 - A hold outlives the feeder. It is written to the state file, with the hook's failure, the
   cycle, the time, and the merge range, even when the cycle's own rules already stopped the
-  feeder. While it is set, every start is refused with exit 2 before it acts: by hand, by
+  feeder, and it is notified once when it is set, whatever else that cycle decided, so a rules
+  stop beside it (a run scoped halt, say) does not swallow the hold's own notification (issue
+  #53). While it is set, every start is refused with exit 2 before it acts: by hand, by
   `--restart` or `--pin` (the live feeder is never asked to leave), by `--detach` (no child
   starts), by `--dry-run`, and by a cron line running `--once`, which logs each refusal and
   notifies only the hold itself. `feed <manifest> --status` shows it. Repair the default
-  branch, then `feed <manifest> --release`, which clears the hold and starts nothing; start the
-  feeder after it. Turning `post_cycle_hold` off in the sidecar does not release a hold already
-  set. `--release` is refused beside a live feeder (exit 3) and beside any other flag.
+  branch, then `feed <manifest> --release`, which clears the hold and starts nothing, and also
+  removes a stop file left over from a `--stop` issued against the held feeder (which does not
+  check whether that feeder is still alive to read it), saying so; start the feeder after it.
+  Turning `post_cycle_hold` off in the sidecar does not release a hold already set. `--release`
+  is refused beside a live feeder (exit 3) and beside any other flag.
 - `post_cycle_mode = "detached"` starts the hook in its own session and does not wait; the log
   records its pid, and `post_cycle_hold` is refused beside it. The feeder polls each hook it
   started at the start of every later cycle and logs the exit code of one that has finished; a
@@ -553,7 +563,11 @@ could not be read three cycles in a row with nothing left to run, 2 every task d
 the whole usage limit allowance, or a blocking post cycle hook failed with `post_cycle_hold` on,
 or its hold is still set, 3 another feeder holds this manifest. A queue of only scanned out
 cards leaves with its own reason, `empty_queue_scanned`, naming the cards, not the plain
-`empty_queue` a truly empty board leaves with.
+`empty_queue` a truly empty board leaves with. While `idle_waits_max` is above zero, the same
+cards are named on every wait along the way there too: its `waiting` event reads `idle_scanned`
+rather than the bare `idle` a genuinely empty queue waits under, and a `--once` run that meets
+the same cycle carries the cards on its `leaving` event instead of losing them to the generic
+`once`.
 
 ## 12. Exit codes of a run
 

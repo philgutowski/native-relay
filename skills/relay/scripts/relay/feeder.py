@@ -84,9 +84,9 @@ A feeder answers for itself (issue #36). The state file carries a `process` reco
 host, start, runner tree, and current cycle, stamped with the exit and the reason when it
 leaves, and `liveness` checks that pid against this manifest's own lock file, so no watcher has
 to guess from a process listing that cannot tell two manifests apart. The events file,
-`<stem>.feeder.events.jsonl`, holds one JSON object per line for each start, cycle, result,
-wait, and leave, every one naming its manifest and pid, and `feed --follow` streams it. The log
-stays the human account; nothing reads its sentences.
+`<stem>.feeder.events.jsonl`, holds one JSON object per line for each start, cycle, result, a
+post cycle hook starting or finishing, wait, and leave, every one naming its manifest and pid,
+and `feed --follow` streams it. The log stays the human account; nothing reads its sentences.
 
 Everything project specific is data in the sidecar file, `<manifest stem>.feeder.toml`. It is a
 sidecar and not a manifest table because the feeder rewrites the manifest while older pinned
@@ -973,6 +973,9 @@ class Feeder:
         self.pid = os.getpid()
         # (reason word, sentence) for the `leaving` event, set where the feeder decides to go.
         self.leave_reason = None
+        # Extra fields the `leaving` event carries beside `leave_reason`, such as the ids of a
+        # scanned out queue a `--once` run met instead of waiting (issue #58).
+        self.leave_extra = {}
         # False until `run` has read the state file under the lock. A state file that could
         # not be read then holds the halt counts, so nothing may save over it.
         self.recording = False
@@ -1104,25 +1107,33 @@ class Feeder:
 
     def leave(self, code):
         """Stamp the process record and write the `leaving` event. `code` is None only for a
-        crash, which leaves by raising."""
+        crash, which leaves by raising. `leave_extra` rides beside `leave_reason`, for a fact a
+        bare reason word would otherwise drop, such as a scanned out queue's ids under `--once`
+        (issue #58)."""
         reason, message = self.leave_reason or ("once", "left after one cycle")
         process = self.state.get("process")
         if process and process.get("pid") == self.pid:
             process.update(left_at=self.deps.now().isoformat(timespec="seconds"),
                            exit_code=code, left_reason=reason, left_message=message)
-        self.emit(EVENT_LEAVING, exit_code=code, reason=reason, message=message)
+        self.emit(EVENT_LEAVING, exit_code=code, reason=reason, message=message,
+                  **self.leave_extra)
         return code
 
-    def wait(self, seconds, reason):
+    def wait(self, seconds, reason, scan_refused=None):
         """Sleep and go round again, or under --once leave without sleeping. `reason` is the
         word the `waiting` event carries: lease_held, usage_limit, model_held, unreadable_source,
-        idle."""
+        idle, or idle_scanned when `scan_refused` names the cards holding a scanned out queue
+        back from a true empty one (issue #58). Those ids ride on the `waiting` event and, under
+        `--once`, on the `leaving` event too, through `leave_extra`, so neither reads as a plain
+        idle wait when the board in fact held work the launch scan alone was holding back."""
+        extra = {"scan_refused": scan_refused} if scan_refused else {}
         if self.once:
             self.leave_reason = ("once", "left after one cycle instead of waiting (%s)" % reason)
+            self.leave_extra = extra
             return EXIT_OK
         until = self.deps.now() + timedelta(seconds=seconds)
         self.emit(EVENT_WAITING, reason=reason, seconds=seconds,
-                  until=until.isoformat(timespec="seconds"))
+                  until=until.isoformat(timespec="seconds"), **extra)
         self.deps.sleep(seconds)
         return None
 
@@ -1308,7 +1319,11 @@ class Feeder:
         `leaving` event must not call that a true empty queue either (issue #58): a watcher
         reading `empty_queue` off the last event would conclude nothing was ever ready, when the
         board in fact held work the scan alone was holding back. `empty_queue_scanned` says so
-        and names the cards.
+        and names the cards. The same fact rides on every wait along the way there too, not only
+        the terminal one: with `idle_waits_max` above zero the `waiting` event's reason is
+        `idle_scanned` rather than the bare `idle` a genuinely empty queue waits under, carrying
+        the same ids, and a `--once` run that meets the same cycle carries them on its `leaving`
+        event instead of losing them to the generic `once`.
 
         What is left is a true empty queue. By default the feeder leaves at once rather than
         keep a process alive to poll an empty board. `idle_waits_max` above zero waits that many
@@ -1339,6 +1354,11 @@ class Feeder:
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
                                       "is nothing left.", "empty_queue")
+        if scan_refused:
+            self.log("nothing ready except cards the launch scan refuses, and nothing unsettled, "
+                     "waiting (%d of %d): %s" % (self.state["idle_waits"], config.idle_waits_max,
+                                                 ", ".join(scan_refused)))
+            return self.wait(config.idle_wait_seconds, "idle_scanned", scan_refused=scan_refused)
         self.log("nothing ready and nothing unsettled, waiting (%d of %d)"
                  % (self.state["idle_waits"], config.idle_waits_max))
         return self.wait(config.idle_wait_seconds, "idle")
@@ -1353,7 +1373,11 @@ class Feeder:
         the rules ask for is only returned here, and taken after the hook, so a usage limit
         wait never delays it. A cycle the rules stop still runs it. A hold the hook asks for
         replaces what would have come next, going round or a wait; a stop the rules already
-        made stands, and the hold is in the log and in the `post_cycle` event. Either way the
+        made stands, and the hold is in the log and in the `post_cycle` event either way. But the
+        rules' own stop already logged and notified its own reason, not the hold's, so the hold
+        is notified here too whatever the rules decided (issue #53): otherwise a hold that lands
+        beside a rules stop is recorded and logged but never reaches the operator, and every later
+        refusal stays quiet on the reasoning that the hold itself already did. Either way the
         hold is in the state file too, and blocks every later start until `release_hold`."""
         data = self.deps.read_summary(manifest)
         after = {task["id"]: task for task in data.get("tasks", [])}
@@ -1368,8 +1392,10 @@ class Feeder:
         held = self.post_cycle(manifest, code, by_status, merge)
         if isinstance(outcome, Pending):
             return self.hold(held) if held else self.wait(outcome.seconds, outcome.reason)
-        if held and outcome in (None, EXIT_OK):
-            return self.hold(held)
+        if held:
+            if outcome in (None, EXIT_OK):
+                return self.hold(held)
+            self.notify(self._hold_message(held))
         return outcome
 
     def apply_rules(self, data, after, by_status):
@@ -1736,8 +1762,11 @@ class Feeder:
         `post_cycle_hold` on produces, else None.
 
         The hook learns the cycle from its environment, never from its arguments, so the
-        argument list stays exactly what the sidecar says. Its output goes to its own file,
-        and the feeder log and the `post_cycle` event carry the result."""
+        argument list stays exactly what the sidecar says. Its output goes to its own file, and
+        the feeder log and the `post_cycle` event carry the result, a blocking hook's exit code
+        or the reason it could not run. A detached hook has no result to carry yet at this point:
+        its `post_cycle` event is written when it starts, with its pid and no exit code, and the
+        feeder log and a later cycle's own start report what it exited once it is reaped."""
         config = self.config
         if not config.post_cycle_command:
             return None
@@ -1811,12 +1840,13 @@ class Feeder:
                   **said)
         return failure if held else None
 
+    def _hold_message(self, failure):
+        return ("stopping: the post cycle hook %s and post_cycle_hold is on. Read %s and repair "
+                "the default branch, then release the hold with `feed %s --release` and start "
+                "the feeder again." % (failure, self.paths.hook_out, self.paths.manifest))
+
     def hold(self, failure):
-        return self.stop(EXIT_HALTED, "stopping: the post cycle hook %s and post_cycle_hold is "
-                                      "on. Read %s and repair the default branch, then release "
-                                      "the hold with `feed %s --release` and start the feeder "
-                                      "again." % (failure, self.paths.hook_out,
-                                                  self.paths.manifest), HOLD_WORD)
+        return self.stop(EXIT_HALTED, self._hold_message(failure), HOLD_WORD)
 
     def reap_detached(self):
         """Poll each detached hook this feeder started, and log and forget the ones that have

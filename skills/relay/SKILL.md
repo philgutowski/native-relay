@@ -555,7 +555,9 @@ trips at launch. The launch scan is the one that decides; the dry run only previ
 `--dry-run`, a scanned card the feeder leaves out of the batch is logged once in
 `<stem>.feeder.log`, `<id> would be skipped at launch and is left out of the batch: <reason>`,
 named again at every feeder start and again if it scans clean and later trips the scan a second
-time.
+time. A card that drops off the ready list entirely and comes back still naming the same path
+keeps its old key instead: it is not named again until the feeder's next start, since nothing
+between cycles pops the key for a card the ready source is not currently offering.
 
 While a feeder is alive, do not `run` or `dispatch` its manifest by hand, and do not reorder the
 tasks it appended. `status`, `tail`, `summary`, and `audit` stay safe, since none takes the
@@ -565,8 +567,11 @@ every board's feeder, and has reported one board alive while it sat idle for hou
 checks the pid the feeder recorded against that manifest's own lock file. A watcher that needs
 each cycle as it happens runs `feed <manifest> --follow`, which prints JSON lines, `started`,
 `cycle_started`, `cycle_result`, `post_cycle_started` (a blocking post cycle hook has begun) and
-`post_cycle` (its result, including a hold), `waiting`, and `leaving`, each carrying a `reason`
-where one applies, and ends when the feeder leaves. To change its settings,
+`post_cycle` (a blocking hook's result, including a hold; a detached hook has none yet at that
+point, so its `post_cycle` carries its pid and no exit code, written when it starts), `waiting`,
+and `leaving`, each carrying a `reason` where one applies, and ends when the feeder leaves, or
+with a `not_running` line of its own when the feeder is gone without saying so. To change its
+settings,
 edit the sidecar and `feed <manifest> --restart`: a running feeder holds the settings and the
 code it loaded at its start, so a plain restart with no `--pin` keeps running from a checkout
 when it was never pinned. Add `--pin`, run from a git work tree, to also re-extract the current
@@ -581,17 +586,25 @@ after `idle_waits_max` waits). A queue held entirely by cards the launch scan re
 same way but leaves with its own reason, `empty_queue_scanned`, naming the cards, since only a
 reworded card releases them and a watcher must not read that as nothing ever being ready; such a
 card is named again at every feeder start and again whenever it scans clean and later trips the
-scan a second time. 1 a person is needed: the checkout is dirty or off its default
+scan a second time. While `idle_waits_max` is above zero, each wait along the way there carries
+the same fact rather than only the terminal one: its `waiting` event reads `idle_scanned`, not
+the bare `idle` a genuinely empty queue waits under, and a `--once` run that meets the same cycle
+carries the cards on its `leaving` event too. 1 a person is needed: the checkout is dirty or off
+its default
 branch, the ready source is not configured, the runner refused the manifest, the run halted with
 a run scoped class (nothing is counted against the task then), a task that halted twice could
 not be excluded, every ready card was refused with the model it is routed to, or the ready
 source could not be read three cycles in a row with nothing left to run. 2 every task has died
 quickly for `limit_waits_max` waits (16 by default, eight hours), with only fallback moves
 between them, which is not a usage limit or one that outlasts the waits, so read the summary; or a blocking
-post cycle hook failed with `post_cycle_hold` on. That hold is saved in the state file, and
+post cycle hook failed with `post_cycle_hold` on, notified once when the hold is set whatever
+else that cycle already decided. That hold is saved in the state file, and
 every later start, `--restart`, `--pin`, `--detach`, `--dry-run`, or a cron `--once`, is refused
 with 2 until the operator repairs the default branch and runs `feed <manifest> --release`;
-`feed --status` shows it. 3 another feeder already holds this manifest.
+`feed --status` shows it. `--release` also removes a stop file left over from a `--stop` against
+the held feeder, which does not check whether that feeder is still alive to read it, and says so;
+left in place, the next start would see it and leave before its first cycle instead of running. 3
+another feeder already holds this manifest.
 
 Three things the feeder tells the operator that a summary alone would not. A task it excluded
 after two halts carries `excluded = true` and a `reason` naming the halt class in the manifest
