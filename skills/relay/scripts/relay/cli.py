@@ -185,6 +185,12 @@ def build_parser():
                            help="clear the hold a failed post cycle hook left, once the default "
                                 "branch is repaired; no feeder starts a cycle while it is set. "
                                 "Starts nothing itself")
+    feed_verb.add_argument("--clear-limits", action="store_true", dest="clear_limits",
+                           help="clear every model's usage limit mark and the row of usage "
+                                "limit waits, once the limit is over, so held tasks run at the "
+                                "next cycle; halts, reports, and queued retries stay. Alone it "
+                                "starts nothing and is refused while a feeder runs; with "
+                                "--restart the new feeder clears them as it takes over")
     feed_verb.add_argument("--pin", action="store_true",
                            help="extract the default branch's commit, never HEAD, under "
                                 "~/.relay/extracts and start the feeder from that extract with "
@@ -844,8 +850,9 @@ def cmd_dispatch(args, env, out):
 
 def cmd_feed(args, env, out, deps=None):
     """The feeder (feeder plan). Exit codes keep the contract every verb has: 0 the feeder left
-    on its own terms (the stop file, an empty queue, `--once`, `--dry-run`, `--release`), 1 the
-    manifest, the sidecar, the ready source, or the checkout needs a person, 2 every task died
+    on its own terms (the stop file, an empty queue, `--once`, `--dry-run`, `--release`,
+    `--clear-limits`), 1 the manifest, the sidecar, the ready source, or the checkout needs a
+    person, or `--clear-limits` met a live feeder without `--restart`, 2 every task died
     quickly for the whole usage limit allowance, or a held post cycle hook failed, or its hold
     is still set, 3 another feeder holds this manifest.
 
@@ -861,12 +868,25 @@ def cmd_feed(args, env, out, deps=None):
         ("--dry-run", args.dry_run), ("--once", args.once), ("--stop", args.stop),
         ("--restart", args.restart), ("--pin", args.pin), ("--detach", args.detach),
         ("--notify", args.notify), ("--retry-blocked", args.retry_blocked),
-        ("--release", args.release)) if on]
+        ("--release", args.release), ("--clear-limits", args.clear_limits)) if on]
     if watching:
         # A watcher's flags read only. Beside a flag that starts, stops, or changes a feeder,
         # one of the two would be silently dropped, so the pair is refused instead.
         if acting:
             out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(acting))
+            return EXIT_CONFIG
+    if args.clear_limits:
+        # Alone it is its own act, like `--release`. With `--restart` it rides on the feeder
+        # that takes over, and that feeder clears under the lock. A dry run writes nothing, and
+        # a stop or a release beside it would be two acts in one step.
+        if args.restart:
+            clash = [flag for flag in acting if flag in ("--dry-run", "--stop", "--release")]
+            said = "--clear-limits --restart clears as the new feeder takes over"
+        else:
+            clash = [flag for flag in acting if flag != "--clear-limits"]
+            said = "--clear-limits starts nothing unless --restart is given"
+        if clash:
+            out.write("%s; drop %s\n" % (said, ", ".join(clash)))
             return EXIT_CONFIG
     if args.release:
         # Its own act, like `--stop`. Beside a flag that starts a feeder it would be a release
@@ -896,6 +916,8 @@ def cmd_feed(args, env, out, deps=None):
         return EXIT_CONFIG
     if args.release:
         return _release_hold(paths, out)
+    if args.clear_limits and not args.restart:
+        return _clear_limits(paths, out)
     if args.retry_blocked:
         # Before detaching and before a restart asks a live feeder to leave (issue #46): the id
         # was checked only inside `cycle()`, which runs after both of those, so a typo took down
@@ -910,7 +932,8 @@ def cmd_feed(args, env, out, deps=None):
                       % ", ".join(unknown))
             return EXIT_CONFIG
     if watching:
-        return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep)
+        return _watch_feeder(args, paths, out, deps.sleep if deps else time.sleep,
+                             deps.now if deps else datetime.now)
     # Before a detach, a pin, or a restart asks a live feeder to leave (issue #53): a start that
     # would only refuse inside its first cycle must not take down a running feeder or leave a
     # detached child to say so where nobody reads it. The loop checks again, for the hold a
@@ -958,7 +981,8 @@ def cmd_feed(args, env, out, deps=None):
             deps = feeder_module.build_deps(config, env, notifier=notify.build(args.notify),
                                             notify_on=args.notify)
         loop = feeder_module.Feeder(paths, config, deps, env, out, dry_run=args.dry_run,
-                                    once=args.once, retry_blocked=args.retry_blocked)
+                                    once=args.once, retry_blocked=args.retry_blocked,
+                                    clear_limits=args.clear_limits)
     except feeder_module.ConfigError as exc:
         out.write("%s\n" % exc)
         return EXIT_CONFIG
@@ -1040,7 +1064,40 @@ def _release_hold(paths, out):
     return EXIT_OK
 
 
-def _watch_feeder(args, paths, out, sleep):
+def _clear_limits(paths, out):
+    """`feed --clear-limits` with no `--restart` (usage limit plan, R13): clear every model's
+    mark and the row of usage limit waits in the state file, for an operator who knows the limit
+    is over. Under the feeder lock, as `_release_hold` is, so no feeder saves its own copy over
+    this write. A feeder alive is refused with the config exit and nothing changes: it holds
+    its marks in memory too, and `--restart` is how it hands them over cleared. Starts nothing."""
+    lock = feeder_module.acquire_lock(paths)
+    if lock is None:
+        out.write("a feeder holds %s; nothing cleared. A running feeder would save its own marks "
+                  "back, so clear them as a new feeder takes over with feed %s --clear-limits "
+                  "--restart\n" % (paths.lock, paths.manifest))
+        return EXIT_CONFIG
+    try:
+        try:
+            cleared, unlogged = feeder_module.clear_limits(paths)
+        except feeder_module.ConfigError as exc:
+            out.write("%s. %s\n" % (exc, feeder_module.STATE_HINT))
+            return EXIT_CONFIG
+        except OSError as exc:
+            out.write("the usage limits could not be cleared, they are still set: %s\n" % exc)
+            return EXIT_CONFIG
+    finally:
+        lock.close()
+    if cleared is None:
+        out.write("no feeder state for %s; nothing to clear\n" % paths.manifest)
+        return EXIT_OK
+    out.write("%s\n" % feeder_module.cleared_sentence(cleared))
+    if unlogged:
+        out.write("note: the clearing is done but could not be written to %s: %s\n"
+                  % (paths.log, unlogged))
+    return EXIT_OK
+
+
+def _watch_feeder(args, paths, out, sleep, now=datetime.now):
     """`feed --status`, `--events`, and `--follow` (issue #36). Each reads the files beside the
     manifest and nothing else: the manifest is not loaded and nothing is written, so all three
     are safe beside a live feeder. `--status` takes a brief shared lock to test liveness, and
@@ -1049,7 +1106,7 @@ def _watch_feeder(args, paths, out, sleep):
     as `running`."""
     if args.feed_status:
         try:
-            report = feeder_module.status_report(paths)
+            report = feeder_module.status_report(paths, now=now)
         except feeder_module.ConfigError as exc:
             out.write("%s\n" % exc)
             return EXIT_CONFIG
@@ -1123,7 +1180,8 @@ def _pin_feeder(args, pin, out, env):
                                                   "relay_cli.py"), "feed", args.manifest,
                "--restart"]
     command += [flag for flag, on in (("--once", args.once), ("--detach", args.detach),
-                                      ("--notify", args.notify))
+                                      ("--notify", args.notify),
+                                      ("--clear-limits", args.clear_limits))
                 if on]
     command += run_module.retry_blocked_argv(frozenset(args.retry_blocked))
     proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -1140,7 +1198,8 @@ def _detach_feeder(args, paths, config, env, out):
     entry = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_cli.py")
     command = [sys.executable, "-u", entry, "feed", paths.manifest]
     command += [flag for flag, on in (("--once", args.once), ("--restart", args.restart),
-                                      ("--notify", args.notify)) if on]
+                                      ("--notify", args.notify),
+                                      ("--clear-limits", args.clear_limits)) if on]
     command += run_module.retry_blocked_argv(frozenset(args.retry_blocked))
     if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
         command = ["caffeinate", "-i"] + command

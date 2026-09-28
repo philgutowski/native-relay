@@ -579,6 +579,25 @@ class DeferFlag(CliCase):
         self.assertEqual(dispatch.call_args.kwargs["defer"], frozenset({"T-2"}))
 
 
+class ClearLimitsFlag(unittest.TestCase):
+    """U5 of the usage limit plan (R13): `feed --clear-limits` at the command line. What it
+    does to a state file and a feeder is pinned by `test_feeder.LimitVisibility`."""
+
+    def test_the_flag_is_off_by_default_and_on_when_given(self):
+        parse = cli.build_parser().parse_args
+        self.assertFalse(parse(["feed", "m.toml"]).clear_limits)
+        self.assertTrue(parse(["feed", "m.toml", "--clear-limits", "--restart"]).clear_limits)
+
+    def test_feed_help_shows_the_flag_and_what_it_leaves(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["feed", "--help"])
+        help_text = " ".join(printed.getvalue().split())
+        self.assertIn("--clear-limits", help_text)
+        self.assertIn("halts, reports, and queued retries stay", help_text)
+        self.assertIn("with --restart the new feeder clears them as it takes over", help_text)
+
+
 class FollowedRun(CliCase):
     """U3: `run --follow` launches the runner, follows it from the launch, and reports."""
 
