@@ -1172,6 +1172,12 @@ class Feeder:
                               len(launch.running), scanned, held)
         held_fresh = [card["id"] for card in fresh
                       if card["id"] in held and card["id"] not in scanned]
+        if not self.dry_run:
+            # A held card is work the mark holds back as much as a held Task is, so `--status`
+            # names it beside them, on the model it is routed to.
+            self.state.setdefault("last_held", {}).update(
+                {card["id"]: choose_model(card, routing, config)[0] for card in fresh
+                 if card["id"] in held_fresh})
         entries = []
         for card in batch:
             model, note = routes[card["id"]]
@@ -2215,13 +2221,23 @@ def liveness(paths, state, hostname=None):
                       "went down" % pid}
 
 
-def status_marks(state, fallback_hours, now):
+def status_marks(state, paths, now):
     """{model: {since, until, source, expired}} for each mark in the state file (R12). A mark an
-    older feeder wrote as a bare time reads as `read_mark` reads it; one that cannot be read at
-    all is shown with no times and source `unreadable`, since the feeder drops it next Cycle."""
+    older feeder wrote as a bare time reads as `read_mark` reads it, which is the one case that
+    needs the sidecar's `fallback_hours`, so only then is the sidecar read. One that cannot be
+    read, like any sidecar problem, only costs that mark its exact expiry: the default stands.
+    A mark that cannot be read at all is shown with no times and source `unreadable`, since the
+    feeder drops it next Cycle."""
+    exhausted = state.get("exhausted") or {}
+    hours = Config().fallback_hours
+    if any(isinstance(value, str) for value in exhausted.values()):
+        try:
+            hours = load_config(paths.config).fallback_hours
+        except (ConfigError, OSError):
+            pass
     marks = {}
-    for model, value in (state.get("exhausted") or {}).items():
-        mark = read_mark(value, fallback_hours)
+    for model, value in exhausted.items():
+        mark = read_mark(value, hours)
         if mark is None:
             marks[model] = {"since": None, "until": None, "source": "unreadable", "expired": True}
         else:
@@ -2229,23 +2245,26 @@ def status_marks(state, fallback_hours, now):
     return marks
 
 
+def status_held(state, marks):
+    """{id: model} for the Tasks and cards the last Cycle held, less any whose model has no live
+    mark left: the snapshot is only rewritten by a Cycle, so after the feeder leaves it would
+    otherwise go on naming work a mark that has since expired no longer holds."""
+    return {task_id: model for task_id, model in (state.get("last_held") or {}).items()
+            if not (marks.get(model) or {"expired": True})["expired"]}
+
+
 def status_report(paths, hostname=None, now=datetime.now):
     """What `feed --status --json` prints: the liveness answer beside what the state file holds
     about the feeder, its last cycle, its last event, and the usage limit state: the marks, the
-    Tasks the last Cycle held, the queued retries, and the row of usage limit waits. Raises
-    ConfigError on an unreadable state file. A sidecar that cannot be read only costs a bare
-    time mark its exact expiry, so it falls back to the default `fallback_hours`."""
+    Tasks and cards the last Cycle held, the queued retries, and the row of usage limit waits.
+    Raises ConfigError on an unreadable state file."""
     state = read_state(paths)
-    try:
-        hours = load_config(paths.config).fallback_hours
-    except ConfigError:
-        hours = Config().fallback_hours
+    marks = status_marks(state, paths, now())
     report = {"manifest": paths.manifest, "state_path": paths.state, "events_path": paths.events,
               "process": state.get("process"), "cycles": state.get("cycles", 0),
               "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event"),
-              "hold": state.get("hold") or None,
-              "marks": status_marks(state, hours, now()),
-              "held": dict(state.get("last_held") or {}),
+              "hold": state.get("hold") or None, "marks": marks,
+              "held": status_held(state, marks),
               "retry_blocked": sorted(state.get("retry_blocked") or {}, key=natural_key),
               "limit_waits": state.get("limit_waits", 0)}
     report.update(liveness(paths, state, hostname=hostname))
@@ -2254,7 +2273,7 @@ def status_report(paths, hostname=None, now=datetime.now):
 
 def limit_lines(report):
     """The usage limit lines of `feed --status`, none when nothing is marked, held, queued, or
-    counted: one per mark with its expiry and where that came from, then the held Tasks, the
+    counted: one per mark with its expiry and where that came from, then the held work, the
     row, and the queued retries."""
     lines = []
     for model, mark in sorted((report.get("marks") or {}).items()):
@@ -2274,9 +2293,10 @@ def limit_lines(report):
     if report.get("limit_waits"):
         lines.append("usage limit waits in a row: %s" % report["limit_waits"])
     if lines:
-        # Not for the retry queue alone, which `--clear-limits` leaves where it is.
-        lines.append("clear them with feed %s --clear-limits once the limit is over"
-                     % report["manifest"])
+        # Not for the retry queue alone, which `--clear-limits` leaves where it is. A live
+        # feeder refuses the bare flag, so the hint names the form it takes.
+        lines.append("clear them with feed %s --clear-limits%s once the limit is over"
+                     % (report["manifest"], " --restart" if report.get("running") else ""))
     if report.get("retry_blocked"):
         lines.append("queued retries: %s" % _ids(report["retry_blocked"]))
     return lines

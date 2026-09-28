@@ -2888,7 +2888,7 @@ class LimitVisibility(FeederCase):
         self.limited_state()
         for flags, said in (
                 (("--clear-limits", "--once"),
-                 "--clear-limits starts nothing unless --restart is given; drop --once"),
+                 "--clear-limits starts nothing unless --restart or --pin is given; drop --once"),
                 (("--clear-limits", "--detach"), "drop --detach"),
                 (("--clear-limits", "--release"), "drop --release"),
                 (("--clear-limits", "--restart", "--dry-run"),
@@ -2954,6 +2954,65 @@ class LimitVisibility(FeederCase):
         report = json.loads(self.call("--status", "--json")[1])
         self.assertEqual(report["marks"]["opus"]["until"], "2026-09-19T13:00:00")
         self.assertEqual(report["marks"]["opus"]["source"], "fallback_hours")
+
+    def test_a_pinned_takeover_carries_the_flag_to_the_extract(self):
+        # `--pin` takes over as `--restart` does, so the pair is not refused.
+        proc = mock.MagicMock(stdout=[], returncode=0)
+        proc.__enter__.return_value = proc
+        with mock.patch.object(feeder, "checkout_warning", return_value="edits reach cycles"), \
+                mock.patch.object(cli, "_pin_plan", return_value=SimpleNamespace()), \
+                mock.patch.object(cli, "_pin_line", return_value="the extract"), \
+                mock.patch.object(feeder, "pin_extract", return_value="/extract"), \
+                mock.patch.object(cli.subprocess, "Popen", return_value=proc) as popen:
+            code, text = self.call("--clear-limits", "--pin")
+        self.assertEqual(code, 0, text)
+        command = popen.call_args.args[0]
+        self.assertIn("--clear-limits", command)
+        self.assertIn("--restart", command)
+
+    def test_status_beside_a_live_feeder_names_the_restart_form_of_the_flag(self):
+        self.limited_state(process={"pid": os.getpid(), "hostname": feeder.socket.gethostname(),
+                                    "started_at": "2026-09-19T08:00:00", "cycle": 1})
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--status")
+        finally:
+            held.close()
+        self.assertIn("feeder: running", text)
+        self.assertIn("clear them with feed %s --clear-limits --restart once the limit is over"
+                      % self.manifest_path, text)
+        code, text = self.call("--status")
+        self.assertIn("clear them with feed %s --clear-limits once the limit is over"
+                      % self.manifest_path, text)
+
+    def test_status_names_a_held_card_beside_the_held_tasks(self):
+        # fable is marked with no fallback: card 2, routed there, is held and never appended.
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"fable": dict(self.CLI_MARK)})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.plans = [{}]
+        self.feed(feeder.Config(default_model="sonnet"), once=True)
+        self.assertNotIn("2", self.listed())
+        report = json.loads(self.call("--status", "--json")[1])
+        self.assertEqual(report["held"], {"2": "fable"})
+
+    def test_status_drops_a_held_task_whose_mark_has_expired(self):
+        # The snapshot is only rewritten by a Cycle, and no feeder has cycled since.
+        self.limited_state()
+        self.clock = datetime(2026, 9, 19, 9, 30)
+        code, text = self.call("--status")
+        self.assertIn("usage limit mark: fable until 2026-09-19T09:04:00", text)
+        self.assertNotIn("held by a usage limit", text)
+        self.assertEqual(json.loads(self.call("--status", "--json")[1])["held"], {})
+
+    def test_status_survives_a_sidecar_it_cannot_open(self):
+        os.mkdir(self.paths.config)
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"opus": "2026-09-19T08:00:00"})))
+        code, text = self.call("--status", "--json")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(json.loads(text)["marks"]["opus"]["until"], "2026-09-19T13:00:00")
 
     def test_status_with_no_marks_prints_no_limit_lines(self):
         self.plans = [{}]

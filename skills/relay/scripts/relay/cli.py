@@ -190,7 +190,8 @@ def build_parser():
                                 "limit waits, once the limit is over, so held tasks run at the "
                                 "next cycle; halts, reports, and queued retries stay. Alone it "
                                 "starts nothing and is refused while a feeder runs; with "
-                                "--restart the new feeder clears them as it takes over")
+                                "--restart or --pin the new feeder clears them as it takes "
+                                "over")
     feed_verb.add_argument("--pin", action="store_true",
                            help="extract the default branch's commit, never HEAD, under "
                                 "~/.relay/extracts and start the feeder from that extract with "
@@ -875,16 +876,18 @@ def cmd_feed(args, env, out, deps=None):
         if acting:
             out.write("--status, --events, and --follow only read; drop %s\n" % ", ".join(acting))
             return EXIT_CONFIG
+    # `--pin` carries restart semantics of its own, so it takes over as `--restart` does.
+    takes_over = args.restart or args.pin
     if args.clear_limits:
         # Alone it is its own act, like `--release`. With `--restart` it rides on the feeder
         # that takes over, and that feeder clears under the lock. A dry run writes nothing, and
         # a stop or a release beside it would be two acts in one step.
-        if args.restart:
+        if takes_over:
             clash = [flag for flag in acting if flag in ("--dry-run", "--stop", "--release")]
             said = "--clear-limits --restart clears as the new feeder takes over"
         else:
             clash = [flag for flag in acting if flag != "--clear-limits"]
-            said = "--clear-limits starts nothing unless --restart is given"
+            said = "--clear-limits starts nothing unless --restart or --pin is given"
         if clash:
             out.write("%s; drop %s\n" % (said, ", ".join(clash)))
             return EXIT_CONFIG
@@ -916,7 +919,7 @@ def cmd_feed(args, env, out, deps=None):
         return EXIT_CONFIG
     if args.release:
         return _release_hold(paths, out)
-    if args.clear_limits and not args.restart:
+    if args.clear_limits and not takes_over:
         return _clear_limits(paths, out)
     if args.retry_blocked:
         # Before detaching and before a restart asks a live feeder to leave (issue #46): the id

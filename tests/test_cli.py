@@ -595,7 +595,8 @@ class ClearLimitsFlag(unittest.TestCase):
         help_text = " ".join(printed.getvalue().split())
         self.assertIn("--clear-limits", help_text)
         self.assertIn("halts, reports, and queued retries stay", help_text)
-        self.assertIn("with --restart the new feeder clears them as it takes over", help_text)
+        self.assertIn("with --restart or --pin the new feeder clears them as it takes over",
+                      help_text)
 
 
 class FollowedRun(CliCase):
