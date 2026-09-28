@@ -255,10 +255,18 @@ class FenceReader(unittest.TestCase):
         text = "```relay-test-report\n{\"a\": \"shows ```code```\"}\n```\n"
         self.assertEqual(self.read(text), "{\"a\": \"shows ```code```\"}\n")
 
-    def test_the_opener_is_a_line_of_its_own_and_the_tag_is_exact(self):
-        self.assertIsNone(self.read("see ```relay-test-report\n{\"a\": 1}\n```\n"))
+    def test_the_tag_is_exact(self):
         self.assertIsNone(self.read("```relay-test-reports\n{\"a\": 1}\n```\n"))
         self.assertIsNone(self.read("```relay-envelope\n{\"a\": 1}\n```\n"))
+
+    def test_a_longer_opening_fence_and_a_list_marker_before_it_are_accepted(self):
+        """Code review on #118: the grammar before this task checked nothing ahead of the
+        opener's backticks, so a four backtick opener around a body that carries three, and an
+        opener written right after a list marker, both read; the reader keeps that."""
+        self.assertEqual(self.read("````relay-test-report\n{\"a\": \"```\"}\n````\n"),
+                         "{\"a\": \"```\"}\n")
+        self.assertEqual(self.read("- ```relay-test-report\n  {\"a\": 1}\n  ```\n"),
+                         "  {\"a\": 1}\n")
 
     def test_carriage_returns_and_trailing_spaces_are_allowed_on_both_fences(self):
         self.assertEqual(self.read("```relay-test-report \r\n{\"a\": 1}\r\n```  \r\n"),

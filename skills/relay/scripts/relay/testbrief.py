@@ -172,6 +172,12 @@ def values(kind, url, commit, tour, cards=(), stopped_areas=()):
         "tour": brief.defang(str(tour)).strip(),
         "cards": _cards_block(cards),
         "report_tag": contracts.TEST_REPORT_FENCE_TAG,
+        # The example finding's `card`, as JSON: null on a tour, where the instruction says
+        # every finding's card is null, and a string on a check, so the example never
+        # contradicts the instruction and a check process sees the id written as a string
+        # (issue #118). A fixed example id rather than a real card's, since the example sits
+        # outside the data fence.
+        "card_example": "null" if kind == testloop.TOUR else "\"12\"",
     }
 
 
@@ -266,16 +272,6 @@ def _strings(value):
                                            for item in value)
 
 
-def _with_string_card(finding):
-    """The finding with its `card` as a string. A model on a check pass writes the id it
-    copied from the card heading as a number (issue #118); the validator accepts an integer,
-    and every reader after the parser sees one type."""
-    card = finding.get("card")
-    if isinstance(card, int) and not isinstance(card, bool):
-        return dict(finding, card=str(card))
-    return finding
-
-
 def parse_text(text):
     """Read a Test report from the text of a final message. Every problem is a `Report` whose
     `error` names it, never an exception, so the pass code has one shape to record."""
@@ -319,7 +315,7 @@ def parse_text(text):
     if not _strings(approval_steps):
         return Report(error="approval_steps must be an array of non empty strings")
     return Report(status=status, reason=reason,
-                  findings=tuple(_with_string_card(finding) for finding in findings),
+                  findings=tuple(testloop.with_string_card(finding) for finding in findings),
                   approval_steps=tuple(step.strip() for step in approval_steps))
 
 

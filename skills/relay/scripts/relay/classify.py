@@ -256,10 +256,15 @@ def _list_after(block, key):
     by a plain paragraph, which is one item per line. The paragraph case came from the first
     live run: the process wrote its blocker as prose under `blockers:` and the record read "no
     blocker text in the envelope" while the text sat one line below. The list ends at the next
-    `key:` line, or at the first blank line once something has been collected."""
-    match = re.search(r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:[ \t]*(.*)$" % re.escape(key), block, re.M)
-    if not match:
+    `key:` line, or at the first blank line once something has been collected. The last `key:`
+    line in the block is the one read, the same rule `parse_envelope` applies to the status,
+    so the whole message scan reads every field from the same, last, envelope when the text
+    holds a draft above it (code review on issue #118)."""
+    matches = list(re.finditer(r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:[ \t]*(.*)$" % re.escape(key),
+                               block, re.M))
+    if not matches:
         return []
+    match = matches[-1]
     inline = match.group(1).strip().strip("`*")
     if inline and inline.lower() not in ("none", "[]", "null", "n/a", "-"):
         return [inline]

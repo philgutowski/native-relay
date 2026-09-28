@@ -82,7 +82,7 @@ whole, so put every finding in it. Its shape:
       "expected": "Three results",
       "observed": "Two results",
       "done_when": ["A search that matches three items shows three results"],
-      "card": "12"
+      "card": $card_example
     }
   ]
 }
@@ -92,5 +92,6 @@ whole, so put every finding in it. Its shape:
 is `high`, `medium`, or `low`; `kind` is `defect` or `improvement`; `design` is true when the
 finding changes what a user sees; `cause.verdict` is `defect` or `intended`; `steps` and
 `done_when` are non empty lists. `card` is the id of the landed card the finding came from on a
-check pass, written as a string exactly as the card's heading shows it, and null on a tour. `approval_steps` lists every approval step you reached and left
-unapproved. A missing or malformed block records this pass as failed and files nothing.
+check pass, written as a string exactly as the card's heading shows it, and null on a tour.
+`approval_steps` lists every approval step you reached and left unapproved. A missing or
+malformed block records this pass as failed and files nothing.

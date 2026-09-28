@@ -5,6 +5,7 @@ the built in skill the brief names. Each pin names its source so a version bump 
 Relay's own vocabulary (halt classes, record statuses, the envelope fence tag, the closeout
 terminal lines) lives here too so brief, classify, closeout, verify, and summary share one set.
 """
+import functools
 import re
 
 # Backward-compatible Claude pin. New terminal records use the per-backend values in
@@ -46,11 +47,14 @@ TEST_REPORT_FENCE_TAG = "relay-test-report"
 FILED_FENCE_TAG = "relay-filed"
 
 
+@functools.lru_cache(maxsize=None)
 def fence_opener_regex(tag):
-    """The opening fence of a block Relay reads back: a line of its own carrying exactly
-    `tag`, with any indentation before it, since a process that writes the block inside a list
-    item indents the opener with the rest."""
-    return re.compile(r"^[ \t]*```%s[ \t]*\r?$" % re.escape(tag), re.M)
+    """The opening fence of a block Relay reads back: three or more backticks carrying exactly
+    `tag`, ending the line. Nothing before the backticks is checked, the acceptance the grammar
+    before issue #118 had: a process that writes the block inside a list item indents the
+    opener or puts it after the list marker, and Markdown lets a process open with four
+    backticks when the body carries three. Compiled once per tag."""
+    return re.compile(r"```+%s[ \t]*\r?$" % re.escape(tag), re.M)
 
 
 # The closing fence: a line that is only backticks, three or more, with any indentation and
@@ -78,12 +82,10 @@ def last_fenced_block(text, tag):
     is only a fence inside a learning does end the block early; the Task brief tells the
     process to quote a fence inline rather than on a line of its own."""
     text = text or ""
-    opener = None
-    for opener in fence_opener_regex(tag).finditer(text):
-        pass
-    if opener is None:
+    openers = list(fence_opener_regex(tag).finditer(text))
+    if not openers:
         return None
-    start = opener.end()
+    start = openers[-1].end()
     if start < len(text) and text[start] == "\n":
         start += 1
     closer = FENCE_CLOSER_RE.search(text, start)

@@ -525,10 +525,23 @@ class ParseText(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("card", report.error)
 
-    def test_the_templates_example_shows_the_card_id_as_a_string(self):
-        text = testbrief.render(testloop.CHECK, URL, COMMIT, TOUR, cards=CARDS)
-        self.assertIn('"card": "12"', text)
-        self.assertNotIn('"card": 12', text)
+    def test_the_templates_example_shows_the_card_id_as_a_string_on_a_check_and_null_on_a_tour(self):
+        """Code review on #118: the tour instruction says every finding's card is null, so
+        the example must not show an id there, and on a check it shows the id as a string."""
+        check = testbrief.render(testloop.CHECK, URL, COMMIT, TOUR, cards=CARDS)
+        self.assertIn('"card": "12"', check)
+        self.assertNotIn('"card": 12', check)
+        self.assertNotIn('"card": null', check)
+        tour = testbrief.render(testloop.TOUR, URL, COMMIT, TOUR)
+        self.assertIn('"card": null', tour)
+        self.assertNotIn('"card": "12"', tour)
+        for text in (check, tour):
+            self.assertTrue(testbrief.parse_text(text).ok)
+
+    def test_with_string_card_is_the_test_loops_one_rule(self):
+        self.assertEqual(testloop.with_string_card(finding(card=12))["card"], "12")
+        self.assertEqual(testloop.with_string_card(finding(card="T-1"))["card"], "T-1")
+        self.assertIsNone(testloop.with_string_card(finding(card=None))["card"])
 
 
 class FinalMessage(unittest.TestCase):

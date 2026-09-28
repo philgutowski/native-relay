@@ -411,6 +411,23 @@ class EnvelopeParsing(unittest.TestCase):
         self.assertEqual(env["status"], "complete")
         self.assertFalse(env["fenced"])
 
+    def test_the_whole_message_scan_reads_every_field_from_the_last_envelope(self):
+        """Code review on #118: with a closed draft above an unterminated final envelope, the
+        scan took the last status but the first `blockers:`, so a complete record carried the
+        draft's blocker. Every field now comes from its last key line."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: blocked\nblockers: the gate\n```\n\nFixed, final:\n"
+            "```relay-envelope\nstatus: complete\nblockers:\nchanged_files:\n- a.py\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertFalse(env["fenced"])
+        self.assertEqual(env["blockers"], [])
+        self.assertEqual(env["changed_files"], ["a.py"])
+
+    def test_an_envelope_opened_after_a_list_marker_is_fenced(self):
+        env = classify.parse_envelope("- ```relay-envelope\n  status: complete\n  ```\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+
     def test_a_triple_backtick_inside_a_blocker_does_not_end_the_block(self):
         """Issue #111: a blocker that quotes a code fence used to close the envelope at that
         point, and the parser read a partial block with the blocker cut short."""
