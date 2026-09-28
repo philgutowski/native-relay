@@ -859,6 +859,63 @@ class WhoNotifies(CliCase):
         self.closeout_landed("T-3")
 
 
+class TestVerb(CliCase):
+    """U5 of the browser test loop plan: the `test` verb's command line and its refusals. A
+    pass end to end is `test_testpass`; here the flags and the exits before anything launches."""
+
+    def test_tour_or_cards_is_required_and_they_exclude_each_other(self):
+        parse = cli.build_parser().parse_args
+        args = parse(["test", "m.toml", "--tour"])
+        self.assertTrue(args.tour)
+        self.assertIsNone(args.cards)
+        args = parse(["test", "m.toml", "--cards", "12", "13", "--report-only",
+                      "--stopped-area", "Search", "--stopped-area", "Invoices",
+                      "--plan-area", "Settings", "--budget", "4", "--model", "sonnet"])
+        self.assertEqual(args.cards, ["12", "13"])
+        self.assertTrue(args.report_only)
+        self.assertEqual(args.stopped_areas, ["Search", "Invoices"])
+        self.assertEqual(args.plan_areas, ["Settings"])
+        self.assertEqual(args.budget, 4)
+        self.assertEqual(args.model, "sonnet")
+        for argv in (["test", "m.toml"], ["test", "m.toml", "--tour", "--cards", "1"]):
+            with self.assertRaises(SystemExit) as caught:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    parse(argv)
+            self.assertEqual(caught.exception.code, cli.EXIT_CONFIG)
+
+    def test_the_flags_default_to_a_plain_filing_pass(self):
+        args = cli.build_parser().parse_args(["test", "m.toml", "--tour"])
+        self.assertFalse(args.report_only)
+        self.assertEqual((args.stopped_areas, args.plan_areas, args.budget, args.model),
+                         ([], [], None, None))
+
+    def test_a_manifest_with_no_sidecar_is_refused_before_anything_launches(self):
+        code, text = self.call("test", self.manifest_path, "--tour")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("no feeder sidecar", text)
+        self.assertIn("[test_loop]", text)
+        self.assertEqual(os.listdir(self.queue), [])
+
+    def test_a_sidecar_with_the_loop_off_is_refused_naming_the_table(self):
+        with open(cli.feeder_module.paths_for(self.manifest_path).config, "w") as handle:
+            handle.write('[feeder]\nbatch = 2\n')
+        code, text = self.call("test", self.manifest_path, "--tour")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("[test_loop]", text)
+        self.assertIn("enabled = true", text)
+
+    def test_an_invalid_sidecar_is_refused_with_its_own_sentence(self):
+        with open(cli.feeder_module.paths_for(self.manifest_path).config, "w") as handle:
+            handle.write('[test_loop]\nenabled = true\n')
+        code, text = self.call("test", self.manifest_path, "--tour")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("test_loop.enabled needs test_loop.tour", text)
+
+    def test_a_missing_manifest_exits_config(self):
+        code, text = self.call("test", os.path.join(self.tmp.name, "missing.toml"), "--tour")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+
+
 class StatusVerb(CliCase):
     def test_status_prints_the_terminal_record_and_the_cursor(self):
         self.complete_run()
