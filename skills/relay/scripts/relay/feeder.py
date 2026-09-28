@@ -143,6 +143,7 @@ UNREADABLE_WAITS_MAX = 2          # waits on a ready source that fails to read, 
 UNRANKED = 10 ** 9
 DRY_RUN_LINES = 12
 MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
+EVENTS_CHUNK_BYTES = 64 * 1024    # how far `end_offset` reads back per step for a newline
 
 # The events file's `event` words (issue #36). A watcher keys on these, so they are a contract:
 # add one if a new kind of moment needs it, never rename one.
@@ -2301,7 +2302,7 @@ def end_offset(paths):
         with open(paths.events, "rb") as handle:
             position = handle.seek(0, os.SEEK_END)
             while position > 0:
-                start = max(0, position - limits.LOG_TAIL_BYTES)
+                start = max(0, position - EVENTS_CHUNK_BYTES)
                 handle.seek(start)
                 newline = handle.read(position - start).rfind(b"\n")
                 if newline >= 0:

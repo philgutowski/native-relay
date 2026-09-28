@@ -106,6 +106,17 @@ class ReadDeath(unittest.TestCase):
         self.assertEqual(self.read(died(8), log(REJECTED, INIT, LIMIT_RESULT)),
                          (limits.CONFIRMED, None))
 
+    def test_two_rejected_limits_give_the_later_reset(self):
+        # A week's limit spent beside a session's: the model is back only when both lift.
+        week = dict(REJECTED, rate_limit_info=dict(REJECTED["rate_limit_info"],
+                                                   resetsAt=RESET_EPOCH + 3 * 86400,
+                                                   rateLimitType="seven_day"))
+        later = datetime.fromtimestamp(RESET_EPOCH + 3 * 86400)
+        for events in ((week, REJECTED), (REJECTED, week)):
+            with self.subTest(first=events[0]["rate_limit_info"]["rateLimitType"]):
+                self.assertEqual(self.read(died(8), log(INIT, *events, LIMIT_RESULT)),
+                                 (limits.CONFIRMED, later))
+
     def test_an_earlier_attempts_429_does_not_confirm_the_last(self):
         text = log(INIT, REJECTED, LIMIT_RESULT) + log(INIT, ASSISTANT)
         self.assertEqual(self.read(died(8), text), (limits.UNCONFIRMED, None))
@@ -157,7 +168,9 @@ class ThroughTheStub(test_run.RunCase):
         self.go()
         # The record as the feeder reads it: the summary's task entry, which names the log.
         record, = summary.build(self.manifest, self.store())["tasks"]
-        self.assertIn(record["status"], (contracts.STATUS_BLOCKED, contracts.STATUS_HALTED))
+        # The path a real limit death takes: no envelope, recorded blocked.
+        self.assertEqual((record["status"], record["class"]),
+                         (contracts.STATUS_BLOCKED, contracts.HALT_NO_ENVELOPE))
         text = limits.log_tail(record["log_path"])
         self.assertNotIn("stub_done", text)
         self.assertIn('"subtype": "init"', text)

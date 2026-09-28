@@ -68,33 +68,43 @@ def _last_attempt(log_text):
         yield event
 
 
+def _rejected_reset(event):
+    """The reset time a rejected `rate_limit_event` carries, as a local time, or None for any
+    other event or a `resetsAt` that is not a readable epoch."""
+    if event.get("type") != "rate_limit_event":
+        return None
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict) or info.get("status") != RATE_LIMIT_REJECTED:
+        return None
+    seconds = info.get("resetsAt")
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(seconds)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _read_attempt(log_text):
+    """(result, resets_at) for the last attempt, in one pass: its `result` event or None, and
+    the latest reset among its rejected `rate_limit_event` lines or None. The latest, because
+    two limits can be spent at once, a session's and a week's, and the model is back only when
+    both have lifted. A warning above the attempt's `init` line belongs to no attempt."""
+    result, resets = None, []
+    for event in _last_attempt(log_text):
+        if result is None and event.get("type") == "result":
+            result = event
+            continue
+        reset = _rejected_reset(event)
+        if reset is not None:
+            resets.append(reset)
+    return result, max(resets, default=None)
+
+
 def result_event(log_text):
     """The last attempt's `result` event in a task's stream-json stdout, or None when it has
     none: the process was killed first, or the backend prints another format."""
-    for event in _last_attempt(log_text):
-        if event.get("type") == "result":
-            return event
-    return None
-
-
-def reset_time(log_text):
-    """When the limit the last attempt hit lifts, as a local time, or None when the attempt
-    carries no rejected `rate_limit_event` with a readable `resetsAt`. A warning above the
-    attempt's `init` line belongs to no attempt and is not read."""
-    for event in _last_attempt(log_text):
-        if event.get("type") != "rate_limit_event":
-            continue
-        info = event.get("rate_limit_info")
-        if not isinstance(info, dict) or info.get("status") != RATE_LIMIT_REJECTED:
-            continue
-        seconds = info.get("resetsAt")
-        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
-            continue
-        try:
-            return datetime.fromtimestamp(seconds)
-        except (OverflowError, OSError, ValueError):
-            continue
-    return None
+    return _read_attempt(log_text)[0]
 
 
 def read_death(record, log_text, quick_death_seconds):
@@ -102,16 +112,18 @@ def read_death(record, log_text, quick_death_seconds):
     `resets_at` is the CLI's reset time beside a confirmed reading when the log gives one, and
     None otherwise.
 
-    A record with no wall time launched no process, a pre flight refusal for example, and a
-    limit cannot have stopped a process that never started, so it reads refuted whatever its
-    log says: that log is an older attempt's."""
+    The caller passes only a record whose process was launched this time. A record the run
+    refused before launch keeps the previous attempt's `wall_seconds` and log, so reading it
+    here would read that attempt's death again; the caller tells the two apart by `started_at`
+    (plan KTD9). A record with no wall time at all never launched a process, and a limit cannot
+    have stopped a process that never started, so it reads refuted whatever its log says."""
     wall = record.get("wall_seconds")
     if wall is None:
         return REFUTED, None
-    event = result_event(log_text)
+    event, resets_at = _read_attempt(log_text)
     if event is not None:
         if event.get("api_error_status") == USAGE_LIMIT_STATUS:
-            return CONFIRMED, reset_time(log_text)
+            return CONFIRMED, resets_at
         return REFUTED, None
     if wall < quick_death_seconds:
         return UNCONFIRMED, None
