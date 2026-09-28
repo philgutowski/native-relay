@@ -603,6 +603,8 @@ class CycleStart(unittest.TestCase):
         # Unsettled order does not reorder the retries either.
         start = self.plan(["10", "9"], {"10", "9"}, listed, {})
         self.assertEqual(start.retry, ("9", "10"))
+        # Ids that read as the same number still sort the same way every time.
+        self.assertEqual(limits.natural_order({"T-1", "T-01", "T-2"}), ["T-01", "T-1", "T-2"])
 
     def test_a_task_with_no_model_and_no_default_raises_naming_it(self):
         for unsettled, retries in ((["T-7"], set()), ([], {"T-7"})):
@@ -697,6 +699,17 @@ class DeathTime(unittest.TestCase):
                                marks=standing)
         self.assertEqual((decision.marks, decision.holds), ({}, (("T", "fable"),)))
 
+    def test_a_death_older_than_the_standing_mark_does_not_replace_it(self):
+        # A week's limit marked at 20:30; a Task launched before it died at 20:06 with no reset.
+        week = limits.Mark(since=datetime(2026, 9, 27, 20, 30), until=datetime(2026, 9, 29, 9),
+                           source=limits.MARK_CLI)
+        decision = self.decide([record("T", "blocked")], {"T": CONFIRMED}, marks={"fable": week})
+        self.assertEqual((decision.marks, decision.holds), ({}, (("T", "fable"),)))
+        # A death newer than the standing mark restamps it, as KTD5 says.
+        newer = self.decide([record("T", "blocked")], {"T": CONFIRMED}, marks={"fable": week},
+                            died_at={"T": datetime(2026, 9, 27, 21, 0)})
+        self.assertEqual(newer.marks["fable"].since, datetime(2026, 9, 27, 21, 0))
+
     def test_mark_for_follows_the_table(self):
         hours = 5
         cases = (
@@ -708,6 +721,11 @@ class DeathTime(unittest.TestCase):
             (None, NOW + timedelta(hours=6), NOW, None),
             (NOW - timedelta(minutes=5), NOW, None, fallback_mark(NOW)),
             (None, LATER, None, fallback_mark(LATER)),
+            # A reset at the very moment of the death: the limit lifted as it died.
+            (NOW, LATER, NOW, None),
+            # A death that seems to end after the decision is taken to end at it.
+            (None, NOW, LATER, fallback_mark(NOW)),
+            (RESET, NOW, LATER, limits.Mark(since=NOW, until=RESET, source=limits.MARK_CLI)),
         )
         for resets_at, now, died_at, mark in cases:
             with self.subTest(resets_at=resets_at, now=now, died_at=died_at):

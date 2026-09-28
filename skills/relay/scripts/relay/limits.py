@@ -342,11 +342,11 @@ def mark_for(now, resets_at, fallback_hours, died_at=None):
     when the limit is already over (R4, KTD10). Until the CLI's reset when it lies ahead of
     `now`. None when the reset fell between the death and `now`. Otherwise `fallback_hours`
     after the death, or None when that too has passed. A death with no time is taken to have
-    ended at `now`."""
-    died = now if died_at is None else died_at
+    ended at `now`, and so is one that seems to have ended after it, skew or a clock set back."""
+    died = now if died_at is None else min(died_at, now)
     if resets_at is not None and resets_at > now:
         return Mark(since=died, until=resets_at, source=MARK_CLI)
-    if resets_at is not None and died < resets_at:
+    if resets_at is not None and died <= resets_at:
         return None
     until = died + timedelta(hours=fallback_hours)
     if until <= now:
@@ -355,10 +355,13 @@ def mark_for(now, resets_at, fallback_hours, died_at=None):
 
 
 def natural_order(ids):
-    """`ids` sorted with the digits in each read as numbers, so 9 comes before 10."""
+    """`ids` sorted with the digits in each read as numbers, so 9 comes before 10. Two ids that
+    read the same, T-1 and T-01, fall back to their text, so the order never rests on how a set
+    happened to hash."""
     def key(task_id):
         parts = re.split(r"(\d+)", str(task_id))
-        return [int(part) if index % 2 else part for index, part in enumerate(parts)]
+        return ([int(part) if index % 2 else part for index, part in enumerate(parts)],
+                str(task_id))
     return sorted(ids, key=key)
 
 
@@ -417,7 +420,8 @@ def decide_after_run(facts):
                 if task_id not in confirmed and task_id not in unconfirmed]
 
     # Mark. Two deaths on one model in one Cycle keep the later expiry: it is back only when
-    # both limits have lifted. A death whose limit is already over marks nothing.
+    # both limits have lifted. A death whose limit is already over marks nothing, and neither
+    # does one older than the mark standing on its model, which is the newer truth (KTD5).
     before = active_marks(facts.marks, now)
     marks = {}
     for task_id in confirmed:
@@ -425,6 +429,8 @@ def decide_after_run(facts):
         mark = mark_for(now, facts.readings[task_id][1], settings.fallback_hours,
                         facts.died_at.get(task_id))
         if model is None or mark is None:
+            continue
+        if model in before and before[model].since > mark.since:
             continue
         if model not in marks or mark.until > marks[model].until:
             marks[model] = mark
@@ -489,7 +495,7 @@ def decide_after_run(facts):
 def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings,
                      default_model=None):
     """The start of a Cycle (R5, R7). `unsettled` is the listed Task ids left to run, in order;
-    `retries` the ids queued for a retry, in order, which run with them; `listed_on` {id: model}
+    `retries` the ids queued for a retry, in any order, which run with them; `listed_on` {id: model}
     the Manifest's models, and `default_model` the model a Task the Manifest gives none runs on;
     `marks` {model: Mark}; `table` the fallback table. The Manifest decides, not the record: a
     moved retry's record still names the model it died on.
@@ -500,8 +506,8 @@ def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings,
     raises ValueError naming it, since R5 cannot be applied to it. `retry` comes back in
     natural order whatever order or container `retries` came in."""
     active = active_marks(marks, now)
-    retries = natural_order(set(retries))
-    ids = list(unsettled) + [task_id for task_id in retries if task_id not in unsettled]
+    retries = set(retries)
+    ids = list(unsettled) + natural_order(retries - set(unsettled))
     moves, retry, defer, held, running = [], [], [], [], 0
     for task_id in ids:
         model = listed_on.get(task_id) or default_model
