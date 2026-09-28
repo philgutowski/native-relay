@@ -13,8 +13,9 @@ the last 200 characters of the message, and a report with ten findings is longer
 same way the first live run's Closeout terminal line fell past the digest's head
 (`docs/solutions/logic-errors/stubbed-seams-agree-by-construction-first-live-run-found-five-contract-defects.md`).
 Only the last block counts, and prose after it is allowed, since the pass code decides what to
-file and needs the findings rather than a tidy ending. `filing.py` reuses `final_message` for
-its own block.
+file and needs the findings rather than a tidy ending. `final_message` is the reader for any
+block that can outgrow the digest's tail; the plan's U4 has `filing.py` read its `relay-filed`
+block through it rather than through a second reader.
 
 The template carries nothing project specific and nothing plugin specific (R2). Project facts
 reach the process as `render`'s arguments, which the sidecar and the tour document supply.
@@ -55,7 +56,12 @@ CHECK_INSTRUCTION = (
 NO_STOPPED_AREAS = "No area is stopped on this pass."
 STOPPED_AREAS_LEAD = "Skip these areas entirely; the loop has stopped testing them:"
 
-_FENCE_RE = re.compile(r"```%s[ \t]*\n(.*?)```" % re.escape(contracts.TEST_REPORT_FENCE_TAG), re.S)
+_FENCE_RE = contracts.fence_regex(contracts.TEST_REPORT_FENCE_TAG)
+_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t#]*$", re.M)
+
+# The report's status words are the pass record's own (KTD12), so the parser and
+# `testloop.should_stop` read one vocabulary.
+STATUSES = (testloop.RAN, testloop.NOT_RUN)
 
 
 @dataclass(frozen=True)
@@ -63,7 +69,7 @@ class Report:
     """One parsed Test report. `error` is a sentence naming the first problem, and then
     `status`, `reason`, `findings`, and `approval_steps` carry nothing; a pass records such a
     report as failed with the sentence and files nothing (KTD4). Otherwise `status` is one of
-    `contracts.TEST_REPORT_STATUSES`, `findings` the validated findings in report order, and
+    `STATUSES`, `findings` the validated findings in report order, and
     `approval_steps` the approval steps the process reached and left unapproved (R21)."""
     status: str | None = None
     reason: str = ""
@@ -99,20 +105,46 @@ def _cards_block(cards):
     return "\n\n" + "\n\n".join(parts)
 
 
-def _stopped_block(stopped_areas):
-    names = [" ".join(str(area).split()) for area in stopped_areas]
-    names = [brief.defang(name) for name in names if name]
+def headings(tour):
+    """The areas a tour document defines: the text of every markdown heading, in order, each
+    flattened to one line. A finding's `area` and a stopped area are checked against these,
+    here at render and again by the pass code (KTD4)."""
+    return tuple(" ".join(match.group(1).split()) for match in _HEADING_RE.finditer(tour or ""))
+
+
+def _stopped_block(stopped_areas, areas):
+    """The stopped areas insert. The names sit outside the data fence, as an instruction, so
+    each has to be a heading of the tour document: a name that is not one is refused rather
+    than rendered, since it came from an earlier process's report or a state file and would
+    otherwise be free text in the instruction section."""
+    names = []
+    for area in stopped_areas:
+        name = " ".join(str(area).split())
+        if name not in areas:
+            raise ValueError("stopped area %r is not a heading of the tour document" % (area,))
+        if name not in names:
+            names.append(name)
     if not names:
         return NO_STOPPED_AREAS
-    return STOPPED_AREAS_LEAD + "\n\n" + "\n".join("- " + name for name in names)
+    return STOPPED_AREAS_LEAD + "\n\n" + "\n".join("- " + brief.defang(name) for name in names)
+
+
+def _one_line(name, value):
+    text = " ".join(str(value or "").split())
+    if not text:
+        raise ValueError("the %s is empty" % name)
+    return text
 
 
 def values(kind, url, commit, tour, cards=(), stopped_areas=()):
     """Every placeholder the template uses, from plain values only. `kind` is `testloop.TOUR`
-    or `testloop.CHECK`; `tour` the tour document's text; `cards` the landed cards as an
-    adapter's `read` shapes them, required on a check and refused on a tour; `stopped_areas`
-    the area names the loop has stopped (R19). The tour text, the card text, and the area
-    names are defanged so none can close the data fence or forge a runner instruction."""
+    or `testloop.CHECK`; `url` and `commit` what the app is served at and serves; `tour` the
+    tour document's text; `cards` the landed cards as an adapter's `read` shapes them, each
+    with an id, required on a check and refused on a tour; `stopped_areas` the area names the
+    loop has stopped (R19), each a heading of the tour document. The tour text, the card text,
+    and the area names are defanged so none can close the data fence or forge a runner
+    instruction. A blank url, commit, or tour, or a card without an id, raises ValueError
+    rather than briefing a process against nothing."""
     if kind not in (testloop.TOUR, testloop.CHECK):
         raise ValueError("pass kind must be one of %s, not %r"
                          % (", ".join((testloop.TOUR, testloop.CHECK)), kind))
@@ -121,13 +153,16 @@ def values(kind, url, commit, tour, cards=(), stopped_areas=()):
         raise ValueError("a check pass needs at least one landed card")
     if kind == testloop.TOUR and cards:
         raise ValueError("a tour pass carries no cards")
+    for index, card in enumerate(cards):
+        if not isinstance(card, dict) or not str(card.get("id") or "").strip():
+            raise ValueError("landed card %d has no id" % (index + 1))
     if not str(tour or "").strip():
         raise ValueError("the tour document is empty")
     return {
-        "url": " ".join(str(url or "").split()),
-        "commit": " ".join(str(commit or "").split()),
+        "url": _one_line("url", url),
+        "commit": _one_line("commit", commit),
         "pass_instruction": TOUR_INSTRUCTION if kind == testloop.TOUR else CHECK_INSTRUCTION,
-        "stopped_areas": _stopped_block(stopped_areas),
+        "stopped_areas": _stopped_block(stopped_areas, headings(tour)),
         "data_header": DATA_HEADER,
         "data_begin": DATA_BEGIN,
         "data_end": DATA_END,
@@ -207,23 +242,22 @@ def parse_text(text):
         return Report(error="the %s block must hold one JSON object"
                       % contracts.TEST_REPORT_FENCE_TAG)
     status = payload.get("status")
-    if status not in contracts.TEST_REPORT_STATUSES:
-        return Report(error="status %r is not one of %s"
-                      % (status, ", ".join(contracts.TEST_REPORT_STATUSES)))
+    if status not in STATUSES:
+        return Report(error="status %r is not one of %s" % (status, ", ".join(STATUSES)))
     reason = payload.get("reason", "")
     if reason is None:
         reason = ""
     if not isinstance(reason, str):
         return Report(error="reason must be a string")
     reason = reason.strip()
-    if status == contracts.TEST_REPORT_NOT_RUN and not reason:
+    if status == testloop.NOT_RUN and not reason:
         return Report(error="a not_run report must carry a reason")
     findings = payload.get("findings", [])
     if findings is None:
         findings = []
     if not isinstance(findings, list):
         return Report(error="findings must be an array")
-    if status == contracts.TEST_REPORT_NOT_RUN and findings:
+    if status == testloop.NOT_RUN and findings:
         return Report(error="a not_run report carries no findings")
     for index, finding in enumerate(findings):
         problems = testloop.validate_finding(finding)

@@ -31,13 +31,22 @@ CLOSEOUT_SKIPPED_LINE = "Documentation skipped"
 CLOSEOUT_TERMINAL_LINES = (CLOSEOUT_COMPLETE_LINE, CLOSEOUT_SKIPPED_LINE)
 
 # The Test process's report contract (browser test loop plan, KTD4): its final message ends
-# with one fenced block under this tag holding one JSON object, whose `status` is one of these
-# two words. Only the last such block counts, and `testbrief.parse` reads it from the full final
-# message in the transcript, never from the digest's 200 character tail.
+# with one fenced block under this tag holding one JSON object. Its status words are
+# `testloop.RAN` and `testloop.NOT_RUN`, the pass record's own, so the parser and the loop
+# cannot hold two copies. Only the last such block counts, and `testbrief.parse` reads it from
+# the full final message in the transcript, never from the digest's 200 character tail.
 TEST_REPORT_FENCE_TAG = "relay-test-report"
-TEST_REPORT_RAN = "ran"
-TEST_REPORT_NOT_RUN = "not_run"
-TEST_REPORT_STATUSES = (TEST_REPORT_RAN, TEST_REPORT_NOT_RUN)
+
+
+def fence_regex(tag):
+    """The grammar of a fenced block Relay reads back from a process's final message: an
+    opening fence carrying exactly `tag`, then the body, then a closing fence on a line of its
+    own. `findall` gives every body in order, and a reader takes the last. The closer is
+    anchored to a line start so a triple backtick inside the body, which a JSON string copied
+    from a page can carry, does not end the block early and turn a whole report into a parse
+    error. A body of JSON cannot hold a literal newline inside a string, so a line that is only
+    a fence is never body text."""
+    return re.compile(r"```%s[ \t]*\r?\n(.*?)^```[ \t]*\r?$" % re.escape(tag), re.S | re.M)
 
 
 # CLI contracts, observed on CLI_VERSION_TESTED and documented nowhere.
