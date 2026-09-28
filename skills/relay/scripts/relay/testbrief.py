@@ -56,7 +56,6 @@ CHECK_INSTRUCTION = (
 NO_STOPPED_AREAS = "No area is stopped on this pass."
 STOPPED_AREAS_LEAD = "Skip these areas entirely; the loop has stopped testing them:"
 
-_FENCE_RE = contracts.fence_regex(contracts.TEST_REPORT_FENCE_TAG)
 _HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t#]*$", re.M)
 
 # The report's status words are the pass record's own (KTD12), so the parser and
@@ -257,16 +256,24 @@ def read_final_message(transcript_path, backend="claude", log_path=None):
 
 
 def last_block(text):
-    """The body of the last `relay-test-report` fenced block in `text`, or None."""
-    matches = _FENCE_RE.findall(text or "")
-    if not matches:
-        return None
-    return matches[-1]
+    """The body of the last `relay-test-report` fenced block in `text`, or None, through the
+    reader every block Relay reads back shares (issue #118)."""
+    return contracts.last_fenced_block(text, contracts.TEST_REPORT_FENCE_TAG)
 
 
 def _strings(value):
     return isinstance(value, list) and all(isinstance(item, str) and item.strip()
                                            for item in value)
+
+
+def _with_string_card(finding):
+    """The finding with its `card` as a string. A model on a check pass writes the id it
+    copied from the card heading as a number (issue #118); the validator accepts an integer,
+    and every reader after the parser sees one type."""
+    card = finding.get("card")
+    if isinstance(card, int) and not isinstance(card, bool):
+        return dict(finding, card=str(card))
+    return finding
 
 
 def parse_text(text):
@@ -311,7 +318,8 @@ def parse_text(text):
         approval_steps = []
     if not _strings(approval_steps):
         return Report(error="approval_steps must be an array of non empty strings")
-    return Report(status=status, reason=reason, findings=tuple(findings),
+    return Report(status=status, reason=reason,
+                  findings=tuple(_with_string_card(finding) for finding in findings),
                   approval_steps=tuple(step.strip() for step in approval_steps))
 
 

@@ -103,7 +103,8 @@ def validate_finding(finding):
       observed    a string, the one field that carries text copied from the app
       done_when   a non empty array of non empty strings
       card        on a check pass, the id of the checked card it came from, a non empty
-                  string; absent or null otherwise
+                  string or an integer, since a model copies a numeric id as a number
+                  (issue #118); a boolean is refused; absent or null otherwise
 
     Keys beyond these are left alone."""
     if not isinstance(finding, dict):
@@ -141,8 +142,9 @@ def validate_finding(finding):
     if not _texts(finding.get("done_when")):
         problems.append("done_when must be a non empty array of strings")
     card = finding.get("card")
-    if card is not None and not _text(card):
-        problems.append("card must be a non empty string when present")
+    card_is_int = isinstance(card, int) and not isinstance(card, bool)
+    if card is not None and not card_is_int and not _text(card):
+        problems.append("card must be a non empty string or an integer when present")
     return problems
 
 

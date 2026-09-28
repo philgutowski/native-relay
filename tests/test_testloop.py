@@ -64,6 +64,10 @@ class ValidateFinding(unittest.TestCase):
         self.assertEqual(testloop.validate_finding(finding(card="12")), [])
         self.assertEqual(testloop.validate_finding(finding(card=None)), [])
 
+    def test_a_numeric_card_id_is_accepted(self):
+        """Issue #118: a model on a check pass writes the id as a number."""
+        self.assertEqual(testloop.validate_finding(finding(card=12)), [])
+
     def test_keys_beyond_the_contract_are_left_alone(self):
         self.assertEqual(testloop.validate_finding(finding(screenshot="shot.png")), [])
 
@@ -94,7 +98,8 @@ class ValidateFinding(unittest.TestCase):
             ({"expected": None}, "expected"),
             ({"observed": 3}, "observed"),
             ({"done_when": [""]}, "done_when"),
-            ({"card": 12}, "card"),
+            ({"card": True}, "card"),
+            ({"card": 1.5}, "card"),
             ({"card": ""}, "card"),
         ]
         for changes, name in table:

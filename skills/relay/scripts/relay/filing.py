@@ -72,8 +72,6 @@ ATTENDED_LINE = ("Attended planning card: yes, file this the way the tracker ins
 # brief that carries the card.
 CONFIG_DIR_DESCRIPTION = "the agent config directory"
 
-_FENCE_RE = contracts.fence_regex(contracts.FILED_FENCE_TAG)
-
 
 @dataclass(frozen=True)
 class Filed:
@@ -275,11 +273,9 @@ def render(findings, adapter, labels=(), design_note="", backend=None):
 
 
 def last_block(text):
-    """The body of the last `relay-filed` fenced block in `text`, or None."""
-    matches = _FENCE_RE.findall(text or "")
-    if not matches:
-        return None
-    return matches[-1]
+    """The body of the last `relay-filed` fenced block in `text`, or None, through the reader
+    every block Relay reads back shares (issue #118)."""
+    return contracts.last_fenced_block(text, contracts.FILED_FENCE_TAG)
 
 
 def parse_text(text, count=None):

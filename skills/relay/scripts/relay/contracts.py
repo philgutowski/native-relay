@@ -46,21 +46,50 @@ TEST_REPORT_FENCE_TAG = "relay-test-report"
 FILED_FENCE_TAG = "relay-filed"
 
 
-def fence_regex(tag):
-    """The grammar of a fenced block Relay reads back from a process's final message: an
-    opening fence carrying exactly `tag`, then the body, then a closing fence on a line of its
-    own. `findall` gives every body in order, and a reader takes the last. The closer is
-    anchored to a line start so a triple backtick inside the body, which a JSON string copied
-    from a page can carry, does not end the block early and turn a whole report into a parse
-    error. A body of JSON cannot hold a literal newline inside a string, so a line that is only
-    a fence is never body text. The closer may be indented and may run longer than three
-    backticks, since a process that writes the block inside a list item indents the closer with
-    the rest, and Markdown lets a closer match a longer opener; a line that is only whitespace
-    and backticks is still never body text. The envelope (issue #111) reads through this too, and
-    its body is prose, so there a line that is only a fence inside a learning does end the block
-    early; the Task brief tells the process to quote a fence inline rather than on a line of
-    its own."""
-    return re.compile(r"```%s[ \t]*\r?\n(.*?)^[ \t]*```+[ \t]*\r?$" % re.escape(tag), re.S | re.M)
+def fence_opener_regex(tag):
+    """The opening fence of a block Relay reads back: a line of its own carrying exactly
+    `tag`, with any indentation before it, since a process that writes the block inside a list
+    item indents the opener with the rest."""
+    return re.compile(r"^[ \t]*```%s[ \t]*\r?$" % re.escape(tag), re.M)
+
+
+# The closing fence: a line that is only backticks, three or more, with any indentation and
+# trailing whitespace. Markdown lets a closer match a longer opener and allows three spaces of
+# indentation; a list item indents further and is accepted too. A line that is only whitespace
+# and backticks is never body text.
+FENCE_CLOSER_RE = re.compile(r"^[ \t]*```+[ \t]*\r?$", re.M)
+
+
+def last_fenced_block(text, tag):
+    """The body of the last fenced block tagged `tag` in `text`, or None when there is no
+    opener or the last opener has no closer after it.
+
+    The reader finds the last opener first and then the first closer after it (issue #118).
+    A grammar that matched opener, lazy body, closer with `findall` paired an earlier block
+    whose closer was missing, or followed by text, with the last block's closer, so the merged
+    body ran through the last block's opener and was not JSON; every finding in a valid report
+    was lost to a draft the process had written above it. Pairing from the last opener means no
+    earlier block, however malformed, can absorb the last one.
+
+    The closer is a line of its own so a triple backtick inside the body, which a JSON string
+    copied from a page can carry, does not end the block early. A body of JSON cannot hold a
+    literal newline inside a string, so a line that is only a fence is never body text. The
+    envelope (issue #111) reads through this too, and its body is prose, so there a line that
+    is only a fence inside a learning does end the block early; the Task brief tells the
+    process to quote a fence inline rather than on a line of its own."""
+    text = text or ""
+    opener = None
+    for opener in fence_opener_regex(tag).finditer(text):
+        pass
+    if opener is None:
+        return None
+    start = opener.end()
+    if start < len(text) and text[start] == "\n":
+        start += 1
+    closer = FENCE_CLOSER_RE.search(text, start)
+    if closer is None:
+        return None
+    return text[start:closer.start()]
 
 
 # CLI contracts, observed on CLI_VERSION_TESTED and documented nowhere.

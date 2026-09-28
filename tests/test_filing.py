@@ -13,6 +13,7 @@ import string
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import _paths
 import _repo
@@ -178,9 +179,26 @@ class ParseText(unittest.TestCase):
         self.assertTrue(filed.ok, filed.error)
         self.assertEqual(filed.entries, ({"finding": 1, "action": "commented", "id": "7"},))
 
-    def test_the_fence_grammar_is_the_shared_one_from_contracts(self):
-        self.assertEqual(filing._FENCE_RE.pattern,
-                         contracts.fence_regex(contracts.FILED_FENCE_TAG).pattern)
+    def test_the_fence_reader_is_the_shared_one_from_contracts(self):
+        """Issues #111 and #118: one reader for every block Relay reads back."""
+        with mock.patch.object(contracts, "last_fenced_block", return_value="[]") as reader:
+            self.assertEqual(filing.last_block("anything"), "[]")
+        reader.assert_called_once_with("anything", contracts.FILED_FENCE_TAG)
+
+    def test_an_unterminated_draft_block_cannot_absorb_the_valid_last_one(self):
+        """Issue #118: the draft's opener used to pair with the good block's closer."""
+        text = ("Draft:\n\n```%s\n[{\"finding\": 1,\n\nCorrected:\n\n" % contracts.FILED_FENCE_TAG
+                + block([{"finding": 1, "action": "filed", "id": "7"}]))
+        filed = filing.parse_text(text)
+        self.assertTrue(filed.ok, filed.error)
+        self.assertEqual(filed.entries, ({"finding": 1, "action": "filed", "id": "7"},))
+
+    def test_a_draft_block_whose_closer_is_followed_by_text_cannot_absorb_the_valid_last_one(self):
+        text = ("```%s\n[]\n``` draft\n\n" % contracts.FILED_FENCE_TAG
+                + block([{"finding": 1, "action": "filed", "id": "7"}]))
+        filed = filing.parse_text(text)
+        self.assertTrue(filed.ok, filed.error)
+        self.assertEqual(filed.entries, ({"finding": 1, "action": "filed", "id": "7"},))
 
     def test_the_templates_own_example_block_parses(self):
         filed = filing.parse_text(render())
