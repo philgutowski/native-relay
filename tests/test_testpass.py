@@ -371,6 +371,22 @@ class TourAndFiling(PassCase):
         self.assertIn("card T-2 claimed filed could not be read", notes)
         self.assert_checkout_clean()
 
+    def test_a_markdown_filing_that_leaves_the_tracker_uncommitted_is_reset_and_noted_as_such(self):
+        """Code review: the in scope but uncommitted shape is a different sentence from a path
+        outside the bound, as `_run_closeout` tells the two apart."""
+        self.test_process([finding(1)])
+        self.queue_entry(self.transcript(filed_text([{"finding": 1, "action": "filed",
+                                                      "id": "T-2"}]), "filing-2"),
+                         git_sh="echo '- [ ] T-2 Finding 1 [loop]' >> tracker.md\n")
+        head = gitread.rev_parse(self.repo, "HEAD")
+        outcome, _ = self.run_pass()
+        self.assertEqual(gitread.rev_parse(self.repo, "HEAD"), head)
+        self.assertEqual(outcome.record["filed"], [])
+        notes = "\n".join(outcome.record["notes"])
+        self.assertIn("left tracker.md changed and uncommitted", notes)
+        self.assertNotIn("outside", notes)
+        self.assert_checkout_clean()
+
     def test_a_filing_process_with_no_block_files_nothing_and_notes_the_error(self):
         self.test_process([finding(1)])
         self.queue_entry(self.transcript("I filed it and forgot the block.", "filing-2"),
@@ -400,6 +416,20 @@ class ReportOnly(PassCase):
         self.assertIn("app/invoices.py line 42", text)
         self.assertEqual(self.tracker(), TRACKER_MD)
         self.assertEqual(gitread.show(self.repo, "main", "tracker.md"), TRACKER_MD)
+
+    def test_the_sidecars_report_only_setting_is_the_same_switch_as_the_flag(self):
+        """Code review, R23: a loop the sidecar set to report only files nothing on a hand run
+        that forgot the flag."""
+        self.write_sidecar(extra="report_only = true")
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        outcome, _ = self.run_pass(testpass.Request(report_only=False))
+        self.assertTrue(outcome.record["report_only"])
+        self.assertEqual(outcome.record["filed"], [])
+        self.assertEqual(self.entries_taken(), 1)
+        self.assertEqual(self.tracker(), TRACKER_MD)
+        self.assertTrue(os.path.exists(self.paths().findings))
 
     def test_the_verb_runs_a_report_only_tour_and_prints_the_record_path_last(self):
         self.test_process([finding(1)])
@@ -459,6 +489,42 @@ class Prepare(PassCase):
         self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
         self.assertIn("prepare could not run", outcome.record["reason"])
 
+    def test_a_lost_lease_ends_the_prepare_group_at_once_rather_than_at_its_bound(self):
+        """Code review: a prepare command moving a server in a checkout another runner now
+        owns is ended when the lease is lost, as a launched process is, not after its
+        timeout."""
+        pid_file = os.path.join(self.tmp.name, "grandchild.pid")
+        log = os.path.join(self.tmp.name, "prepare.log")
+        started = time.monotonic()
+        ok, sentence, seconds = testpass.prepare(
+            ["bash", "-c", "echo moving; sleep 60 & echo $! > %s; wait" % pid_file],
+            self.repo, "abc1234", "http://127.0.0.1:8765", 600, log, self.base_env(),
+            heartbeat=lambda: False, heartbeat_interval=0.2, grace_seconds=1,
+            tick_seconds=0.1)
+        self.assertFalse(ok)
+        self.assertIn("the lease was lost while prepare ran", sentence)
+        self.assertIn("last output: moving", sentence)
+        self.assertLess(time.monotonic() - started, 30)
+        with open(pid_file) as handle:
+            grandchild = int(handle.read().strip())
+        deadline = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                alive = False
+            else:
+                time.sleep(0.1)
+        self.assertFalse(alive, "the prepare command's grandchild outlived the lost lease")
+
+    def test_the_prepare_log_holds_the_whole_output(self):
+        self.write_sidecar(prepare=["bash", "-c", "echo one; echo two; exit 3"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["reason"], "prepare exited 3; last output: two")
+        with open(self.store().path("logs", "pass-1.prepare.log")) as handle:
+            self.assertEqual(handle.read(), "one\ntwo\n")
+
 
 class TestProcessOutcomes(PassCase):
     def test_a_test_process_with_no_report_writes_failed_with_the_parse_error(self):
@@ -493,6 +559,24 @@ class TestProcessOutcomes(PassCase):
         outcome, _ = self.run_pass()
         self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2", "T-3"])
         self.assertEqual(outcome.record["approval_steps"], ["Send the invoice"])
+
+    def test_a_worktree_that_cannot_be_added_fails_the_pass_and_the_record_on_disk_says_so(self):
+        """Code review: the record is written after the worktree `finally`, so the file the
+        Feeder reads carries the removal outcome and its note."""
+        dest = self.store().path("worktrees", "pass-1")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "leftover.txt"), "w") as handle:
+            handle.write("from a killed pass\n")
+        self.test_process([finding(1)])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertIn("could not add worktree", outcome.record["reason"])
+        self.assertEqual(self.entries_taken(), 0)
+        with open(outcome.path) as handle:
+            on_disk = json.load(handle)
+        self.assertEqual(on_disk, outcome.record)
+        self.assertFalse(on_disk["worktree_removed"])
+        self.assertIn("could not be removed", "\n".join(on_disk["notes"]))
 
     def test_the_detached_worktree_is_gone_after_a_pass_including_one_that_failed(self):
         self.queue_entry(os.path.join(TRANSCRIPTS, "test_report_none.jsonl"))
@@ -558,7 +642,9 @@ class TestProcessOutcomes(PassCase):
         self.test_process([finding(1), finding(2, area="Invoices")])
         self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
                             ["- [ ] T-2 Finding 2 [loop]"])
-        outcome, _ = self.run_pass(testpass.Request(stopped_areas=("Search",)))
+        # The name is compared flattened, as the headings are (code review).
+        outcome, _ = self.run_pass(testpass.Request(stopped_areas=("  Search ",)))
+        self.assertEqual(outcome.record["stopped_areas"], ["Search"])
         self.assertEqual(outcome.record["dropped"], [finding(1)["title"]])
         self.assertEqual([entry["area"] for entry in outcome.record["filed"]], ["Invoices"])
         with open(outcome.record["briefs"]["test"]) as handle:
@@ -774,10 +860,29 @@ class Refusals(PassCase):
         self.assertIn("card T-9 could not be read", outcome.message)
 
     def test_a_missing_tour_document_is_refused(self):
-        os.unlink(os.path.join(self.repo, "docs", "tour.md"))
+        _repo.git(self.repo, "rm", "-q", "docs/tour.md")
+        _repo.git(self.repo, "commit", "-q", "-m", "drop the tour")
         outcome, _ = self.run_pass()
         self.assertEqual(outcome.exit_code, testpass.EXIT_CONFIG)
         self.assertIn("docs/tour.md could not be read", outcome.message)
+
+    def test_a_dirty_checkout_or_one_off_the_default_branch_is_refused_before_the_lease(self):
+        """Code review: the filing step bounds its commit with a reset, which would take an
+        operator's uncommitted work with it, so the pass asks for the Runner's own preflight."""
+        with open(os.path.join(self.repo, "docs", "tour.md"), "a") as handle:
+            handle.write("\n## Reports\n")
+        self.test_process([finding(1)])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.exit_code, testpass.EXIT_CONFIG)
+        self.assertIn("uncommitted changes", outcome.message)
+        self.assertIn("clean checkout", outcome.message)
+        self.assertEqual(self.entries_taken(), 0)
+        self.assertIsNone(self.store().lease())
+        _repo.git(self.repo, "checkout", "-q", "--", "docs/tour.md")
+        _repo.git(self.repo, "checkout", "-q", "-b", "feature")
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.exit_code, testpass.EXIT_CONFIG)
+        self.assertIn("on feature, not main", outcome.message)
 
     def test_a_held_lease_exits_three_and_launches_nothing(self):
         other = state.StateStore(self.manifest_path, self.repo, home=self.home, pid=999999)

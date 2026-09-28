@@ -29,7 +29,7 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import (adapters, contracts, feeder, filing, gitread, gitwrite, launch,
                manifest as manifest_module, state, testbrief, testloop, worktree)
@@ -168,13 +168,24 @@ def refusal(manifest, config, request):
     if request.budget is not None and (isinstance(request.budget, bool)
                                        or request.budget < 0):
         return "--budget must be zero or a positive integer"
+    # The Filing process runs in the checkout and its commit is bounded by the Closeout's
+    # scope check, which resets the tree to bound it (code review). A tree that was dirty
+    # before the pass would lose that work to the reset, so the pass asks for what the Runner
+    # and the Feeder ask for: the default branch, clean.
+    problem = feeder.checkout_problem(manifest)
+    if problem:
+        return "%s; relay test runs only in a clean checkout on its default branch" % problem
     return None
+
+
+def _flat(name):
+    return " ".join(str(name).split())
 
 
 def _read_tour(manifest, config):
     """The tour document's text from the checkout, or None with the sentence when it is not
-    there. Read from the checkout rather than the tested commit so an operator's uncommitted
-    tour edit is the tour the pass runs, which is what a hand run expects."""
+    there. The checkout is clean and on the default branch by the time this runs, so the file
+    is the committed one, and the same text a process reading the tested commit would see."""
     path = os.path.join(manifest.project.repo, config.test_loop.tour)
     try:
         with open(path, encoding="utf-8") as handle:
@@ -187,10 +198,10 @@ def _read_tour(manifest, config):
 
 
 def _area_problem(flag, names, headings):
-    """The sentence for a `--stopped-area` or `--plan-area` that is not a heading, or None."""
+    """The sentence for a `--stopped-area` or `--plan-area` that is not a heading, or None.
+    The names are compared flattened, as `testbrief.headings` flattens the headings."""
     for name in names:
-        flat = " ".join(str(name).split())
-        if flat not in headings:
+        if _flat(name) not in headings:
             return "%s %r is not a heading of the tour document" % (flag, name)
     return None
 
@@ -228,62 +239,73 @@ def _last_line(text):
 
 def prepare(command, repo, commit, url, timeout_seconds, log_path, env, heartbeat=None,
             heartbeat_interval=contracts.LEASE_HEARTBEAT_SECONDS,
-            grace_seconds=launch.SIGKILL_GRACE_SECONDS):
+            grace_seconds=launch.SIGKILL_GRACE_SECONDS, tick_seconds=launch.TICK_SECONDS):
     """Run the sidecar's `prepare` (KTD7): its own process group, ended whole at the bound,
     with the commit and the url in its environment. Returns (ok, sentence, seconds). The whole
     output goes to `log_path`; the sentence carries the last line, which is what a `not_run`
-    record says. The Lease heartbeat runs around it, as it does around the gate."""
+    record says. The Lease heartbeat runs around it, as it does around the gate, and the
+    group is ended the moment the Lease is lost (code review), as `launch.launch` ends a
+    process, rather than at the command's own bound: the command is moving a server to a
+    commit in a checkout another runner may now own."""
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     child_env = dict(env, **{ENV_COMMIT: commit, ENV_URL: url})
     started = time.monotonic()
     beat = launch._Heartbeat(heartbeat, heartbeat_interval)
     beat.start()
+    ending = None
     try:
-        try:
-            proc = subprocess.Popen(list(command), cwd=repo, env=child_env,
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
-        except OSError as exc:
-            text = "prepare could not run: %s" % exc
-            _write(log_path, text)
-            return False, text, time.monotonic() - started
-        pgid = proc.pid
-        try:
-            captured = proc.communicate(timeout=timeout_seconds)[0] or ""
-        except subprocess.TimeoutExpired:
-            launch._kill_group(proc, grace_seconds, pgid)
-            captured = ""
+        with open(log_path, "w", encoding="utf-8") as log:
             try:
-                captured = proc.communicate(timeout=5)[0] or ""
-            except (subprocess.TimeoutExpired, ValueError, OSError):
-                pass
-            text = "prepare timed out after %d seconds\n%s" % (timeout_seconds, captured)
-            _write(log_path, text)
-            return False, ("prepare timed out after %d seconds; last output: %s"
-                           % (timeout_seconds, _last_line(captured) or "(none)")), \
-                time.monotonic() - started
-        except BaseException:
-            launch._kill_group(proc, grace_seconds, pgid)
-            raise
+                proc = subprocess.Popen(list(command), cwd=repo, env=child_env,
+                                        stdin=subprocess.DEVNULL, stdout=log,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError as exc:
+                text = "prepare could not run: %s" % exc
+                log.write(text)
+                return False, text, time.monotonic() - started
+            pgid = proc.pid
+            deadline = started + timeout_seconds
+            try:
+                while proc.poll() is None:
+                    if beat.lost:
+                        ending = "the lease was lost while prepare ran"
+                        break
+                    if time.monotonic() >= deadline:
+                        ending = "prepare timed out after %d seconds" % timeout_seconds
+                        break
+                    try:
+                        proc.wait(timeout=tick_seconds)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except BaseException:
+                launch._kill_group(proc, grace_seconds, pgid)
+                raise
+            if ending:
+                launch._kill_group(proc, grace_seconds, pgid)
     finally:
         beat.stop()
-    _write(log_path, captured)
     seconds = time.monotonic() - started
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        captured = handle.read()
+    last = _last_line(captured) or "(none)"
+    if ending:
+        return False, "%s; last output: %s" % (ending, last), seconds
     if proc.returncode != 0:
-        return False, ("prepare exited %d; last output: %s"
-                       % (proc.returncode, _last_line(captured) or "(none)")), seconds
-    if beat.lost:
-        return False, "the lease was lost while prepare ran", seconds
+        return False, "prepare exited %d; last output: %s" % (proc.returncode, last), seconds
     return True, "", seconds
 
 
-def _write(path, text):
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
+def _rev_parse(repo, ref):
+    """`gitread.rev_parse`, which answers None for a ref that does not resolve, and here also
+    None when git itself fails, so every caller has one shape to check (code review)."""
+    try:
+        return gitread.rev_parse(repo, ref)
+    except gitread.GitError:
+        return None
 
 
 def _checkout_state(repo):
-    return {"head": gitread.rev_parse(repo, "HEAD"),
+    return {"head": _rev_parse(repo, "HEAD"),
             "status": gitread.status_porcelain(repo)}
 
 
@@ -312,20 +334,17 @@ def plan_finding(area, tour, tour_path):
 
 
 def check_findings(findings, headings, kind, sent):
-    """KTD4's checks in code, after the parser's shape check. Returns (valid, invalid), where
-    each invalid entry is `(finding, problem)`. A finding names an area exactly as a heading
-    spells it, flattened to one line; on a check pass a finding names one of the cards sent,
-    and one that does not is kept, marked, and takes the last generation downstream through
+    """KTD4's checks in code, on the findings of a parsed report, whose shape
+    `testbrief.parse` has already checked. Returns (valid, invalid), where each invalid entry
+    is `(finding, problem)`. A finding names an area exactly as a heading spells it, flattened
+    to one line; on a check pass a finding names one of the cards sent, and one that does not
+    is kept, marked, and takes the last generation downstream through
     `testloop.generation_for`, which the Feeder applies. The mark is `card_sent` on the finding
     itself, so the record carries what the pass could tell."""
     valid, invalid = [], []
     sent_ids = {str(card) for card in sent}
     for finding in findings:
-        problems = testloop.validate_finding(finding)
-        if problems:
-            invalid.append((finding, "; ".join(problems)))
-            continue
-        area = " ".join(str(finding.get("area")).split())
+        area = _flat(finding.get("area"))
         if area not in headings:
             invalid.append((finding, "area %r is not a heading of the tour document"
                             % finding.get("area")))
@@ -397,6 +416,13 @@ def run(manifest, config, request, env, out=None, home=None, adapter=None, now=t
     launch_kwargs = dict(launch_kwargs or {})
     prepare_kwargs = dict(prepare_kwargs or {})
     repo = manifest.project.repo
+    # Area names are flattened once here, so the rules, the brief, and the record all compare
+    # the spelling `testbrief.headings` uses (code review). The sidecar's report only setting
+    # and the flag are one switch (R23).
+    request = replace(request,
+                      stopped_areas=tuple(_flat(name) for name in request.stopped_areas),
+                      plan_areas=tuple(_flat(name) for name in request.plan_areas),
+                      report_only=bool(request.report_only or config.test_loop.report_only))
 
     sentence = refusal(manifest, config, request)
     if sentence:
@@ -475,10 +501,9 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
             exit_code = EXIT_OK if status == RAN else EXIT_HALTED
         return Outcome(exit_code, record=record, path=record_path)
 
-    try:
-        commit = gitread.rev_parse(repo, default)
-    except gitread.GitError as exc:
-        return finish(FAILED, "the default branch %s could not be resolved: %s" % (default, exc))
+    commit = _rev_parse(repo, default)
+    if commit is None:
+        return finish(FAILED, "the default branch %s does not resolve to a commit" % default)
     record["commit"] = commit
 
     # KTD7. The app is moved to the commit and confirmed by the operator's own command.
@@ -519,18 +544,21 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     # the `finally` in `run` releases once, after the worktree is gone.
     kwargs = dict(launch_kwargs, heartbeat=store.heartbeat, on_release=None)
     dest = worktree.path_for(store, pass_id)
-    launched = None
+    launched, not_added = None, None
     try:
         try:
             worktree.add(repo, dest, commit, env=env)
         except worktree.WorktreeError as exc:
-            return finish(FAILED, str(exc))
-        launched = launch.launch(
-            manifest, task, text, store.path("logs", pass_id + ".test.stdout.log"),
-            test_seconds, allowed=tuple(loop.allowed_tools),
-            disallowed=TEST_DISALLOWED_EXTRA, cwd=dest, home=home, base_env=env,
-            stream=stream, **dict(kwargs, host_probe=None))
+            not_added = str(exc)
+        else:
+            launched = launch.launch(
+                manifest, task, text, store.path("logs", pass_id + ".test.stdout.log"),
+                test_seconds, allowed=tuple(loop.allowed_tools),
+                disallowed=TEST_DISALLOWED_EXTRA, cwd=dest, home=home, base_env=env,
+                stream=stream, **dict(kwargs, host_probe=None))
     finally:
+        # Before any record is written (code review): the record the Feeder reads from disk
+        # has to say whether the worktree is gone, and a note here has to reach it.
         removed = True
         try:
             worktree.remove(repo, dest, env=env)
@@ -538,6 +566,8 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
             removed = False
             record["notes"].append("the worktree at %s could not be removed: %s" % (dest, exc))
         record["worktree_removed"] = removed
+    if not_added:
+        return finish(FAILED, not_added)
     record["transcripts"]["test"] = launched.transcript_path
     record["timings"]["test_wall_seconds"] = round(launched.wall_seconds, 3)
     record["timings"]["test_active_seconds"] = round(launched.active_seconds, 3)
@@ -550,7 +580,8 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["checkout"]["status_after"] = after["status"]
     if after != before:
         return finish(FAILED, "the checkout changed while the test process ran: HEAD %s to %s, "
-                              "status %r to %r" % (before["head"][:12], after["head"][:12],
+                              "status %r to %r" % (str(before["head"])[:12],
+                                                   str(after["head"])[:12],
                                                    before["status"], after["status"]))
     if launched.lease_lost:
         return finish(FAILED, "the lease was lost while the test process ran")
@@ -600,10 +631,9 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
 
     # KTD5. The Filing process, in the checkout, bounded to the tracker file.
     known = _known_ids(adapter)
-    try:
-        pre_head = gitread.rev_parse(repo, "HEAD")
-    except gitread.GitError as exc:
-        return finish(FAILED, "the checkout could not be read before filing: %s" % exc)
+    pre_head = _rev_parse(repo, "HEAD")
+    if pre_head is None:
+        return finish(FAILED, "the checkout's HEAD does not resolve to a commit before filing")
     result = filing.run(manifest, to_file, adapter, store, task.backend, pass_id,
                         labels=loop.labels, design_note=loop.design_note, home=home,
                         base_env=env, stream=stream, **kwargs)
@@ -617,11 +647,16 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     scope = gitwrite.closeout_scope_check(repo, pre_head, allowed, ops=store, task_id=pass_id,
                                           env=env)
     if not scope.ok:
-        record["notes"].append(
-            "the filing process changed %s in the checkout, outside %s; the checkout was reset "
-            "to %s and nothing it filed there counts"
-            % (", ".join(scope.changed) or "nothing named", ", ".join(allowed) or "any path",
-               pre_head[:12]))
+        # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
+        # inside it left uncommitted. Both reset, and the note says which (code review).
+        if scope.offending:
+            what = "changed %s in the checkout, outside %s" % (
+                ", ".join(scope.offending), ", ".join(allowed) or "any path")
+        else:
+            what = "left %s changed and uncommitted in the checkout" % (
+                ", ".join(scope.changed) or "the tree")
+        record["notes"].append("the filing process %s; the checkout was reset to %s and nothing "
+                               "it filed there counts" % (what, pre_head[:12]))
     if result.launch_result.lease_lost:
         record["notes"].append("the lease was lost while the filing process ran")
     if not result.filed.ok:
