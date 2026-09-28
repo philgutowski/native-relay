@@ -3,11 +3,12 @@ death, and the stub entry keys that let a process die the way the CLI dies at it
 
 U2: the state machine as two pure decisions, one after a run and one at the start of a Cycle,
 tested as a table of facts in and a record out, with no Feeder, no clock, and no files."""
+import copy
 import json
 import os
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import _paths  # noqa: F401
 import test_run
@@ -259,7 +260,7 @@ def facts(records, readings=None, before=None, **overrides):
     values = dict(before=before or {}, after=after, readings=readings or {},
                   died_on={task_id: rec["model"] for task_id, rec in after.items()},
                   listed_on={task_id: rec["model"] for task_id, rec in after.items()},
-                  fallback={}, marks={}, streak=0, halts={}, deferred=frozenset(),
+                  died_at={}, fallback={}, marks={}, streak=0, halts={}, deferred=frozenset(),
                   passed_over=frozenset(), retries=frozenset(), now=NOW, settings=SETTINGS)
     values.update(overrides)
     return limits.CycleFacts(**values)
@@ -477,9 +478,14 @@ class AfterRun(unittest.TestCase):
         self.assertEqual(ahead.marks, {"fable": limits.Mark(
             since=NOW, until=RESET, source=limits.MARK_CLI)})
         self.assertEqual(RESET - NOW, timedelta(minutes=14))
-        past = self.decide([record("T", "halted")],
-                           {"T": (limits.CONFIRMED, NOW - timedelta(minutes=1))})
-        self.assertEqual(past.marks, {"fable": fallback_mark()})
+        # Issue #96: a reset that passed after the death means the limit is over. Only a death
+        # with no time of its own still reads the reset against the decision, as before.
+        reset = NOW - timedelta(minutes=1)
+        past = self.decide([record("T", "halted")], {"T": (limits.CONFIRMED, reset)},
+                           died_at={"T": NOW - timedelta(minutes=10)})
+        self.assertEqual((past.marks, past.halts), ({}, {}))
+        untimed = self.decide([record("T", "halted")], {"T": (limits.CONFIRMED, reset)})
+        self.assertEqual(untimed.marks, {"fable": fallback_mark()})
 
     def test_an_ordinary_halt_at_max_halts_minus_one_is_excluded(self):
         decision = self.decide([record("T", "halted", wall=3000)], {"T": REFUTED},
@@ -588,14 +594,229 @@ class CycleStart(unittest.TestCase):
                                         SETTINGS, default_model="opus")
         self.assertEqual((start.retry, start.held), ((), (("T", "opus"),)))
 
-    def test_retries_keep_the_order_they_were_given(self):
-        start = self.plan([], ["9", "10"], {}, {})
+    def test_retries_come_back_in_natural_order_whatever_the_container(self):
+        listed = {"2": "opus", "9": "opus", "10": "opus"}
+        for retries in (["9", "10"], {"10", "9", "2"}, ("10", "2", "9"), frozenset({"10", "9"})):
+            with self.subTest(retries=retries):
+                start = self.plan([], retries, listed, {})
+                self.assertEqual(start.retry, tuple(sorted(retries, key=int)))
+        # Unsettled order does not reorder the retries either.
+        start = self.plan(["10", "9"], {"10", "9"}, listed, {})
         self.assertEqual(start.retry, ("9", "10"))
+        # Ids that read as the same number still sort the same way every time.
+        self.assertEqual(limits.natural_order({"T-1", "T-01", "T-2"}), ["T-01", "T-1", "T-2"])
+
+    def test_a_task_with_no_model_and_no_default_raises_naming_it(self):
+        for unsettled, retries in ((["T-7"], set()), ([], {"T-7"})):
+            with self.subTest(retried=bool(retries)):
+                with self.assertRaisesRegex(ValueError, "T-7"):
+                    self.plan(unsettled, retries, {}, {"fable": fallback_mark()})
+        # A default covers it.
+        start = limits.plan_cycle_start(["T-7"], set(), {}, {}, {}, NOW, SETTINGS,
+                                        default_model="sonnet")
+        self.assertEqual(start.room, 2)
+
+    def test_no_argument_is_changed(self):
+        args = (["A", "B"], {"B", "C"}, {"A": "fable", "B": "opus", "C": "fable"},
+                {"fable": fallback_mark()}, dict(MUTUAL), NOW, SETTINGS)
+        kept = copy.deepcopy(args)
+        limits.plan_cycle_start(*args, default_model="sonnet")
+        self.assertEqual(args, kept)
 
     def test_an_expired_mark_holds_nothing(self):
         stale = fallback_mark(NOW - FIVE_HOURS - timedelta(minutes=1))
         start = self.plan(["T"], set(), {"T": "fable"}, {"fable": stale})
         self.assertEqual((start.moves, start.defer, start.room), ((), (), 2))
+
+
+LATER = datetime(2026, 9, 27, 21, 10)       # the decision, after two half hour sonnet Tasks
+
+
+class DeathTime(unittest.TestCase):
+    """Issue #96: a death's mark runs from the time the death ended, not from the decision, and
+    a reset that passed between the two means the limit is already over."""
+
+    def decide(self, records, readings, now=LATER, died_at=None, **overrides):
+        died_at = {rec["id"]: NOW for rec in records} if died_at is None else died_at
+        return limits.decide_after_run(facts(records, readings, now=now, died_at=died_at,
+                                             **overrides))
+
+    def test_a_reset_that_passed_before_the_decision_writes_no_mark(self):
+        for status in ("blocked", "halted"):
+            with self.subTest(status=status):
+                decision = self.decide([record("T", status), landed("S1"), landed("S2")],
+                                       {"T": (limits.CONFIRMED, RESET)}, fallback=MUTUAL,
+                                       halts={"T": 1})
+                self.assertEqual((decision.marks, decision.notify), ({}, ()))
+                self.assertEqual((decision.moves, decision.holds), ((), ()))
+                self.assertEqual((decision.halts, decision.exclude, decision.report),
+                                 ({}, (), ()))
+                self.assertEqual(decision.retry, ("T",) if status == "blocked" else ())
+                self.assertEqual(decision.outcome, limits.GO_ROUND)
+
+    def test_the_same_death_decided_before_the_reset_marks_until_it(self):
+        decision = self.decide([record("T", "blocked")], {"T": (limits.CONFIRMED, RESET)},
+                               now=datetime(2026, 9, 27, 20, 10))
+        self.assertEqual(decision.marks, {"fable": limits.Mark(
+            since=NOW, until=RESET, source=limits.MARK_CLI)})
+
+    def test_fallback_hours_run_from_the_death(self):
+        decision = self.decide([record("T", "blocked")], {"T": CONFIRMED})
+        self.assertEqual(decision.marks, {"fable": fallback_mark(NOW)})
+        self.assertEqual(decision.marks["fable"].until, datetime(2026, 9, 28, 1, 6))
+
+    def test_fallback_hours_already_behind_the_decision_write_no_mark(self):
+        noon = datetime(2026, 9, 27, 12, 0)
+        decision = self.decide([record("T", "blocked")], {"T": CONFIRMED},
+                               now=datetime(2026, 9, 27, 18, 0), died_at={"T": noon})
+        self.assertEqual((decision.marks, decision.holds, decision.retry), ({}, (), ("T",)))
+
+    def test_a_reset_earlier_than_the_death_reads_as_no_reset(self):
+        decision = self.decide([record("T", "blocked")],
+                               {"T": (limits.CONFIRMED, NOW - timedelta(hours=1))})
+        self.assertEqual(decision.marks, {"fable": fallback_mark(NOW)})
+
+    def test_a_death_with_no_time_is_marked_from_the_decision(self):
+        decision = self.decide([record("T", "blocked")], {"T": CONFIRMED}, died_at={})
+        self.assertEqual(decision.marks, {"fable": fallback_mark(LATER)})
+
+    def test_two_deaths_on_one_model_keep_the_reset_still_ahead(self):
+        ahead = LATER + timedelta(minutes=30)
+        readings = {"A": (limits.CONFIRMED, RESET), "B": (limits.CONFIRMED, ahead)}
+        for order in (("A", "B"), ("B", "A")):
+            with self.subTest(order=order):
+                decision = self.decide([record(task_id, "blocked") for task_id in order],
+                                       readings)
+                self.assertEqual(decision.marks, {"fable": limits.Mark(
+                    since=NOW, until=ahead, source=limits.MARK_CLI)})
+                # The model is marked after all, so both deaths are held on it.
+                self.assertEqual(set(decision.holds), {("A", "fable"), ("B", "fable")})
+                self.assertEqual(decision.retry, ("A", "B"))
+
+    def test_a_death_whose_limit_is_over_is_held_when_a_standing_mark_covers_its_model(self):
+        standing = {"fable": fallback_mark(NOW - timedelta(hours=1))}
+        decision = self.decide([record("T", "blocked")], {"T": (limits.CONFIRMED, RESET)},
+                               marks=standing)
+        self.assertEqual((decision.marks, decision.holds), ({}, (("T", "fable"),)))
+
+    def test_a_death_older_than_the_standing_mark_does_not_replace_it(self):
+        # A week's limit marked at 20:30; a Task launched before it died at 20:06 with no reset.
+        week = limits.Mark(since=datetime(2026, 9, 27, 20, 30), until=datetime(2026, 9, 29, 9),
+                           source=limits.MARK_CLI)
+        decision = self.decide([record("T", "blocked")], {"T": CONFIRMED}, marks={"fable": week})
+        self.assertEqual((decision.marks, decision.holds), ({}, (("T", "fable"),)))
+        # A death newer than the standing mark restamps it, as KTD5 says.
+        newer = self.decide([record("T", "blocked")], {"T": CONFIRMED}, marks={"fable": week},
+                            died_at={"T": datetime(2026, 9, 27, 21, 0)})
+        self.assertEqual(newer.marks["fable"].since, datetime(2026, 9, 27, 21, 0))
+
+    def test_mark_for_follows_the_table(self):
+        hours = 5
+        cases = (
+            (RESET, LATER, NOW, None),
+            (RESET, datetime(2026, 9, 27, 20, 10), NOW,
+             limits.Mark(since=NOW, until=RESET, source=limits.MARK_CLI)),
+            (None, LATER, NOW, fallback_mark(NOW)),
+            (NOW - timedelta(minutes=5), LATER, NOW, fallback_mark(NOW)),
+            (None, NOW + timedelta(hours=6), NOW, None),
+            (NOW - timedelta(minutes=5), NOW, None, fallback_mark(NOW)),
+            (None, LATER, None, fallback_mark(LATER)),
+            # A reset at the very moment of the death: the limit lifted as it died.
+            (NOW, LATER, NOW, None),
+            # A death that seems to end after the decision is taken to end at it.
+            (None, NOW, LATER, fallback_mark(NOW)),
+            (RESET, NOW, LATER, limits.Mark(since=NOW, until=RESET, source=limits.MARK_CLI)),
+        )
+        for resets_at, now, died_at, mark in cases:
+            with self.subTest(resets_at=resets_at, now=now, died_at=died_at):
+                self.assertEqual(limits.mark_for(now, resets_at, hours, died_at), mark)
+
+
+class DeathTimeHelper(unittest.TestCase):
+    """`death_time`, the time a record's process ended, for the caller to pass as `died_at`."""
+
+    def test_started_at_plus_wall_seconds(self):
+        self.assertEqual(limits.death_time({"started_at": "2026-09-27T20:00:00",
+                                            "wall_seconds": 360}), NOW)
+        self.assertEqual(limits.death_time({"started_at": "2026-09-27T20:00:00",
+                                            "wall_seconds": 0.5}),
+                         datetime(2026, 9, 27, 20, 0, 0, 500000))
+
+    def test_a_utc_stamp_comes_back_as_local_time_with_no_zone(self):
+        # The runner stamps `started_at` in UTC with its offset; `now` and a reset are local.
+        epoch = RESET_EPOCH
+        stamp = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+        moment = limits.death_time({"started_at": stamp, "wall_seconds": 60})
+        self.assertIsNone(moment.tzinfo)
+        self.assertEqual(moment, datetime.fromtimestamp(epoch + 60))
+        self.assertLess(moment, RESET + timedelta(minutes=2))
+
+    def test_a_missing_or_unreadable_field_gives_nothing(self):
+        for rec in ({}, {"started_at": THIS_RUN}, {"wall_seconds": 8},
+                    {"started_at": THIS_RUN, "wall_seconds": None},
+                    {"started_at": None, "wall_seconds": 8},
+                    {"started_at": "yesterday", "wall_seconds": 8},
+                    {"started_at": 1790000000, "wall_seconds": 8},
+                    {"started_at": THIS_RUN, "wall_seconds": "8"},
+                    {"started_at": THIS_RUN, "wall_seconds": True},
+                    {"started_at": THIS_RUN, "wall_seconds": float("nan")},
+                    {"started_at": THIS_RUN, "wall_seconds": float("inf")},
+                    {"started_at": THIS_RUN, "wall_seconds": 10 ** 30}):
+            with self.subTest(record=rec):
+                self.assertIsNone(limits.death_time(rec))
+
+
+class ReviewGaps(unittest.TestCase):
+    """The four small gaps the review of U2 found beside issue #96."""
+
+    def decide(self, *args, **kwargs):
+        return limits.decide_after_run(facts(*args, **kwargs))
+
+    def test_a_confirmed_blocked_death_on_no_known_model_is_reported_not_queued(self):
+        bare = dict(record("T", "blocked"), model=None)
+        decision = self.decide([bare, landed("S")], {"T": CONFIRMED}, died_on={},
+                               listed_on={})
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+        self.assertEqual((decision.report, decision.retry, decision.halts), (("T",), (), {}))
+
+    def test_leaving_reports_every_blocked_limit_death(self):
+        decision = self.decide([record("A", "blocked", "fable"), record("C", "blocked", "sonnet"),
+                                record("H", "halted", "opus")],
+                               {"A": CONFIRMED, "C": UNCONFIRMED, "H": UNCONFIRMED}, streak=16)
+        self.assertEqual(decision.outcome.reason, limits.LEAVE_LIMIT_WAITS)
+        self.assertEqual((decision.report, decision.retry), (("A", "C"), ()))
+        # The confirmed death's mark still stands for the next start.
+        self.assertEqual(set(decision.marks), {"fable"})
+
+    def test_decided_retries_come_back_in_natural_order(self):
+        decision = self.decide([record(task_id, "blocked") for task_id in ("10", "9", "2")],
+                               {task_id: CONFIRMED for task_id in ("10", "9", "2")})
+        self.assertEqual(decision.retry, ("2", "9", "10"))
+
+    def test_the_death_marks_its_own_model_and_the_start_moves_by_the_listed_one(self):
+        # T died on opus; the Manifest lists it on fable, where a move put it.
+        decision = self.decide([record("T", "blocked", "opus"), landed("S")], {"T": CONFIRMED},
+                               died_on={"T": "opus"}, listed_on={"T": "fable"},
+                               fallback=MUTUAL)
+        self.assertEqual(set(decision.marks), {"opus"})
+        start = limits.plan_cycle_start(["T"], {"T"}, {"T": "fable"}, decision.marks, MUTUAL,
+                                        NOW, SETTINGS)
+        self.assertEqual((start.moves, start.retry), ((), ("T",)))
+        listed_on_opus = limits.plan_cycle_start(["T"], {"T"}, {"T": "opus"}, decision.marks,
+                                                 MUTUAL, NOW, SETTINGS)
+        self.assertEqual(listed_on_opus.moves, (("T", "opus", "fable"),))
+
+    def test_no_argument_is_changed(self):
+        cycle = facts([record("T", "blocked", "fable"), record("U", "halted", "opus"),
+                       record("V", "halted", "sonnet", wall=3000)],
+                      {"T": (limits.CONFIRMED, RESET), "U": UNCONFIRMED, "V": REFUTED},
+                      before={"V": record("V", "halted", "sonnet", started=BEFORE_RUN)},
+                      died_at={"T": NOW}, marks={"opus": fallback_mark()}, fallback=MUTUAL,
+                      halts={"V": 1}, deferred=["X"], passed_over={"Y"}, retries={"T"},
+                      streak=4, now=LATER)
+        kept = copy.deepcopy(cycle)
+        limits.decide_after_run(cycle)
+        self.assertEqual(cycle, kept)
 
 
 class ResolveFallback(unittest.TestCase):
