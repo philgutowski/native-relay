@@ -10,6 +10,7 @@ project board equals the status field the manifest names. The second is what let
 """
 import json
 import hashlib
+import shlex
 import subprocess
 
 from . import (NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, reference_hit, skipped,
@@ -67,6 +68,12 @@ def _collision(reason, expected=None, observed=None):
     if observed is not None:
         result["observed_digest"] = _canonical(observed)
     return result
+
+
+def _quote(label):
+    """A label as a shell argument in the filing instructions, so a label with a space or a
+    quote reaches `gh` whole rather than as two words."""
+    return shlex.quote(str(label))
 
 
 def make_run(cwd):
@@ -562,6 +569,39 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
                     "comment`. %s: a halted task is not finished." % move)
         return ("Add one comment carrying the blocker digest below with `gh issue comment`. %s: a "
                 "blocked task stays open." % move)
+
+    def filing_allowed_tools(self, backend=None):
+        """A Filing process files through `gh`, the way the Closeout closes through it."""
+        return CLOSEOUT_TOOLS
+
+    def filing_instructions(self, labels, design_note, backend=None):
+        """The Filing process's tracker sentence (browser test loop plan, KTD5): search first,
+        comment on a match, else create with the loop's labels and add the issue to the
+        Manifest's project, so the Feeder's ready read, which lists issues by label, can return
+        it (R13). `labels` are the sidecar's `[test_loop] labels`; `design_note` the sidecar's
+        note for a design card (R14). Neither is code: both are rendered as text the process
+        follows, and the runner makes no write here."""
+        label_flags = " ".join("--label %s" % _quote(label) for label in labels)
+        labelled = ("with every one of these labels, %s, " % ", ".join("`%s`" % label for label in labels)
+                    if labels else "")
+        text = (
+            "Look for an open issue describing the same defect first: `gh issue list --state open "
+            "--search \"<a few words from the finding's title>\" --json number,title,body --limit "
+            "50`, reading the bodies that come back. When one describes it, comment on it with "
+            "`gh issue comment <number> --body-file <file>` and report `commented` with that "
+            "issue's number. Otherwise create one issue %swith `gh issue create --title <title> "
+            "--body-file <file>%s`, then add it to the project with `gh project item-add %s "
+            "--owner %s --url <the new issue's url>`, and report `filed` with the new issue's "
+            "number as its id. Write each body to a temporary file first so a quoted block "
+            "survives the shell. An attended planning card also carries the label `attended`."
+            % (labelled, " " + label_flags if label_flags else "",
+               self._project_number, self._owner)
+        )
+        note = " ".join(str(design_note or "").split())
+        if note:
+            text += (" A design finding's body ends with this design note, verbatim, after the "
+                     "Done when lines: %s" % note)
+        return text
 
 
 # Triple coordinator read and comparison primitives ------------------------------------------

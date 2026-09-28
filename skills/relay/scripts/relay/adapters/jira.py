@@ -55,6 +55,21 @@ GROK_TOOL_NAMES = (
     "atlassian__transitionJiraIssue",
     "atlassian__addCommentToJiraIssue",
 )
+# A Filing process (browser test loop plan, KTD5) creates cards and searches for open ones, so
+# it gets the Closeout's tools plus these two. Every spelling gains the same pair.
+FILING_EXTRA_TOOLS = (
+    "mcp__atlassian__createJiraIssue",
+    "mcp__atlassian__searchJiraIssuesUsingJql",
+)
+FILING_TOOLS = CLOSEOUT_TOOLS + FILING_EXTRA_TOOLS
+GROK_FILING_TOOLS = GROK_CLOSEOUT_TOOLS + (
+    "MCPTool(atlassian__createJiraIssue)",
+    "MCPTool(atlassian__searchJiraIssuesUsingJql)",
+)
+GROK_FILING_TOOL_NAMES = GROK_TOOL_NAMES + (
+    "atlassian__createJiraIssue",
+    "atlassian__searchJiraIssuesUsingJql",
+)
 
 
 def _canonical(value):
@@ -367,6 +382,42 @@ class JiraAdapter:
                      "and not JIRA_API_TOKEN; the token is not in this process."
                      % ", ".join(GROK_TOOL_NAMES))
         return text + tail
+
+    def filing_allowed_tools(self, backend=None):
+        if backend == "grok":
+            return GROK_FILING_TOOLS
+        return FILING_TOOLS
+
+    def filing_instructions(self, labels, design_note, backend=None):
+        """The Filing process's tracker sentence (browser test loop plan, KTD5): search the
+        Manifest's project through Atlassian MCP first, comment on a match, else create the
+        issue there with the loop's labels (R13). `design_note` is the sidecar's note for a
+        design card (R14). The token never reaches the process; every write goes through the
+        MCP tools on its allowlist."""
+        labelled = (" with the labels %s" % ", ".join("`%s`" % label for label in labels)
+                    if labels else "")
+        text = (
+            "Look for an open issue describing the same defect first, with "
+            "searchJiraIssuesUsingJql over `project = %s AND statusCategory != Done AND text ~ "
+            "\"<a few words from the finding's title>\"`, reading the descriptions that come back. "
+            "When one describes it, add one comment to it with addCommentToJiraIssue and report "
+            "`commented` with that issue's key. Otherwise create one issue in project %s with "
+            "createJiraIssue%s, its summary the finding's title and its description the card "
+            "body, and report `filed` with the new issue's key as its id. An attended planning "
+            "card also carries the label `attended`."
+            % (self._project_key, self._project_key, labelled)
+        )
+        note = " ".join(str(design_note or "").split())
+        if note:
+            text += (" A design finding's description ends with this design note, verbatim, "
+                     "after the Done when lines: %s" % note)
+        text += (" Pass %s as cloudId on every Atlassian call. Never call "
+                 "getAccessibleAtlassianResources." % self._site)
+        if backend == "grok":
+            text += (" This CLI names the tools %s. Use those, not mcp__atlassian__ names, "
+                     "and not JIRA_API_TOKEN; the token is not in this process."
+                     % ", ".join(GROK_FILING_TOOL_NAMES))
+        return text
 
 
 # Triple coordinator snapshot ---------------------------------------------------------------
