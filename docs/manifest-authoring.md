@@ -606,10 +606,12 @@ design_note = ""
   anything else, or running past `prepare_timeout_seconds`, which ends its whole group, records
   the pass as `not_run` with the command's last output line, and nothing is filed. A checkout
   `prepare` leaves changed, a server log or a pid file written there, is `not_run` too, naming
-  the first changed path, before any process launches; the file stays until someone removes it. Serve the app from a worktree of its own, outside the checkout the runner
-  merges into, and have `prepare` compare the commit the app reports with `RELAY_TEST_COMMIT`
-  before it exits 0, since a server that looks current can be serving code from before the last
-  merge. A launched process cannot stop a server, so moving and restarting it lives only here.
+  the first changed path, before any process launches; the file stays until someone removes
+  it. So is a checkout it moved off the default branch or off that commit. Serve the app from a
+  worktree of its own, outside the checkout the runner merges into, and have `prepare` compare
+  the commit the app reports with `RELAY_TEST_COMMIT` before it exits 0, since a server that
+  looks current can be serving code from before the last merge. A launched process cannot stop
+  a server, so moving and restarting it lives only here.
 - **`prepare` serves the app with its outbound integrations stubbed.** Mail, payments,
   webhooks, and every other call that leaves the app go to a local stub while the loop runs. The
   Test brief already tells the Test process never to approve, send, submit, post, or confirm

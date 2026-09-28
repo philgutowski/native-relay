@@ -448,32 +448,37 @@ class TourAndFiling(PassCase):
         """Issue #117: with the Lease gone another runner may have merged into the checkout, so
         a scope check would name its paths and the reset would remove its merge. The pass ends
         `failed` on the lost Lease and leaves the checkout exactly as it found it, the other
-        runner's commit included."""
+        runner's commit included. The card the process filed before the Lease went is still
+        read back and recorded (code review), so the next tour does not file it again."""
         self.test_process([finding(1)])
         launched = launch.LaunchResult(session_id="filing", lease_lost=True)
-        answer = filing.FilingResult(filing.Filed(error="no assistant record"),
-                                     launch_result=launched)
+        answer = filing.FilingResult(
+            filing.Filed(entries=({"finding": 1, "action": "filed", "id": "T-2"},)),
+            launch_result=launched)
 
-        def another_runner_merges(*args, **kwargs):
-            # Another runner's merge lands a source file while the Filing process runs.
+        def commit(message):
+            subprocess.run(["git", "-C", self.repo, "add", "-A"], check=True)
+            subprocess.run(["git", "-C", self.repo, "commit", "-q", "-m", message], check=True)
+
+        def filed_then_another_runner_merged(*args, **kwargs):
+            with open(os.path.join(self.repo, "tracker.md"), "a") as handle:
+                handle.write("- [ ] T-2 Finding 1 [loop]\n")
+            commit("file findings")
+            # Another runner's merge lands a source file once the Lease has gone.
             os.makedirs(os.path.join(self.repo, "src"), exist_ok=True)
             with open(os.path.join(self.repo, "src", "merged.py"), "w") as handle:
                 handle.write("merged = True\n")
-            subprocess.run(["git", "-C", self.repo, "add", "-A"], check=True)
-            subprocess.run(["git", "-C", self.repo, "commit", "-q", "-m", "another runner"],
-                           check=True)
+            commit("another runner")
             return answer
 
-        with mock.patch.object(filing, "run", side_effect=another_runner_merges), \
-                mock.patch.object(testpass.gitwrite, "closeout_scope_check") as scope_check, \
-                mock.patch.object(filing, "confirm") as confirm:
+        with mock.patch.object(filing, "run", side_effect=filed_then_another_runner_merged), \
+                mock.patch.object(testpass.gitwrite, "closeout_scope_check") as scope_check:
             outcome, _ = self.run_pass()
         scope_check.assert_not_called()
-        confirm.assert_not_called()
         self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
         self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
-        self.assertEqual(outcome.record["filed"], [])
+        self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2"])
         self.assertIn("no scope check and no reset", "\n".join(outcome.record["notes"]))
         self.assertEqual(gitread.show(self.repo, "HEAD", "src/merged.py"), "merged = True\n")
         self.assertEqual(gitread.status_porcelain(self.repo), "")
@@ -749,6 +754,28 @@ class Prepare(PassCase):
         # Nothing was reset or removed: the leftovers are still there for the operator.
         self.assertTrue(os.path.exists(os.path.join(self.repo, "server.log")))
         self.assertIsNone(self.store().lease())
+
+    def test_a_prepare_that_moves_the_checkout_off_the_default_branch_is_not_run(self):
+        """Code review: a clean tree is not enough. A prepare that detaches or commits in the
+        checkout through `RELAY_TEST_REPO` would have the Filing process commit where the
+        Runner never merges, so it is named before any process launches."""
+        cases = [
+            (["bash", "-c", 'git -C "$RELAY_TEST_REPO" checkout -q --detach "$RELAY_TEST_COMMIT"'],
+             "prepare moved the checkout to HEAD at "),
+            (["bash", "-c", 'git -C "$RELAY_TEST_REPO" commit -q --allow-empty -m moved'],
+             "prepare moved the checkout to main at "),
+        ]
+        for command, expected in cases:
+            with self.subTest(expected=expected):
+                subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"], check=True)
+                self.write_sidecar(prepare=command)
+                self.test_process([finding(1)])
+                taken = self.entries_taken()
+                outcome, _ = self.run_pass()
+                self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
+                self.assertIn(expected, outcome.record["reason"])
+                self.assertIn("must leave the checkout where it found it", outcome.record["reason"])
+                self.assertEqual(self.entries_taken(), taken)
 
     def test_the_prepare_log_holds_the_whole_output(self):
         self.write_sidecar(prepare=["bash", "-c", "echo one; echo two; exit 3"])

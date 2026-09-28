@@ -40,14 +40,15 @@ each time the queue drains. One pass:
    the checkout the runner merges into, so a merge never changes what is being served mid pass
    and a server never holds the checkout. `prepare` below makes one on its first run.
 2. **Write `prepare`.** It is an argument list the pass runs in its own process group, ended
-   whole after `prepare_timeout_seconds`, from a directory of the pass's own rather than the
-   checkout, so name the script by its absolute path. It reads `RELAY_TEST_COMMIT`,
-   `RELAY_TEST_URL`, and `RELAY_TEST_REPO`, the checkout's path, from its environment. It must
-   leave the checkout as it found it: a file it writes there, a log or a pid file, records the
-   pass as not run naming that path. It exits 0 only once the app at that url serves
-   that commit; anything else records the pass as not run, with the command's last output line
-   as the reason. A launched process cannot stop a server, so moving and restarting it lives
-   here and nowhere else.
+   whole after `prepare_timeout_seconds`, from a directory under the runner's state directory
+   rather than the checkout, so name the script by its absolute path. It reads
+   `RELAY_TEST_COMMIT`, `RELAY_TEST_URL`, and `RELAY_TEST_REPO`, the checkout's path, from its
+   environment. It must leave the checkout as it found it: a file it writes there, a log or a
+   pid file, records the pass as not run naming that path, and so does a checkout it moved off
+   the default branch. It exits 0 only once the app at that url serves that commit; anything
+   else records the pass as not run, with the command's last output line as the reason. A
+   launched process cannot stop a server, so moving and restarting it lives here and nowhere
+   else.
 3. **Stub the app's outbound integrations in `prepare`.** Serve the app with mail, payments,
    webhooks, and every other outbound call pointed at a local stub. The Test brief tells the
    Test process never to approve, send, submit, or post anything that leaves the app, and to

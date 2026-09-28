@@ -262,7 +262,8 @@ def prepare(command, repo, commit, url, timeout_seconds, log_path, env, cwd, hea
     and then refuse every later pass and the Feeder's next cycle as a dirty tree."""
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     os.makedirs(cwd, exist_ok=True)
-    child_env = dict(env, **{ENV_COMMIT: commit, ENV_URL: url, ENV_REPO: repo})
+    # Absolute (code review): a relative Manifest path would resolve against `cwd` here.
+    child_env = dict(env, **{ENV_COMMIT: commit, ENV_URL: url, ENV_REPO: os.path.abspath(repo)})
     started = time.monotonic()
     beat = launch._Heartbeat(heartbeat, heartbeat_interval)
     beat.start()
@@ -420,16 +421,19 @@ def _append(path, text):
 def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
     """The sentences for every way the Filing step did not complete, most telling first, or an
     empty list when a readable `relay-filed` block was read from a process that ran to its end
-    in bounds (issue #115). Four causes: the process could not be launched, it timed out, its
-    block could not be read, or the scope check reset its commit. The first is the pass's
-    reason and the rest are its notes, so a reset of the checkout is on the record even when a
-    timeout is the headline (code review). Each is a filing failure and not an account of the
-    findings: a pass recorded `ran` with no new card on one of these would stop the loop on open
-    findings that no card ever answered, so the pass is `failed`, which the Feeder notifies once
-    and counts as no round. A lost Lease is not among them: `_pass` ends the pass on it before
-    any scope check runs (issue #117)."""
+    in bounds (issue #115). Five causes: the Lease was lost while it ran, the process could not
+    be launched, it timed out, its block could not be read, or the scope check reset its
+    commit. The first is the pass's reason and the rest are its notes, so a reset of the
+    checkout is on the record even when a timeout is the headline (code review). Each is a
+    filing failure and not an account of the findings: a pass recorded `ran` with no new card
+    on one of these would stop the loop on open findings that no card ever answered, so the
+    pass is `failed`, which the Feeder notifies once and counts as no round. `scope` is None
+    when the Lease was lost, since no scope check runs then (issue #117), so a lost Lease
+    headlines as the reason the checkout went unchecked."""
     launched = result.launch_result
     sentences = []
+    if launched.lease_lost:
+        sentences.append("the lease was lost while the filing process ran")
     if launched.launch_error:
         sentences.append("the filing process could not be launched: %s" % launched.launch_error)
     if launched.timed_out:
@@ -437,7 +441,7 @@ def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
     if not result.filed.ok and not launched.timed_out:
         # A timeout writes itself as the block's error, so that sentence is the timeout's.
         sentences.append("the filing process's block could not be read: %s" % result.filed.error)
-    if not scope.ok:
+    if scope is not None and not scope.ok:
         # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
         # inside it left uncommitted. Both reset, and the sentence says which (code review).
         if scope.offending:
@@ -560,7 +564,7 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["commit"] = commit
 
     # KTD7. The app is moved to the commit and confirmed by the operator's own command, run
-    # from a directory of the pass's own rather than the checkout (issue #117).
+    # from a directory under the state directory rather than the checkout (issue #117).
     ok, sentence, seconds = prepare(loop.prepare, repo, commit, loop.url,
                                     loop.prepare_timeout_seconds,
                                     store.path("logs", pass_id + ".prepare.log"), env,
@@ -572,13 +576,20 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["timings"]["prepare_seconds"] = round(seconds, 3)
     if not ok:
         return finish(NOT_RUN, sentence)
-    # The refusal saw a clean tree, so anything changed now is `prepare`'s, reached by an
-    # absolute path. Caught here, before the snapshot, it is named as `prepare`'s and not blamed
-    # on the Filing process by the scope check, whose reset would leave the file behind.
+    # The refusal saw a clean tree on the default branch at `commit`, so anything different now
+    # is `prepare`'s, reached through `RELAY_TEST_REPO`. Caught here, before the snapshot, it is
+    # named as `prepare`'s and not blamed on the Filing process by the scope check, whose reset
+    # would leave an untracked file behind, nor filed onto a branch the Runner never merges.
     try:
+        branch = gitread.current_branch(repo)
+        head = _rev_parse(repo, "HEAD")
         changed, _ = gitread.status_paths(repo)
     except gitread.GitError as exc:
         return finish(FAILED, "the checkout could not be read after prepare: %s" % exc)
+    if branch != default or head != commit:
+        return finish(NOT_RUN, "prepare moved the checkout to %s at %s, from %s at %s; prepare "
+                               "must leave the checkout where it found it"
+                               % (branch, str(head)[:12], default, commit[:12]))
     if changed:
         return finish(NOT_RUN, "prepare left the checkout changed at %s; the pass runs only in a "
                                "clean checkout, so remove it and have prepare write outside the "
@@ -715,20 +726,21 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     record["timings"]["filing_wall_seconds"] = round(result.launch_result.wall_seconds, 3)
     for finding in result.findings:
         record["notes"].append("filing process: %s" % json.dumps(finding, sort_keys=True))
-    # Before the scope check, as `run.py`'s Closeout path is (issue #117): with the Lease gone,
-    # another runner may have merged into the checkout meanwhile, and the diff from `pre_head`
-    # would name its paths as out of scope and the reset would remove its merge. So nothing is
-    # checked, reset, or read back; the checkout is left for whoever holds the Lease now.
-    if result.launch_result.lease_lost:
-        record["notes"].append("the checkout was left as the filing process ended, with no scope "
-                               "check and no reset, since another runner may hold it now")
-        return finish(FAILED, "the lease was lost while the filing process ran")
-    allowed =([manifest.tracker.file] if manifest.tracker.adapter == "markdown"
+    allowed = ([manifest.tracker.file] if manifest.tracker.adapter == "markdown"
                and manifest.tracker.file else [])
     # The scope check runs whatever the process did, so a commit outside the bound is reset
-    # before anything is read back or recorded.
-    scope = gitwrite.closeout_scope_check(repo, pre_head, allowed, ops=store, task_id=pass_id,
-                                          env=env)
+    # before anything is read back or recorded. Except on a lost Lease, which is read first,
+    # as `run.py`'s Closeout path reads it (issue #117): another runner may have merged into
+    # the checkout meanwhile, the diff from `pre_head` would name its paths as out of scope,
+    # and the reset would remove its merge. The checkout is left for whoever holds the Lease.
+    lease_lost = result.launch_result.lease_lost
+    scope = None
+    if lease_lost:
+        record["notes"].append("the checkout was left as the filing process ended, with no scope "
+                               "check and no reset, since another runner may hold it now")
+    else:
+        scope = gitwrite.closeout_scope_check(repo, pre_head, allowed, ops=store,
+                                              task_id=pass_id, env=env)
     failures = filing_failures(result, scope, allowed, pre_head, filing_seconds)
     record["notes"].extend(failures[1:])
     # The confirmation runs on a failed filing too, over whatever entries were read. Only the
