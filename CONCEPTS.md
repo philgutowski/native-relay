@@ -474,6 +474,8 @@ The states a Task passes through once a limit has touched it, one row per transi
 | From | On | To |
 |---|---|---|
 | Listed | the run starts, its model unmarked | Launched |
+| Listed | the run starts, its model marked, a fallback is open | Moved |
+| Listed | the run starts, its model marked, no fallback is open | Held |
 | Launched | its verdict passes | Landed |
 | Launched | the death reads confirmed | Confirmed |
 | Launched | the death reads unconfirmed | Unconfirmed |
@@ -514,8 +516,9 @@ execution mode is triple refuses the flag outright.
 Every mark, move, and hold this machine makes is one `limit` event, carrying `action`, `model`,
 `to`, `tasks`, and `until`. `feed --status` lists every Marked model with its expiry and where
 that time came from, every Held Task with the model that holds it, and the streak. `feed
---clear-limits` clears the marks, the streak, and the retry queue's deferrals in one step; it
-refuses beside a live Feeder unless paired with `--restart`.
+--clear-limits` clears the marks, the streak, and the held snapshot in one step; the retry queue
+stays, since a queued retry runs on its own once the mark it waited on is gone. It refuses beside
+a live Feeder unless paired with `--restart`.
 
 ### Reason words
 

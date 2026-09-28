@@ -516,10 +516,11 @@ post_cycle_timeout_seconds = 3600
   entry lists every `waiting` and `leaving` word a feeder prints, including `model_held` and
   `usage_limit`. `feed <manifest> --retry-blocked <id>` queues one blocked task moved or held by
   the machine, by hand, the same way a queued retry runs on its own.
-- `feed <manifest> --clear-limits` clears every mark, the whole cycle wait's streak, and the
-  retry queue's deferrals in one step, for an operator who knows the limit is over. With no
-  feeder alive it clears and leaves; paired with `--restart` it clears as the new feeder takes
-  over; against a live feeder with neither it refuses and says why.
+- `feed <manifest> --clear-limits` clears every mark and the whole cycle wait's streak in one
+  step, for an operator who knows the limit is over; the retry queue stays, since a queued retry
+  runs on its own once the mark it waited on is gone. With no feeder alive it clears and leaves;
+  paired with `--restart` it clears as the new feeder takes over; against a live feeder with
+  neither it refuses and says why.
 - Settings are read when the feeder starts. After editing the sidecar, `feed <manifest>
   --restart` reloads them on whatever tree the feeder already runs from; a restart with no
   `--pin` keeps running from a checkout when it was never pinned. Add `--pin`, run from a git work

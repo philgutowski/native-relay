@@ -68,7 +68,7 @@ python3 <runner> feed <manifest> --dry-run --detach  # refused: a dry run never 
 python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
-python3 <runner> feed <manifest> --clear-limits # clear marks, the streak, and deferrals; refused beside a live feeder without --restart
+python3 <runner> feed <manifest> --clear-limits # clear marks and the streak; the retry queue stays; refused beside a live feeder without --restart
 python3 <runner> feed <manifest> --release      # clear a failed post cycle hook's hold once the default branch is repaired; starts nothing
 python3 <runner> feed <manifest> --pin --detach --notify  # ask, wait for it to leave, take its place, pinned; --pin already carries restart semantics
 python3 <runner> feed <manifest> --pin --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle, pinned
@@ -637,12 +637,12 @@ ends in a confirmed limit death, `run` launches no further task on that model fo
 that run, names the ones it passed over on the terminal record and in the summary beside the
 model, and still completes with exit 0.
 
-`feed <manifest> --clear-limits` clears every mark, the usage limit wait streak, and the retry
-queue's deferrals in one step, for an operator who knows the limit is over. With no feeder alive
-it clears and leaves; `--restart` clears as the new feeder takes over; against a live feeder with
-neither it refuses and says why. `feed <manifest> --status` lists every marked model with its
-expiry and where that time came from, and every held task with the model that holds it, beside
-the streak.
+`feed <manifest> --clear-limits` clears every mark and the usage limit wait streak in one step,
+for an operator who knows the limit is over; the retry queue stays, since a queued retry runs on
+its own once the mark it waited on is gone. With no feeder alive it clears and leaves;
+`--restart` clears as the new feeder takes over; against a live feeder with neither it refuses and
+says why. `feed <manifest> --status` lists every marked model with its expiry and where that time
+came from, and every held task with the model that holds it, beside the streak.
 
 Start a feeder pinned to a commit, `feed <manifest> --pin`, rather than from a checkout somebody
 may still edit: it launches the runner from its own tree at every cycle, so an edit made there can

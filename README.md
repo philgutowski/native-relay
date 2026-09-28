@@ -144,7 +144,7 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave af
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --release   # clear a failed post cycle hook's hold; starts nothing
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  # relaunch one blocked task next cycle
-python3 skills/relay/scripts/relay_cli.py feed <manifest> --clear-limits  # clear marks, the streak, and deferrals; refused beside a live feeder without --restart
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --clear-limits  # clear marks and the streak; the retry queue stays; refused beside a live feeder without --restart
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle, marks, held tasks, and the streak; --json for data
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --follow    # new events as JSON lines until it leaves
 ```
