@@ -441,10 +441,18 @@ def _mark_attempt(log_path):
     """Append the attempt boundary to the process's log before the process exists, so an
     attempt that never starts, or prints nothing a reader knows, still has a line of its own
     that `limits` stops at. Best effort: a log that cannot be written here reads as a log
-    written before the line existed, and the append below reports the fault if it persists."""
+    written before the line existed, and the append below reports the fault if it persists.
+
+    An attempt before this one can leave the log without a final newline, killed mid line or
+    ending on plain text, and a boundary appended straight after it would be glued onto that
+    line where no reader can parse it. So the line starts on a fresh one."""
     try:
-        with open(log_path, "a", encoding="utf-8") as log:
-            log.write(limits.attempt_line())
+        with open(log_path, "a+b") as log:
+            torn = False
+            if log.tell():
+                log.seek(-1, os.SEEK_END)
+                torn = log.read(1) != b"\n"
+            log.write((("\n" if torn else "") + limits.attempt_line()).encode("utf-8"))
     except OSError:
         pass
 

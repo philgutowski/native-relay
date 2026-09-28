@@ -363,6 +363,16 @@ class AttemptBoundary(LaunchCase):
         first, second = (json.loads(lines[index])["at"] for index in marks)
         self.assertLessEqual(first, second)
 
+    def test_a_log_ending_mid_line_gets_its_boundary_on_a_line_of_its_own(self):
+        with open(self.log, "w") as handle:
+            handle.write('{"type": "assistant"}\nerror: unknown option')
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        self.go()
+        with open(self.log) as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual(lines[1], "error: unknown option")
+        self.assertTrue(limits.is_attempt_boundary(json.loads(lines[2])), lines[:3])
+
     def test_the_boundary_is_not_streamed_as_process_output(self):
         write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
         streamed = []
