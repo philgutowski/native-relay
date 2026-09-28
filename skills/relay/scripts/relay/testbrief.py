@@ -56,7 +56,7 @@ CHECK_INSTRUCTION = (
 NO_STOPPED_AREAS = "No area is stopped on this pass."
 STOPPED_AREAS_LEAD = "Skip these areas entirely; the loop has stopped testing them:"
 
-_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t#]*$", re.M)
+_HEADING_RE = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t#]*$", re.M)
 
 # The report's status words are the pass record's own (KTD12), so the parser and
 # `testloop.should_stop` read one vocabulary.
@@ -68,12 +68,15 @@ class Report:
     """One parsed Test report. `error` is a sentence naming the first problem, and then
     `status`, `reason`, `findings`, and `approval_steps` carry nothing; a pass records such a
     report as failed with the sentence and files nothing (KTD4). Otherwise `status` is one of
-    `STATUSES`, `findings` the validated findings in report order, and
-    `approval_steps` the approval steps the process reached and left unapproved (R21)."""
+    `STATUSES`, `findings` the validated findings in report order, `approval_steps` the
+    approval steps the process reached and left unapproved (R21), and `untoured` the areas the
+    process could not reach, as it named them, flattened and each once (issue #121); whether
+    each is a heading of the tour document is the pass's check, as a finding's area is."""
     status: str | None = None
     reason: str = ""
     findings: tuple = ()
     approval_steps: tuple = ()
+    untoured: tuple = ()
     error: str | None = None
     # The file the final message was read from: the transcript, or the process's stdout log
     # when the reader fell back to it (issue #113). None when neither held an assistant
@@ -108,11 +111,31 @@ def _cards_block(cards):
     return "\n\n" + "\n\n".join(parts)
 
 
+def _levelled_headings(tour):
+    return tuple((len(match.group(1)), " ".join(match.group(2).split()))
+                 for match in _HEADING_RE.finditer(tour or ""))
+
+
 def headings(tour):
     """The areas a tour document defines: the text of every markdown heading, in order, each
-    flattened to one line. A finding's `area` and a stopped area are checked against these,
-    here at render and again by the pass code (KTD4)."""
-    return tuple(" ".join(match.group(1).split()) for match in _HEADING_RE.finditer(tour or ""))
+    flattened to one line. A finding's `area`, a stopped area, and an untoured area are
+    checked against these, here at render and again by the pass code (KTD4)."""
+    return tuple(text for _level, text in _levelled_headings(tour))
+
+
+def areas(tour):
+    """The headings a process is asked to tour: `headings` less the document's title, which is
+    the first heading when it is the only heading of its level (issue #121). A tour document
+    opens with a title over its areas, and no process lists the title as an area it could not
+    reach, so a report that names every one of these has reached nothing, and the pass records
+    it `not_run`. A name is still checked against `headings`, since the title is a heading."""
+    levelled = _levelled_headings(tour)
+    if not levelled:
+        return ()
+    first_level = levelled[0][0]
+    if sum(1 for level, _text in levelled if level == first_level) == 1:
+        return tuple(text for _level, text in levelled[1:])
+    return tuple(text for _level, text in levelled)
 
 
 def _stopped_block(stopped_areas, areas):
@@ -314,9 +337,21 @@ def parse_text(text):
         approval_steps = []
     if not _strings(approval_steps):
         return Report(error="approval_steps must be an array of non empty strings")
+    untoured = payload.get("untoured", [])
+    if untoured is None:
+        untoured = []
+    if not _strings(untoured):
+        return Report(error="untoured must be an array of non empty strings")
+    # Flattened as `headings` flattens a heading, and once each: a process that lists an area
+    # twice has not left two areas untoured.
+    names = []
+    for name in (" ".join(item.split()) for item in untoured):
+        if name not in names:
+            names.append(name)
     return Report(status=status, reason=reason,
                   findings=tuple(testloop.with_string_card(finding) for finding in findings),
-                  approval_steps=tuple(step.strip() for step in approval_steps))
+                  approval_steps=tuple(step.strip() for step in approval_steps),
+                  untoured=tuple(names))
 
 
 def parse(transcript_path, backend="claude", log_path=None):

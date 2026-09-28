@@ -79,9 +79,11 @@ def finding(number, area="Search", severity="high", card=None, **changes):
     return shape
 
 
-def report_text(findings, status="ran", reason="", approval_steps=()):
+def report_text(findings, status="ran", reason="", approval_steps=(), untoured=None):
     payload = {"status": status, "reason": reason, "findings": list(findings),
                "approval_steps": list(approval_steps)}
+    if untoured is not None:
+        payload["untoured"] = list(untoured)
     return ("Toured the app.\n\n```%s\n%s\n```\n"
             % (contracts.TEST_REPORT_FENCE_TAG, json.dumps(payload, indent=1)))
 
@@ -169,8 +171,8 @@ class PassCase(unittest.TestCase):
             with open(os.path.join(entry_dir, "git.sh"), "w") as handle:
                 handle.write(git_sh)
 
-    def test_process(self, findings=None, text=None, git_sh=None, sleep=0):
-        text = text if text is not None else report_text(findings or [])
+    def test_process(self, findings=None, text=None, git_sh=None, sleep=0, **report):
+        text = text if text is not None else report_text(findings or [], **report)
         self.queue_entry(self.transcript(text, "test-%d" % (self.entry + 1)), git_sh=git_sh,
                          sleep=sleep)
 
@@ -1202,6 +1204,96 @@ class Refusals(PassCase):
         outcome, _ = self.run_pass()
         self.assertEqual(outcome.record["status"], testloop.NOT_RUN)
         self.assertIsNone(self.store().lease())
+
+
+class Untoured(PassCase):
+    """Issue #121: the pass record carries the areas the Test process could not reach, each a
+    heading of the tour document, and a report that reached no area is `not_run`."""
+
+    def test_a_partial_tour_is_ran_with_the_untoured_areas_in_the_record_and_files_what_it_found(self):
+        self.test_process([finding(1)], reason="Invoices and Settings sit behind a sign in",
+                          untoured=["Invoices", " Settings "])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        outcome, _ = self.run_pass()
+        record = outcome.record
+        self.assertEqual(record["status"], testloop.RAN, record["reason"])
+        self.assertEqual(record["untoured"], ["Invoices", "Settings"])
+        self.assertEqual([entry["id"] for entry in record["filed"]], ["T-2"])
+        with open(outcome.path) as handle:
+            self.assertEqual(json.load(handle)["untoured"], ["Invoices", "Settings"])
+
+    def test_a_report_without_the_key_records_an_empty_list(self):
+        self.test_process([])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.RAN)
+        self.assertEqual(outcome.record["untoured"], [])
+
+    def test_a_report_that_reached_no_area_is_not_run_with_its_reason_and_files_nothing(self):
+        # The findings it reported on the way are not filed: a pass that did not run files
+        # nothing, and this one saw no area to find anything in.
+        # The document's title is a heading, and no process lists it: the three areas under
+        # it are every area there is to reach.
+        self.assertEqual(testbrief.areas(TOUR_MD), ("Search", "Invoices", "Settings"))
+        self.test_process([finding(1)], reason="every page answered with the sign in form",
+                          untoured=["Search", "Invoices", "Settings"])
+        outcome, _ = self.run_pass()
+        record = outcome.record
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(record["status"], testloop.NOT_RUN)
+        self.assertIn("could reach no area of the tour document", record["reason"])
+        self.assertIn("every page answered with the sign in form", record["reason"])
+        self.assertEqual(record["untoured"], ["Search", "Invoices", "Settings"])
+        self.assertEqual(record["findings"], [])
+        self.assertEqual(record["filed"], [])
+        self.assertEqual(self.entries_taken(), 1)
+        self.assertEqual(self.tracker(), TRACKER_MD)
+
+    def test_reaching_one_area_of_three_is_ran_not_not_run(self):
+        self.test_process([], untoured=["Invoices", "Settings"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.RAN)
+        self.assertEqual(outcome.record["untoured"], ["Invoices", "Settings"])
+
+    def test_an_untoured_name_that_is_not_a_heading_fails_the_pass_naming_it(self):
+        # Not dropped like an invalid finding: dropping it would read the tour as more
+        # complete than the process said, which is the misreading the key exists to prevent.
+        self.test_process([finding(1)], untoured=["Nowhere"])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"],
+                         "untoured area 'Nowhere' is not a heading of the tour document")
+        self.assertEqual(outcome.record["untoured"], [])
+        self.assertEqual(outcome.record["filed"], [])
+        self.assertEqual(self.entries_taken(), 1)
+
+    def test_check_untoured_flattens_and_keeps_each_name_once(self):
+        headings = testbrief.headings(TOUR_MD)
+        self.assertEqual(testpass.check_untoured(["  Search ", "Search", "Settings"], headings),
+                         (["Search", "Settings"], None))
+        checked, sentence = testpass.check_untoured(["Search", "Cart"], headings)
+        self.assertIsNone(checked)
+        self.assertIn("'Cart'", sentence)
+
+    def test_the_findings_file_lists_the_untoured_areas_in_report_only_mode(self):
+        self.test_process([finding(1)], reason="Settings never loaded",
+                          untoured=["Settings"])
+        outcome, _ = self.run_pass(testpass.Request(report_only=True))
+        self.assertEqual(outcome.record["status"], testloop.RAN)
+        with open(self.paths().findings) as handle:
+            text = handle.read()
+        self.assertIn("## Pass 1, tour of", text)
+        self.assertIn("- untoured: Settings\n", text)
+        self.assertLess(text.index("- untoured: Settings"), text.index("[high] file:"))
+        self.assertEqual(self.entries_taken(), 1)
+
+    def test_a_report_only_pass_that_reached_every_area_writes_no_untoured_line(self):
+        self.test_process([finding(1)])
+        self.run_pass(testpass.Request(report_only=True))
+        with open(self.paths().findings) as handle:
+            self.assertNotIn("untoured", handle.read())
 
 
 if __name__ == "__main__":

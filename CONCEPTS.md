@@ -673,8 +673,11 @@ detached worktree of the tested commit, outside the checkout the Runner merges i
 fails and files nothing when that checkout changed underneath it. It holds no Tracker write tool
 and `Bash(gh *)` is denied it, so a tour cannot file, comment, or move a card by any route. It
 never types a credential, using the session the operator signed in, and never approves anything
-that writes outside the app, stopping at each approval step. Its Brief carries nothing project
-specific; project facts reach it as sidecar data and from the Tour document.
+that writes outside the app, stopping at each approval step. When it can reach some areas and
+not others, it tests what it can reach and names the rest in the report's `untoured` list, and
+the Feeder never reads such a tour as a clean one; a report that reached no area is `not_run`.
+Its Brief carries nothing project specific; project facts reach it as sidecar data and from the
+Tour document.
 
 ### Filing process
 The short launched process a Test pass starts after the code has chosen what to file. It gets
