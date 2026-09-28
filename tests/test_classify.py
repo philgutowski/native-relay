@@ -375,6 +375,28 @@ class EnvelopeParsing(unittest.TestCase):
         self.assertEqual(env["status"], "failed")
         self.assertEqual(env["blockers"], ["the gate is red"])
 
+    def test_the_fence_grammar_is_the_shared_one_from_contracts(self):
+        """Issue #111: the envelope, the test report, and the filed block read through one
+        grammar, so a fix to the closer reaches all three."""
+        self.assertEqual(classify.FENCE_RE.pattern,
+                         contracts.fence_regex(contracts.ENVELOPE_FENCE_TAG).pattern)
+
+    def test_a_triple_backtick_inside_a_blocker_does_not_end_the_block(self):
+        """Issue #111: a blocker that quotes a code fence used to close the envelope at that
+        point, and the parser read a partial block with the blocker cut short."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: blocked\nblockers:\n"
+            "- the gate prints ```error``` and stops\n"
+            "changed_files:\nlearnings:\n```\n")
+        self.assertEqual(env["status"], "blocked")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["blockers"], ["the gate prints ```error``` and stops"])
+
+    def test_the_closing_fence_may_carry_a_carriage_return_and_trailing_spaces(self):
+        env = classify.parse_envelope("```relay-envelope \r\nstatus: complete\r\n```  \r\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+
 
 class WritePatterns(unittest.TestCase):
     def test_gh_pr_create_is_not_a_tracker_write(self):
@@ -486,6 +508,23 @@ class LearningsField(unittest.TestCase):
 
     def test_no_status_line_yields_no_envelope_even_with_learnings_present(self):
         self.assertIsNone(classify.parse_envelope("learnings:\n- something\n"))
+
+    def test_a_triple_backtick_inside_a_learning_does_not_end_the_block(self):
+        """Issue #111: `classify.FENCE_RE` closed the block at the first triple backtick
+        anywhere after the opening fence, so a learning that quoted a code fence truncated the
+        envelope there. The closer is now a line of its own, the same grammar the test report
+        reads through, so the learning survives whole and the keys after it still parse."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: complete\nblockers:\nchanged_files:\n- a.py\n"
+            "learnings:\n"
+            "- the runner reads the block through ```relay-envelope```, not the tail\n"
+            "- the second learning still lands\n```\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["changed_files"], ["a.py"])
+        self.assertEqual(env["learnings"], [
+            "the runner reads the block through ```relay-envelope```, not the tail",
+            "the second learning still lands"])
 
 
 class FindingLines(unittest.TestCase):

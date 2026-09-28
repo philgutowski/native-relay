@@ -37,7 +37,9 @@ _GIT_C = re.compile(r"^git(?:\s+-C\s+\S+|\s+--git-dir=\S+|\s+--work-tree=\S+)+\s
 LAST_MESSAGE_CHARS = 200
 ARGUMENT_CHARS = 120
 
-FENCE_RE = re.compile(r"```%s[ \t]*\n(.*?)```" % re.escape(contracts.ENVELOPE_FENCE_TAG), re.S)
+# Issue #111: the envelope shares the fence grammar with the test report and the filed block,
+# so a triple backtick inside a blocker or learning line is body text, not the closer.
+FENCE_RE = contracts.fence_regex(contracts.ENVELOPE_FENCE_TAG)
 STATUS_RE = re.compile(
     r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:\s*[`*]*(%s)\b" % (contracts.ENVELOPE_STATUS_KEY, "|".join(contracts.ENVELOPE_STATUSES)),
     re.M | re.I,
