@@ -954,7 +954,17 @@ def _release_hold(paths, out):
     """`feed --release` (issue #53): clear the hold a failed post cycle hook left in the state
     file. Under the feeder lock, so no feeder saves its own copy of the state over this write.
     A feeder holding the lock is refused, whether it is cycling or is still on its way out
-    after saving a hold, since the release must not race its last saves. Starts nothing."""
+    after saving a hold, since the release must not race its last saves. Starts nothing.
+
+    When an actual hold was cleared, also removes a stray stop file, if one is present, before
+    the lock is given up. `--stop` against a held feeder writes the file whether or not that
+    feeder is still running to read it, since it does not check liveness, and a held feeder has
+    usually already left. Left in place, the next start would see it and leave before its first
+    cycle, silently, since the stop file check comes before the hold is ever consulted. Scoped
+    to `hold is not None` rather than done whenever the lock is free: `cmd_feed` refuses a
+    `--restart` under a hold before it ever reaches `wait_for_lock`, so a stop file from a live
+    restart handover cannot coexist with a real hold, and with no hold here there is nothing to
+    tell that handover's file apart from a stop meant to stand, so neither is touched."""
     lock = feeder_module.acquire_lock(paths)
     if lock is None:
         out.write("a feeder holds %s; nothing released. A feeder that has just held is still "
@@ -962,25 +972,42 @@ def _release_hold(paths, out):
                   % (paths.lock, paths.manifest))
         return EXIT_LEASE
     try:
-        hold, unlogged = feeder_module.release_hold(paths)
-    except feeder_module.ConfigError as exc:
-        out.write("%s. %s\n" % (exc, feeder_module.STATE_HINT))
-        return EXIT_CONFIG
-    except OSError as exc:
-        out.write("the hold could not be released, it is still set: %s\n" % exc)
-        return EXIT_CONFIG
+        try:
+            hold, unlogged = feeder_module.release_hold(paths)
+        except feeder_module.ConfigError as exc:
+            out.write("%s. %s\n" % (exc, feeder_module.STATE_HINT))
+            return EXIT_CONFIG
+        except OSError as exc:
+            out.write("the hold could not be released, it is still set: %s\n" % exc)
+            return EXIT_CONFIG
+        stop_removed, stop_error = False, None
+        if hold is not None:
+            try:
+                os.unlink(paths.stop)
+                stop_removed = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                stop_error = str(exc)
     finally:
         lock.close()
     if hold is None:
         out.write("no post cycle hold is set for %s; nothing released\n" % paths.manifest)
-        return EXIT_OK
-    out.write("released the post cycle hold from cycle %s: the hook %s at %s, merge range %s\n"
-              % (hold.get("cycle"), hold.get("failure"), hold.get("at"),
-                 feeder_module.merge_words(hold)))
-    if unlogged:
-        out.write("note: the release is done but could not be written to %s: %s\n"
-                  % (paths.log, unlogged))
-    out.write("start the feeder again with: relay feed %s\n" % paths.manifest)
+    else:
+        out.write("released the post cycle hold from cycle %s: the hook %s at %s, merge range "
+                  "%s\n" % (hold.get("cycle"), hold.get("failure"), hold.get("at"),
+                            feeder_module.merge_words(hold)))
+        if unlogged:
+            out.write("note: the release is done but could not be written to %s: %s\n"
+                      % (paths.log, unlogged))
+        if stop_removed:
+            out.write("removed the stop file %s: no live feeder was left to read it, and it "
+                      "would have ended the next one before its first cycle\n" % paths.stop)
+        elif stop_error:
+            out.write("note: the stop file %s could not be removed: %s\n"
+                      % (paths.stop, stop_error))
+    if hold is not None:
+        out.write("start the feeder again with: relay feed %s\n" % paths.manifest)
     return EXIT_OK
 
 

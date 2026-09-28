@@ -1062,6 +1062,38 @@ class Exits(FeederCase):
         self.assertNotIn("Change the routing", self.log_text())
         self.assertIn("1 would be skipped at launch", self.log_text())
 
+    def test_idle_waits_max_carries_the_scanned_out_fact_on_the_waiting_event(self):
+        # Issue #58: with idle_waits_max above zero, every wait before the terminal one used the
+        # bare "idle" reason and dropped which cards were holding the queue back, so a watcher
+        # reading the events file saw nothing but a generic idle wait until the very end.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(feeder.Config(idle_waits_max=2)), 0)
+        self.assertEqual(self.sleeps, [1800, 1800])
+        with open(self.paths.events, encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle]
+        waits = [event for event in events if event["event"] == "waiting"]
+        self.assertEqual(len(waits), 2)
+        for wait in waits:
+            self.assertEqual(wait["reason"], "idle_scanned")
+            self.assertEqual(wait["scan_refused"], ["1"])
+        # The strike past idle_waits_max still leaves with the existing terminal reason.
+        self.assertEqual(events[-1]["event"], "leaving")
+        self.assertEqual(events[-1]["reason"], "empty_queue_scanned")
+
+    def test_once_against_a_scanned_out_queue_carries_the_fact_on_the_leaving_event(self):
+        # Issue #58: under --once, `wait` never emits a waiting event at all and leaves at once,
+        # so without carrying the fact through to `leave_extra` the leaving event's reason read
+        # the generic "once" with no sign the queue was scanned out rather than truly empty.
+        self.adapter.ready_cards = [card(1, description="edit .claude/skills/x")]
+        self.assertEqual(self.feed(feeder.Config(idle_waits_max=2), once=True), 0)
+        self.assertEqual(self.sleeps, [])
+        with open(self.paths.events, encoding="utf-8") as handle:
+            events = [json.loads(line) for line in handle]
+        leaving = events[-1]
+        self.assertEqual(leaving["event"], "leaving")
+        self.assertEqual(leaving["reason"], "once")
+        self.assertEqual(leaving["scan_refused"], ["1"])
+
     def test_a_second_feeder_process_reports_a_scan_skip_the_first_already_reported(self):
         # Issue #58: `reported` persisted in the state file across feeder starts, so a card
         # still scanned out at the next start must be named again, not read as already covered
@@ -1904,6 +1936,25 @@ class PostCycle(FeederCase):
         self.assertEqual(feeder.read_state(self.paths)["limit_waits"], 1)
         self.assertNotIn("waiting", [event["event"] for event in self.events()])
 
+    def test_a_hold_beside_a_rules_stop_is_notified_too(self):
+        # Issue #53: `settle` returned the rules' own stop, from `run_scoped_halt` here, before
+        # `hold()` ever ran, so the hold was written to the state file and logged by the post
+        # cycle step's own line but never reached the operator: only the rules' own unrelated
+        # notification did. A later refusal skips its own notification on the assumption that
+        # the hold itself already sent one, so with this bug the operator was never told at all.
+        self.plans = [{"1": halted(2000, "remote_advanced")}, {}]
+        self.run_record = {"run_status": "halted", "halt_task": "1",
+                           "halt_class": "remote_advanced"}
+        config = feeder.Config(post_cycle_command=self.exits(3), post_cycle_hold=True)
+        self.assertEqual(self.feed(config), 1)
+        self.assertEqual(len(self.runs), 1)
+        hold = feeder.read_state(self.paths)["hold"]
+        self.assertEqual(hold["failure"], "exited 3")
+        # The rules' own stop is still what the feeder exits and notifies with.
+        self.assertTrue(any("class remote_advanced" in note for note in self.notes), self.notes)
+        # And the hold is notified too, beside it, not only logged.
+        self.assertTrue(any("post_cycle_hold is on" in note for note in self.notes), self.notes)
+
     def test_a_passing_hook_with_hold_does_not_stop(self):
         self.plans = [{}, {}]
         config = feeder.Config(post_cycle_command=self.HOOK, post_cycle_hold=True)
@@ -2000,6 +2051,36 @@ class PostCycle(FeederCase):
         code, text = self.call("--once")
         self.assertEqual(code, 0, text)
         self.assertEqual(len(self.runs), 2)
+
+    def test_release_removes_a_stray_stop_file_a_stop_left_behind_while_held(self):
+        # `--stop` never checks liveness, so aimed at a feeder that already left after a hold it
+        # still drops the file. Left there, the next start after `--release` would see it and
+        # leave before its first cycle, quietly, since the stop file check runs before the hold
+        # ever would (issue #53's own follow up).
+        self.hold_once()
+        code, text = self.call("--stop")
+        self.assertEqual(code, 0, text)
+        self.assertTrue(os.path.exists(self.paths.stop))
+        code, text = self.call("--release")
+        self.assertEqual(code, 0, text)
+        self.assertIn("removed the stop file %s" % self.paths.stop, text)
+        self.assertFalse(os.path.exists(self.paths.stop))
+        code, text = self.call("--once")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.runs), 2)
+
+    def test_release_with_no_hold_leaves_an_unrelated_stop_file_alone(self):
+        # An unheld `--stop` is the operator's own instruction to stay stopped; `--release` is
+        # not a general purpose stop-file scrubber and must not undo it just because nothing was
+        # held. Scoped to `hold is not None` so this case and the one above stay distinguishable.
+        code, text = self.call("--stop")
+        self.assertEqual(code, 0, text)
+        self.assertTrue(os.path.exists(self.paths.stop))
+        code, text = self.call("--release")
+        self.assertEqual(code, 0, text)
+        self.assertIn("no post cycle hold is set", text)
+        self.assertNotIn("removed the stop file", text)
+        self.assertTrue(os.path.exists(self.paths.stop))
 
     def test_a_release_that_cannot_be_logged_is_still_a_release(self):
         self.hold_once()
