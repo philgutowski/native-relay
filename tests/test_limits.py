@@ -486,6 +486,23 @@ class AfterRun(unittest.TestCase):
                                halts={"T": SETTINGS.max_halts - 1})
         self.assertEqual((decision.halts, decision.exclude), ({"T": 2}, ("T",)))
 
+    def test_a_confirmed_death_on_no_known_model_is_still_never_counted(self):
+        bare = dict(record("T", "halted"), model=None)
+        decision = self.decide([bare], {"T": CONFIRMED}, died_on={}, listed_on={})
+        self.assertEqual((decision.marks, decision.moves, decision.holds), ({}, (), ()))
+        self.assertEqual((decision.halts, decision.report), ({}, ()))
+
+    def test_a_landing_from_an_earlier_cycle_is_not_a_landing_now(self):
+        old = landed("S")
+        decision = self.decide([old, record("A", "halted")], {"A": UNCONFIRMED},
+                               before={"S": old})
+        self.assertEqual((decision.outcome.reason, decision.streak), ("usage_limit", 1))
+
+    def test_deferred_and_passed_over_may_be_any_collection(self):
+        stale = record("T", "halted", started=BEFORE_RUN)
+        decision = self.decide([stale], before={"T": stale}, deferred=["T"], passed_over=[])
+        self.assertEqual(decision.halts, {})
+
     def test_a_launched_death_with_no_reading_is_ordinary(self):
         decision = self.decide([record("T", "halted", wall=3000)], {})
         self.assertEqual((decision.halts, decision.marks), ({"T": 1}, {}))
@@ -542,15 +559,16 @@ class CycleStart(unittest.TestCase):
                                source=limits.MARK_CLI)
         listed = {"A": "fable", "B": "opus"}
         start = self.plan(["A", "B"], set(), listed, {"fable": at(40), "opus": at(90)})
-        self.assertEqual(start.wait, 1800)
+        self.assertEqual(start.wait, limits.Outcome(limits.WAIT, reason="model_held",
+                                                    seconds=1800))
         soon = self.plan(["A", "B"], set(), listed, {"fable": at(10), "opus": at(90)})
-        self.assertEqual(soon.wait, 600)
+        self.assertEqual(soon.wait.seconds, 600)
 
     def test_a_held_task_waits_on_the_earliest_mark_along_its_chain(self):
         marks = {"fable": fallback_mark(), "opus": limits.Mark(
             since=NOW, until=NOW + timedelta(minutes=10), source=limits.MARK_CLI)}
         start = self.plan(["T"], set(), {"T": "fable"}, marks, MUTUAL)
-        self.assertEqual((start.defer, start.wait), (("T",), 600))
+        self.assertEqual((start.defer, start.wait.seconds), (("T",), 600))
 
     def test_runnable_work_beside_held_work_asks_for_no_wait(self):
         start = self.plan(["A", "C"], set(), {"A": "fable", "C": "sonnet"},
@@ -564,6 +582,15 @@ class CycleStart(unittest.TestCase):
         self.assertEqual((start.moves, start.defer, start.held), ((), (), ()))
         self.assertEqual(start.retry, ("B", "C"))
         self.assertEqual((start.room, start.wait), (0, None))
+
+    def test_a_task_listed_with_no_model_is_read_on_the_default(self):
+        start = limits.plan_cycle_start(["T"], ["T"], {}, {"opus": fallback_mark()}, {}, NOW,
+                                        SETTINGS, default_model="opus")
+        self.assertEqual((start.retry, start.held), ((), (("T", "opus"),)))
+
+    def test_retries_keep_the_order_they_were_given(self):
+        start = self.plan([], ["9", "10"], {}, {})
+        self.assertEqual(start.retry, ("9", "10"))
 
     def test_an_expired_mark_holds_nothing(self):
         stale = fallback_mark(NOW - FIVE_HOURS - timedelta(minutes=1))

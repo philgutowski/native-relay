@@ -269,8 +269,9 @@ class CycleStart:
     """What the start of a Cycle decides. `moves` (id, from, to) to write before the run;
     `retry` the ids to pass as `--retry-blocked` and `defer` the ids to pass as `--defer`;
     `held` (id, model) for every held Task, a held queued retry among them keeping its place in
-    the queue; `room` the batch's room left by the work that will run; `wait` the seconds of the
-    R7 wait when held work is all there is among these Tasks, else None."""
+    the queue; `room` the batch's room left by the work that will run; `wait` the R7 wait, an
+    Outcome with reason WAIT_MODEL_HELD, when held work is all there is among these Tasks, else
+    None. Held fresh cards are the caller's to add, through `hold_wait`."""
     moves: tuple
     retry: tuple
     defer: tuple
@@ -354,10 +355,12 @@ def decide_after_run(facts):
     settings, now = facts.settings, facts.now
     ids = list(facts.after)
     status = {task_id: facts.after[task_id].get("status") for task_id in ids}
-    landed = any(status[task_id] == "landed" for task_id in ids)
+    # Landed in this Cycle: a record already landed before the run is no news of the account.
+    landed = any(status[task_id] == "landed"
+                 and facts.before.get(task_id, {}).get("status") != "landed" for task_id in ids)
     dead = [task_id for task_id in ids if status[task_id] in ("halted", "blocked")]
     launched = [task_id for task_id in dead if _launched(task_id, facts)]
-    left_alone = facts.deferred | facts.passed_over
+    left_alone = frozenset(facts.deferred) | frozenset(facts.passed_over)
     unlaunched = [task_id for task_id in dead
                   if task_id not in launched and task_id not in left_alone]
 
@@ -366,8 +369,9 @@ def decide_after_run(facts):
                 or facts.listed_on.get(task_id))
 
     reading = {task_id: facts.readings.get(task_id, (REFUTED, None))[0] for task_id in launched}
-    confirmed = [task_id for task_id in launched
-                 if reading[task_id] == CONFIRMED and model_of(task_id) is not None]
+    # A confirmed death is never counted or reported (R6), even one whose model nobody knows;
+    # that one marks nothing, moves nothing, and holds nothing.
+    confirmed = [task_id for task_id in launched if reading[task_id] == CONFIRMED]
     unconfirmed = [task_id for task_id in launched if reading[task_id] == UNCONFIRMED]
     ordinary = [task_id for task_id in launched
                 if task_id not in confirmed and task_id not in unconfirmed]
@@ -379,6 +383,8 @@ def decide_after_run(facts):
     for task_id in confirmed:
         mark = mark_for(now, facts.readings[task_id][1], settings.fallback_hours)
         model = model_of(task_id)
+        if model is None:
+            continue
         if model not in marks or mark.until > marks[model].until:
             marks[model] = mark
     notify = tuple(sorted(model for model in marks if model not in before))
@@ -388,11 +394,12 @@ def decide_after_run(facts):
     moves, holds, retry = [], [], []
     for task_id in confirmed:
         source = model_of(task_id)
-        target = resolve_fallback(source, facts.fallback, unavailable)
-        if target is None:
-            holds.append((task_id, source))
-        else:
-            moves.append((task_id, source, target))
+        if source is not None:
+            target = resolve_fallback(source, facts.fallback, unavailable)
+            if target is None:
+                holds.append((task_id, source))
+            else:
+                moves.append((task_id, source, target))
         if status[task_id] == "blocked":
             retry.append(task_id)
 
@@ -433,19 +440,23 @@ def decide_after_run(facts):
                     report=tuple(report), streak=streak, outcome=outcome)
 
 
-def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings):
+def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings,
+                     default_model=None):
     """The start of a Cycle (R5, R7). `unsettled` is the listed Task ids left to run, in order;
-    `retries` the ids queued for a retry, which run with them; `listed_on` {id: model} the
-    Manifest's models; `marks` {model: Mark}; `table` the fallback table.
+    `retries` the ids queued for a retry, in order, which run with them; `listed_on` {id: model}
+    the Manifest's models, and `default_model` the model a Task the Manifest gives none runs on;
+    `marks` {model: Mark}; `table` the fallback table. The Manifest decides, not the record: a
+    moved retry's record still names the model it died on.
 
     A Task listed on a marked model moves to the first free model along its chain. With none
     free it is held: a queued retry keeps its place and is not retried, and any other Task is
     deferred. A held Task takes no room in the batch."""
     active = active_marks(marks, now)
-    ids = list(unsettled) + [task_id for task_id in sorted(retries) if task_id not in unsettled]
+    retries = list(retries)
+    ids = list(unsettled) + [task_id for task_id in retries if task_id not in unsettled]
     moves, retry, defer, held, running = [], [], [], [], 0
     for task_id in ids:
-        model = listed_on.get(task_id)
+        model = listed_on.get(task_id) or default_model
         if model in active:
             target = resolve_fallback(model, table, set(active))
             if target is None:
@@ -459,7 +470,7 @@ def plan_cycle_start(unsettled, retries, listed_on, marks, table, now, settings)
             retry.append(task_id)
     wait = None
     if held and not running:
-        wait = hold_wait({model for _, model in held}, marks, table, now,
-                         settings.limit_wait_seconds)
+        wait = Outcome(WAIT, reason=WAIT_MODEL_HELD, seconds=hold_wait(
+            {model for _, model in held}, marks, table, now, settings.limit_wait_seconds))
     return CycleStart(moves=tuple(moves), retry=tuple(retry), defer=tuple(defer),
                       held=tuple(held), room=max(0, settings.batch - running), wait=wait)
