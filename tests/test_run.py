@@ -170,9 +170,14 @@ def reroute(manifest, task_id, backend=None, model=None):
 
 
 class RunCase(unittest.TestCase):
+    # The tracker file and the manifest every case starts from. A case that needs other tasks
+    # names its own; the manifest's `__REPO__` is filled in below.
+    tracker_md = TRACKER_MD
+    manifest_text = MANIFEST
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.repo = _repo.make_repo(self.tmp.name, files={"tracker.md": TRACKER_MD,
+        self.repo = _repo.make_repo(self.tmp.name, files={"tracker.md": self.tracker_md,
                                                           "README.md": "# fixture\n"})
         self.home = os.path.join(self.tmp.name, "home")
         self.queue = os.path.join(self.tmp.name, "queue")
@@ -183,7 +188,7 @@ class RunCase(unittest.TestCase):
             handle.write(textwrap.dedent(HELPER))
         self.manifest_path = os.path.join(self.tmp.name, "manifest.toml")
         with open(self.manifest_path, "w") as handle:
-            handle.write(MANIFEST.replace("__REPO__", self.repo))
+            handle.write(self.manifest_text.replace("__REPO__", self.repo))
         self.manifest = mf.load(self.manifest_path)
         self.entry = 0
 
@@ -195,18 +200,22 @@ class RunCase(unittest.TestCase):
                     RELAY_HELPER=self.helper,
                     PATH=_paths.STUB_DIR + os.pathsep + os.environ.get("PATH", ""))
 
-    def queue_entry(self, fixture, git_sh=None, exit_code=0, sleep=0, stream=None, backend=None):
+    def queue_entry(self, fixture, git_sh=None, exit_code=0, sleep=0, stream=None, backend=None,
+                    **keys):
         """`stream` is the opt in stdout fixture (see the stub's queue protocol). Left None, the
         stub prints only system and result lines, which is what every case but the tail ones
         wants.
 
         `fixture` of None writes no transcript at all, which is how a process that left the
         runner nothing to read is staged (R20).
+
+        `keys` go into the entry as they are: the stub's `init` and `result_lines`, which end a
+        process the way the CLI ends one at its usage limit.
         """
         self.entry += 1
         entry_dir = os.path.join(self.queue, str(self.entry))
         os.makedirs(entry_dir)
-        entry = {"exit": exit_code, "sleep": sleep}
+        entry = dict(keys, exit=exit_code, sleep=sleep)
         if fixture:
             entry["fixture"] = os.path.join(TRANSCRIPTS, fixture)
         if stream:
@@ -3591,3 +3600,171 @@ class Defer(RunCase):
                                         base_env=self.base_env(), stream=None)
         self.assertEqual(outcome.exit_code, runner.EXIT_LEASE)
         acquire.assert_called_once()
+
+
+# U6 of the usage limit plan. Five tasks, the first three on fable and the last two on sonnet,
+# the shape of AE7.
+FIVE_TRACKER_MD = TRACKER_MD + "- [ ] T-4 Add the tail\n- [ ] T-5 Add the status verb\n"
+FIVE_MANIFEST = MANIFEST.split("[[tasks]]")[0] + "".join(
+    '[[tasks]]\nid = "%s"\nmodel = "%s"\neffort = "low"\n\n' % (task_id, model)
+    for task_id, model in (("T-1", "fable"), ("T-2", "fable"), ("T-3", "fable"),
+                           ("T-4", "sonnet"), ("T-5", "sonnet")))
+
+# The last lines of a real limit death, as the plan's Sources record them: the rejected event and
+# the 429 `result`. A 404 is the model the account cannot reach, which is no usage limit.
+LIMIT_REJECTED = {"type": "rate_limit_event",
+                  "rate_limit_info": {"status": "rejected", "resetsAt": 1790000000,
+                                      "rateLimitType": "five_hour"}}
+LIMIT_RESULT = {"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+                "terminal_reason": "api_error", "api_error_status": 429,
+                "result": "You've hit your session limit. Resets 8:20pm."}
+MISSING_MODEL_RESULT = dict(LIMIT_RESULT, api_error_status=404,
+                            result="There's an issue with the selected model.")
+
+
+class UsageLimitBreaker(RunCase):
+    """U6 of the usage limit plan (R11, KTD7): once a Task dies of a confirmed usage limit, a
+    serial run launches nothing more on that model, leaves what it passes over exactly as it was,
+    names it in the terminal record and the summary, and still completes with exit 0."""
+
+    tracker_md = FIVE_TRACKER_MD
+    manifest_text = FIVE_MANIFEST
+
+    def dies(self, task_id, result_lines):
+        """A Task process that ends the way the CLI ends one: an `init` line, then `result_lines`
+        in place of the stub's own `result`. No envelope and no commits, so the record reads
+        blocked, and the Closeout comments the card."""
+        self.queue_entry("no_envelope.jsonl", init=True, result_lines=result_lines)
+        self.closeout_blocked(task_id)
+
+    def dies_of_the_limit(self, task_id):
+        self.dies(task_id, [LIMIT_REJECTED, LIMIT_RESULT])
+
+    def lands(self, *task_ids):
+        for task_id in task_ids:
+            self.task_success(task_id)
+            self.closeout_landed(task_id)
+
+    def raw_record(self, task_id):
+        record = self.store().get(task_id)
+        return None if record is None else json.dumps(record, sort_keys=True)
+
+    def untaken_entries(self):
+        return sorted(name for name in os.listdir(self.queue) if name.isdigit()
+                      and not os.path.exists(os.path.join(self.queue, name, ".taken")))
+
+    def passed_over(self):
+        return self.store().terminal()["limit_passed_over"]
+
+    def test_a_confirmed_death_passes_over_the_rest_of_its_model_and_nothing_else(self):
+        """Covers AE7."""
+        self.dies_of_the_limit("T-1")
+        self.lands("T-4", "T-5")
+        said = []
+        outcome = self.go(stream=said.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_BLOCKED)
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertIsNone(self.store().get("T-3"))
+        self.assertEqual(self.store().get("T-4")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.store().get("T-5")["status"], contracts.STATUS_LANDED)
+        # Every queued process was claimed and none was left over: nothing launched on fable
+        # after T-1, since a launch there would have taken T-4's entry.
+        self.assertEqual(self.untaken_entries(), [])
+        self.assertEqual(self.passed_over(), [{"task": "T-2", "model": "fable"},
+                                              {"task": "T-3", "model": "fable"}])
+        self.assertIn("T-1 died of a usage limit on fable; this run launches nothing more on "
+                      "fable", said)
+        self.assertIn("T-2 passed over: fable reported its usage limit earlier in this run", said)
+        self.assertIn("- [ ] T-2 Wire the run loop", self.tracker_at_remote())
+
+        data = summary_module.build(self.manifest, self.store())
+        self.assertEqual(data["limit_passed_over"], self.passed_over())
+        check, = [check for check in data["pending_checks"]
+                  if check["kind"] == "limit_passed_over"]
+        self.assertEqual((check["model"], check["tasks"]), ("fable", ["T-2", "T-3"]))
+        self.assertIn("fable reported its usage limit, so this run did not launch T-2, T-3 on "
+                      "it. A later run will launch them.", summary_module.render(data))
+
+    def test_a_later_run_launches_what_was_passed_over(self):
+        self.dies_of_the_limit("T-1")
+        self.lands("T-4", "T-5")
+        self.go()
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertIsNone(self.store().get("T-3"))
+
+        self.lands("T-2", "T-3")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.untaken_entries(), [])
+        self.assertEqual(self.passed_over(), [])
+
+    def test_deaths_that_are_not_a_confirmed_limit_stop_nothing(self):
+        for name, lines in (("a 404", [MISSING_MODEL_RESULT]), ("no result line", [])):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                self.dies("T-1", lines)
+                self.lands("T-2", "T-3", "T-4", "T-5")
+                outcome = self.go()
+                self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+                self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_BLOCKED)
+                for task_id in ("T-2", "T-3", "T-4", "T-5"):
+                    self.assertEqual(self.store().get(task_id)["status"],
+                                     contracts.STATUS_LANDED, task_id)
+                self.assertEqual(self.untaken_entries(), [])
+                self.assertEqual(self.passed_over(), [])
+
+    def test_a_blocked_record_named_for_retry_on_the_dead_model_is_passed_over_unchanged(self):
+        # An earlier run in which T-2 alone ran, and blocked.
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.go(defer=frozenset({"T-1", "T-3", "T-4", "T-5"}))
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_BLOCKED)
+        self.assertIn("relay/T-2", self.relay_branches())
+        before = self.raw_record("T-2")
+
+        self.dies_of_the_limit("T-1")
+        self.lands("T-4", "T-5")
+        outcome = self.go(retry_blocked=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+        self.assertIn("relay/T-2", self.relay_branches())
+        self.assertEqual(self.untaken_entries(), [])
+        self.assertEqual(self.passed_over(), [{"task": "T-2", "model": "fable"},
+                                              {"task": "T-3", "model": "fable"}])
+
+    def test_a_blocked_record_nobody_asked_to_retry_is_not_named(self):
+        """It would not have launched in this run or in a later one without the flag, so the
+        summary must not say a later run will launch it."""
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.go(defer=frozenset({"T-1", "T-3", "T-4", "T-5"}))
+        self.dies_of_the_limit("T-1")
+        self.lands("T-4", "T-5")
+        self.go()
+        self.assertEqual(self.passed_over(), [{"task": "T-3", "model": "fable"}])
+
+    def test_a_run_with_no_limit_death_writes_the_key_empty_and_prints_nothing(self):
+        self.lands("T-1", "T-2", "T-3", "T-4", "T-5")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.passed_over(), [])
+        data = summary_module.build(self.manifest, self.store())
+        self.assertEqual(data["limit_passed_over"], [])
+        self.assertNotIn("limit_passed_over", [check["kind"] for check in data["pending_checks"]])
+        self.assertNotIn("usage limit", summary_module.render(data))
+
+    def test_a_confirmed_death_on_the_last_task_passes_over_nothing(self):
+        tasks = {task.id: task for task in self.manifest.tasks}
+        self.manifest = replace(self.manifest, tasks=(tasks["T-4"], tasks["T-1"]))
+        self.lands("T-4")
+        self.dies_of_the_limit("T-1")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_BLOCKED)
+        self.assertEqual(self.passed_over(), [])

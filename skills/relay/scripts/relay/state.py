@@ -642,10 +642,15 @@ class StateStore:
 
     # Terminal record.
     def write_terminal(self, run_status, halt_task=None, halt_class=None, cli_version=None,
-                       cli_version_observed=None, surviving_flights=()):
+                       cli_version_observed=None, surviving_flights=(), limit_passed_over=()):
         """`surviving_flights` (issue #71) is the dispatch builds whose process group was still
         alive when the run left, each `{task, process_group}`. The key is written only when there
-        is one, so every other terminal record keeps its shape."""
+        is one, so every other terminal record keeps its shape.
+
+        `limit_passed_over` (usage limit plan, R11) is the listed Tasks a serial run did not
+        launch because their model had reported its usage limit earlier in the run, each
+        `{task, model}`. Always written, empty on a run that passed nothing over, so a reader can
+        tell a run that had nothing to say from one written before the key existed."""
         record = {
             "run_status": run_status,
             "halt_task": halt_task,
@@ -653,6 +658,7 @@ class StateStore:
             "cli_version": self._version_map(cli_version),
             "cli_version_observed": self._version_map(cli_version_observed),
             "written_at": _iso(self.now()),
+            "limit_passed_over": [dict(entry) for entry in limit_passed_over],
         }
         if surviving_flights:
             record["surviving_flights"] = [dict(entry) for entry in surviving_flights]

@@ -565,6 +565,23 @@ class Terminal(StateCase):
         self.clock.advance(601)
         self.assertEqual(store.status_word(), contracts.RUN_CRASHED)
 
+    def test_limit_passed_over_is_written_empty_by_default(self):
+        """Usage limit plan, R11. Unlike `surviving_flights` the key is always there, so a run
+        that passed nothing over says so."""
+        store = self.store()
+        store.write_terminal(contracts.RUN_COMPLETED)
+        self.assertEqual(store.terminal()["limit_passed_over"], [])
+
+    def test_limit_passed_over_carries_each_task_and_its_model(self):
+        store = self.store()
+        passed = [{"task": "T-2", "model": "fable"}, {"task": "T-3", "model": "fable"}]
+        record = store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=passed)
+        self.assertEqual(store.terminal()["limit_passed_over"], passed)
+        self.assertEqual(record["limit_passed_over"], passed)
+        # A copy: the caller's list is the run's own and may still grow.
+        passed.append({"task": "T-4", "model": "sonnet"})
+        self.assertEqual(len(store.terminal()["limit_passed_over"]), 2)
+
     def test_legacy_scalar_terminal_and_missing_record_backend_open_as_claude(self):
         store = self.store()
         legacy = {

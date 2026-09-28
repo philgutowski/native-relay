@@ -33,8 +33,8 @@ import time
 from dataclasses import dataclass, field
 
 from . import (adapters, audit, backends, brief, classify, closeout, contracts, gitread,
-               gitwrite, launch, manifest as manifest_module, progress, scheduler, state, summary,
-               verify, worktree)
+               gitwrite, launch, limits, manifest as manifest_module, progress, scheduler, state,
+               summary, verify, worktree)
 from .adapters import github as github_adapter
 from .adapters import jira as jira_adapter
 
@@ -79,6 +79,14 @@ class _Run:
     # Dispatch only (issue #71). Flights still alive when the coordinator gave up waiting for
     # them, as `{task, process_group}`. Named in the terminal record, never marked crashed.
     surviving_flights: list = field(default_factory=list)
+    # Serial run only (usage limit plan, R11, KTD7). `launched_ids` is the ids `_one_task` began
+    # and launched in this run; `limited_models` the models a Task among them died on with a
+    # confirmed usage limit; `limit_passed_over` the listed Tasks `_begin_task` left unlaunched
+    # for it, each `{task, model}`. Dispatch never fills the first two, so it passes nothing over.
+    # Not `launched`: `_Context` extends this class and already has a field by that name.
+    launched_ids: set = field(default_factory=set)
+    limited_models: set = field(default_factory=set)
+    limit_passed_over: list = field(default_factory=list)
 
     @property
     def release_on_interrupt(self):
@@ -1021,6 +1029,7 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
                              {"task": task.id, "error_type": type(exc).__name__,
                               "error": str(exc)[:500]})
             else:
+                _note_usage_limit(config, task)
                 store.set_cursor(index + 1)
                 continue
             # Issue #15: a halt contained to one task need not stop the rest. Decided from
@@ -1051,17 +1060,20 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
                 if stream is not None:
                     stream("%s halted with class %s; continuing past it"
                            % (halt.task_id, halt.halt_class))
+                _note_usage_limit(config, task)
                 store.set_cursor(index + 1)
                 continue
             _audit_cards(config)
             _write_terminal(store, env, contracts.RUN_HALTED, halt.task_id, halt.halt_class,
-                            config.used_backends, announce=announce)
+                            config.used_backends, announce=announce,
+                            limit_passed_over=config.limit_passed_over)
             wrote_terminal = True
             return RunOutcome(EXIT_HALTED, halt.task_id, halt.halt_class, halt.message,
                               store, store.records())
         _audit_cards(config)
         _write_terminal(store, env, contracts.RUN_COMPLETED,
-                        used_backends=config.used_backends, announce=announce)
+                        used_backends=config.used_backends, announce=announce,
+                        limit_passed_over=config.limit_passed_over)
         wrote_terminal = True
         outcome.records = store.records()
         return outcome
@@ -1072,7 +1084,8 @@ def run(manifest, adapter=None, store=None, home=None, base_env=None, stream=pri
         if not wrote_terminal:
             try:
                 _write_terminal(store, env, contracts.RUN_CRASHED,
-                                used_backends=config.used_backends, announce=announce)
+                                used_backends=config.used_backends, announce=announce,
+                                limit_passed_over=config.limit_passed_over)
             except Exception:
                 pass
             _mark_in_flight_crashed(store)
@@ -1216,7 +1229,7 @@ def _git_error_fields(exc):
 
 
 def _write_terminal(store, env, run_status, halt_task=None, halt_class=None, used_backends=(),
-                    announce=None, surviving_flights=()):
+                    announce=None, surviving_flights=(), limit_passed_over=()):
     """Write terminal version evidence for only the CLIs this invocation actually launched.
 
     The run's last phase event goes out from here rather than from each of the three call sites,
@@ -1224,12 +1237,15 @@ def _write_terminal(store, env, run_status, halt_task=None, halt_class=None, use
     record is written, so they describe the run the record just closed.
 
     `surviving_flights` names the dispatch builds still alive when the run left (issue #71).
+    `limit_passed_over` names the Tasks a serial run left unlaunched on a model that reported its
+    usage limit (R11).
     """
     used = sorted(used_backends)
     pinned = {name: backends.build(name).CAPABILITY.version_tested for name in used}
     observed = {name: launch.cli_version(env, backend=name) for name in used}
     record = store.write_terminal(run_status, halt_task, halt_class, pinned, observed,
-                                  surviving_flights=surviving_flights)
+                                  surviving_flights=surviving_flights,
+                                  limit_passed_over=limit_passed_over)
     if announce is not None:
         line = _counts_line(store, run_status)
         if halt_task:
@@ -1483,8 +1499,37 @@ def _one_task(cfg, task):
     begun = _begin_task(cfg, task)
     if begun is None:
         return
+    cfg.launched_ids.add(task.id)
     launched = _launch_begun(cfg, begun, cwd=cfg.repo)
     return _complete_task(cfg, begun, launched, tree_repo=cfg.repo)
+
+
+def _note_usage_limit(cfg, task):
+    """R11, KTD7. After a Task this serial run launched ends blocked or halted, read its death
+    from its log (KTD3). A confirmed usage limit adds the model it ran on to the run's set, and
+    `_begin_task` launches nothing more on that model in this run.
+
+    Confirmed only: the Runner has no `quick_death_seconds`, so the reading is taken with none,
+    and a death with no `result` line reads refuted rather than unconfirmed. A Task that did not
+    launch in this run is never read, since its record and log describe an earlier attempt
+    (KTD9). The breaker must never stop the run itself, so a failure to read costs the reading."""
+    if task.id not in cfg.launched_ids:
+        return
+    try:
+        record = cfg.store.get(task.id) or {}
+        if record.get("status") not in (contracts.STATUS_BLOCKED, contracts.STATUS_HALTED):
+            return
+        tail = limits.log_tail(cfg.store.path("logs", task.id + ".stdout.log"))
+        reading, _resets_at = limits.read_death(record, tail, 0)
+    except Exception:
+        return
+    model = record.get("model") or task.model
+    if reading != limits.CONFIRMED or model in cfg.limited_models:
+        return
+    cfg.limited_models.add(model)
+    if cfg.stream is not None:
+        cfg.stream("%s died of a usage limit on %s; this run launches nothing more on %s"
+                   % (task.id, model, model))
 
 
 def _begin_task(cfg, task):
@@ -1516,6 +1561,17 @@ def _begin_task(cfg, task):
     branch = gitwrite.task_branch_for(task.id, cfg.manifest.project.branch_prefix)
 
     if status == contracts.STATUS_BLOCKED and not retries_blocked(cfg.retry_blocked, task.id):
+        return
+    # R11, KTD7. A model that reported its usage limit earlier in this run launches nothing more
+    # in it. Returned from with nothing read or written, the way `--defer` returns, so the Task
+    # keeps whatever record it had and a later run launches it like any Task never reached. Past
+    # the blocked check, so only a Task this run would otherwise have launched is named as passed
+    # over: a blocked record nobody asked to retry would not launch in a later run either.
+    if task.model in cfg.limited_models:
+        cfg.limit_passed_over.append({"task": task.id, "model": task.model})
+        if stream is not None:
+            stream("%s passed over: %s reported its usage limit earlier in this run"
+                   % (task.id, task.model))
         return
 
     # Issue #58. The manifest's resolution decides where a relaunch goes, so a task the operator
