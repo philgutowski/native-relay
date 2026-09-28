@@ -55,21 +55,30 @@ GROK_TOOL_NAMES = (
     "atlassian__transitionJiraIssue",
     "atlassian__addCommentToJiraIssue",
 )
-# A Filing process (browser test loop plan, KTD5) creates cards and searches for open ones, so
-# it gets the Closeout's tools plus these two. Every spelling gains the same pair.
+# A Filing process (browser test loop plan, KTD5) creates cards, searches for open ones, and
+# reads the project's issue types, so it gets the Closeout's tools plus these three. Every
+# spelling gains the same set. The types read is there because the create call requires an
+# issue type name and a process without the read can only guess one (issue #120).
 FILING_EXTRA_TOOLS = (
     "mcp__atlassian__createJiraIssue",
     "mcp__atlassian__searchJiraIssuesUsingJql",
+    "mcp__atlassian__getJiraProjectIssueTypesMetadata",
 )
 FILING_TOOLS = CLOSEOUT_TOOLS + FILING_EXTRA_TOOLS
 GROK_FILING_TOOLS = GROK_CLOSEOUT_TOOLS + (
     "MCPTool(atlassian__createJiraIssue)",
     "MCPTool(atlassian__searchJiraIssuesUsingJql)",
+    "MCPTool(atlassian__getJiraProjectIssueTypesMetadata)",
 )
 GROK_FILING_TOOL_NAMES = GROK_TOOL_NAMES + (
     "atlassian__createJiraIssue",
     "atlassian__searchJiraIssuesUsingJql",
+    "atlassian__getJiraProjectIssueTypesMetadata",
 )
+# The issue type a filed card is created as when the sidecar's `[test_loop] issue_type` is
+# empty. `Task` is the one type every Jira project template ships with; `Bug` is not in a
+# business project or a team managed software project that dropped it.
+DEFAULT_ISSUE_TYPE = "Task"
 
 
 def _canonical(value):
@@ -388,13 +397,20 @@ class JiraAdapter:
             return GROK_FILING_TOOLS
         return FILING_TOOLS
 
-    def filing_instructions(self, labels, design_note, backend=None):
+    def filing_instructions(self, labels, design_note, backend=None, issue_type=""):
         """The Filing process's tracker sentence (browser test loop plan, KTD5): search the
         Manifest's project through Atlassian MCP first, comment on a match, else create the
         issue there with the loop's labels (R13). `design_note` is the sidecar's note for a
-        design card (R14). The token never reaches the process; every write goes through the
-        MCP tools on its allowlist."""
-        labelled = (" with the labels %s" % ", ".join("`%s`" % label for label in labels)
+        design card (R14). `issue_type` is the sidecar's `[test_loop] issue_type`, or
+        `DEFAULT_ISSUE_TYPE` when empty (issue #120): createJiraIssue requires one, its labels go
+        in `additional_fields`, and the process confirms the type exists with
+        getJiraProjectIssueTypesMetadata rather than guessing one on a project without it. The
+        token never reaches the process; every write goes through the MCP tools on its
+        allowlist."""
+        issue_type = " ".join(str(issue_type or "").split()) or DEFAULT_ISSUE_TYPE
+        labelled = (", and the labels %s as `additional_fields` in the form `{\"labels\": [%s]}`"
+                    % (", ".join("`%s`" % label for label in labels),
+                       ", ".join(json.dumps(str(label)) for label in labels))
                     if labels else "")
         text = (
             "Look for an open issue describing the same defect first, with "
@@ -402,10 +418,17 @@ class JiraAdapter:
             "\"<a few words from the finding's title>\"`, reading the descriptions that come back. "
             "When one describes it, add one comment to it with addCommentToJiraIssue and report "
             "`commented` with that issue's key. Otherwise create one issue in project %s with "
-            "createJiraIssue%s, its summary the finding's title and its description the card "
-            "body, and report `filed` with the new issue's key as its id. An attended planning "
-            "card also carries the label `attended`."
-            % (self._project_key, self._project_key, labelled)
+            "createJiraIssue, its projectKey `%s`, its issueTypeName `%s`, its summary the "
+            "finding's title, its description the card body%s, and report `filed` with the new "
+            "issue's key as its id. Before the first create, read the project's issue types "
+            "with getJiraProjectIssueTypesMetadata for `%s` and confirm `%s` is among them; when "
+            "it is not, create nothing under another type, leave every finding that needed a "
+            "new issue out of the block, and say so in prose, so the operator can name a type "
+            "the project has. An attended planning card also carries the label `attended`%s."
+            % (self._project_key, self._project_key, self._project_key, issue_type, labelled,
+               self._project_key, issue_type,
+               " in the same `additional_fields` labels array" if labels else
+               ", as `additional_fields` in the form `{\"labels\": [\"attended\"]}`")
         )
         note = " ".join(str(design_note or "").split())
         if note:

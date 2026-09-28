@@ -29,6 +29,7 @@ labels = ["test-loop", "ready"]
 allowed_tools = ["Bash", "Read"]
 design_model = "fable"
 design_note = "Build on the design skill the project names."
+issue_type = "Bug"
 """
 
 # The keys a loop that is on cannot run without, as a table that has them all.
@@ -69,9 +70,9 @@ class TestLoopConfig(unittest.TestCase):
              loop.prepare_timeout_seconds, loop.model, loop.effort, loop.timeout_minutes,
              loop.max_rounds, loop.max_hours, loop.max_cards_per_pass,
              loop.max_patches_per_area, loop.max_cards_total, loop.labels, loop.allowed_tools,
-             loop.design_model, loop.design_note),
+             loop.design_model, loop.design_note, loop.issue_type),
             (False, False, "", "", (), 600, "", "", 60, 6, 24, 10, 3, 30, (),
-             ("Bash", "Read", "Grep", "Glob"), "", ""))
+             ("Bash", "Read", "Grep", "Glob"), "", "", ""))
 
     def test_an_empty_table_is_the_default(self):
         self.assertEqual(self.load("[test_loop]\n"), feeder.Config())
@@ -84,7 +85,20 @@ class TestLoopConfig(unittest.TestCase):
             model="sonnet", effort="medium", timeout_minutes=45, max_rounds=4, max_hours=12,
             max_cards_per_pass=5, max_patches_per_area=2, max_cards_total=20,
             labels=("test-loop", "ready"), allowed_tools=("Bash", "Read"),
-            design_model="fable", design_note="Build on the design skill the project names."))
+            design_model="fable", design_note="Build on the design skill the project names.",
+            issue_type="Bug"))
+
+    def test_the_issue_type_is_empty_by_default_and_refused_blank_or_typed_otherwise(self):
+        """Issue #120: empty means the adapter's own default, so the loop runs on a Jira
+        project with no `Bug` type without a sidecar edit; a blank or a non string is refused
+        like every other string setting."""
+        self.assertEqual(self.load("[test_loop]\n").test_loop.issue_type, "")
+        self.assertEqual(self.load('[test_loop]\nissue_type = "Bug"\n').test_loop.issue_type,
+                         "Bug")
+        self.assertIn("test_loop.issue_type must not be blank",
+                      self.refused('[test_loop]\nissue_type = " "\n'))
+        self.assertIn("test_loop.issue_type must be a string",
+                      self.refused("[test_loop]\nissue_type = 3\n"))
 
     def test_model_and_effort_default_to_the_models_values(self):
         config = self.load('[models]\ndefault = "sonnet"\neffort = "low"\n' + ON)

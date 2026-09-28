@@ -442,6 +442,9 @@ class TourAndFiling(PassCase):
         self.assertEqual(outcome.record["reason"], "the filing process could not be launched: "
                                                    "could not start claude: not found")
         self.assertEqual(outcome.record["filed"], [])
+        # Issue #120: a process that never launched left no block to read, so the block's own
+        # error is not a second note beside the launch error.
+        self.assertNotIn("block could not be read", "\n".join(outcome.record["notes"]))
         self.assert_checkout_clean()
 
     def test_a_lost_lease_during_filing_fails_the_pass_with_no_scope_check_and_no_reset(self):

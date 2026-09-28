@@ -288,6 +288,9 @@ class TestLoop:
     allowed_tools: tuple = ("Bash", "Read", "Grep", "Glob")
     design_model: str = ""
     design_note: str = ""
+    # The type a filed card is created as, on a tracker whose create call needs one (Jira).
+    # Empty means the adapter's documented default; a tracker without types ignores it.
+    issue_type: str = ""
 
 
 # The `[test_loop]` keys a loop that is on cannot run without (KTD7).

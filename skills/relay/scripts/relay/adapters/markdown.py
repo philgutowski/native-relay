@@ -189,8 +189,10 @@ class MarkdownAdapter:
     def filing_allowed_tools(self, backend=None):
         return CLOSEOUT_TOOLS
 
-    def filing_instructions(self, labels, design_note, backend=None):
-        """The Filing process's tracker sentence (browser test loop plan, KTD5). The tracker is
+    def filing_instructions(self, labels, design_note, backend=None, issue_type=""):
+        """The Filing process's tracker sentence (browser test loop plan, KTD5). `issue_type`
+        is accepted for the shared signature and ignored: a line in a file has no type (issue
+        #120). The tracker is
         a file, so a card is one unchecked line with the next free id in the file's own scheme,
         its body the indented comment lines under it, committed alone and never pushed: the
         loop pairs only with a Manifest that does not push (KTD13), and the pass code checks the

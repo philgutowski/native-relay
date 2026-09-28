@@ -582,6 +582,7 @@ labels = []                   # every filed card carries these
 allowed_tools = ["Bash", "Read", "Grep", "Glob"]
 design_model = ""             # empty: design cards route like any other
 design_note = ""
+issue_type = ""               # empty: the tracker's default card type (Jira: Task)
 ```
 
 - **`enabled`** switches the loop on. A sidecar without the table, or with `enabled = false`,
@@ -657,6 +658,12 @@ design_note = ""
   a design card, with `design_note` added to its body. The feeder routes a design card the loop
   filed to `design_model`, which must be in `models.allowed`: after the routing file and before a
   `**Model:** name` body line, so it holds where the ready source returns empty bodies.
+- **`issue_type`** is the type a filed card is created as, on a tracker whose create call needs
+  one. On Jira that call requires an issue type name, and the Filing process is told to read the
+  project's issue types first and file nothing under a type the project lacks, so set this to a
+  type the project has; empty means `Task`, the one type every Jira project template ships
+  with. The loop's labels ride in the create call's additional fields. A GitHub issue and a
+  markdown line have no type, so those trackers ignore the key.
 
 A key the feeder does not know is refused, as everywhere in the sidecar. So are a `prepare`
 written as a string, an integer below one, `labels` or `allowed_tools` that is not an array of
