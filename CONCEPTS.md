@@ -143,6 +143,14 @@ Dispatch holds the same two Leases `run` does. A halt that does not continue pas
 sibling build, removes its worktree, deletes its half built branch, and leaves that record
 pending so the next dispatch starts it fresh.
 
+An interrupted dispatch, an interrupt from the keyboard most often, does the same to every build
+in flight: it ends each Task process, removes its worktree and branch, and returns its record to
+pending, wherever the interrupt landed, including during a Closeout on the primary checkout. Only
+then does it mark what else was in flight and release the Leases (issues #71 and #79). A build
+that would not die inside the bound is released past: its record keeps reading running and the
+terminal record names it. A second interrupt during the stop abandons the stop, and the Leases are
+released with whatever builds it had not yet ended.
+
 A finished build waiting its merge turn still occupies that backend's slot. Freeing the slot when
 the Task process exits would start another Task on the same backend before the previous one has
 merged. The merge tail must treat this coordinator's own earlier landings as expected movement of

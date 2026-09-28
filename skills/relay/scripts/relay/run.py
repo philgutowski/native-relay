@@ -77,6 +77,14 @@ class _Run:
     # them, as `{task, process_group}`. Named in the terminal record, never marked crashed.
     surviving_flights: list = field(default_factory=list)
 
+    @property
+    def release_on_interrupt(self):
+        """Whether a launch on the main thread releases the lease from its interrupt handler.
+        Serial `run` does. Dispatch, the one run with a schedule, does not (issue #79): its builds
+        in flight are still alive when the Closeout's handler runs, so the release waits for
+        `_concurrent_loop` to stop them first."""
+        return self.schedule is None
+
 
 @dataclass
 class RunOutcome:
@@ -1546,12 +1554,13 @@ def _begin_task(cfg, task):
 
 
 def _launch_begun(cfg, begun, cwd, on_started=None):
-    """Blocking launch of a begun task. Serial run uses the repo; dispatch uses a worktree."""
+    """Blocking launch of a begun task on the main thread, which serial run uses on the repo.
+    Dispatch launches its builds through `_spawn_flight` instead."""
     launched = launch.launch(
         cfg.manifest, begun.task, begun.brief_text, begun.log_path,
         cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
-        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream,
-        heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=cwd,
+        home=cfg.home, base_env=cfg.base_env, stream=cfg.stream, heartbeat=cfg.store.heartbeat,
+        on_release=cfg.store.release if cfg.release_on_interrupt else None, cwd=cwd,
         on_started=on_started, **cfg.launch_kwargs)
     if not launched.launch_error:
         cfg.used_backends.add(begun.task.backend)
@@ -1673,19 +1682,26 @@ def _spawn_flight(cfg, begun, dest):
     stopping = threading.Event()
 
     def on_started(_pid, group_id):
+        # No group id means the process was gone before its group could be read (issue #79).
+        # Nothing is left to signal, so the flight stays groupless and `_flight_exited` goes by
+        # its thread instead.
+        if group_id is None:
+            return
         # The group first and the check second, the reverse of `_stop_flights`, so one of the
         # two always sees the other and a late start is never missed.
         pgid_box.append(group_id)
-        if stopping.is_set() and group_id:
+        if stopping.is_set():
             _signal_group(group_id, signal.SIGKILL)
 
     def worker():
         try:
+            # No release callback (issue #79). Only `dispatch` releases, after every flight is
+            # stopped; a thread cannot install the handler that would call it anyway.
             launched = launch.launch(
                 cfg.manifest, begun.task, begun.brief_text, begun.log_path,
                 cfg.overrides.get("task_seconds") or cfg.manifest.timeouts.task_minutes * 60,
                 home=cfg.home, base_env=cfg.base_env, stream=None,
-                heartbeat=cfg.store.heartbeat, on_release=cfg.store.release, cwd=dest,
+                heartbeat=cfg.store.heartbeat, on_release=None, cwd=dest,
                 on_started=on_started, **cfg.launch_kwargs)
             result_box.append(("ok", launched))
         except Exception as exc:
@@ -1731,8 +1747,9 @@ def _signal_group(pgid, signum):
 
 
 def _flight_exited(flight):
-    """No process is left in the flight's group. A flight with no group yet has exited only once
-    its thread has returned without starting one. The thread is not waited on once the group is
+    """No process is left in the flight's group. A flight with no group, because its process has
+    not started yet or was gone before launch could read its group, has exited only once its
+    thread has returned. The thread is not waited on once the group is
     empty: a descendant that left the group can hold the pipe open and keep the launch's reader
     waiting long past the bound, and nothing of this build is running in the meantime."""
     if not flight.pgid:
@@ -1839,7 +1856,9 @@ def _concurrent_loop(cfg, announce):
     Issue #71. Anything leaving the loop by an exception, an interrupt from the keyboard most
     often, ends every build in flight first and abandons it the way a halt that does not continue
     past does, so dispatch's own handlers mark records and release the lease only once no Task
-    process is left behind them. A build that would not die is kept on `cfg.surviving_flights`
+    process is left behind them. That holds for an interrupt landing in the Closeout on the main
+    thread too: its handler ends the Closeout and raises, and releases nothing (issue #79). A
+    build that would not die is kept on `cfg.surviving_flights`
     for the terminal record. A build already finished and waiting its merge is left alone: its
     process has exited, and its branch is completed work the next pre flight will name, not a
     half built one to discard."""
@@ -2229,7 +2248,7 @@ def _run_closeout(ctx, outcome, landing_ref=None, branch=None, commit_range=None
         halt_class=halt_class, cause_line=cause_line, return_to=return_to,
         baseline_unknown=baseline_unknown, timeout_seconds=ctx.overrides.get("closeout_seconds"),
         home=ctx.home, base_env=ctx.base_env, stream=ctx.stream, heartbeat=ctx.store.heartbeat,
-        on_release=ctx.store.release, **ctx.launch_kwargs)
+        on_release=ctx.store.release if ctx.release_on_interrupt else None, **ctx.launch_kwargs)
     ctx.findings.extend(result.findings)
     ctx.store.upsert(ctx.task.id, closeout=result.result, findings=ctx.findings)
 
