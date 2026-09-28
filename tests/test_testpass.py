@@ -449,6 +449,28 @@ class TourAndFiling(PassCase):
                 self.assertEqual(outcome.record["filed"], [])
                 self.assert_checkout_clean()
 
+    def test_a_second_filing_cause_is_a_note_beside_the_first_as_the_reason(self):
+        """Code review: a lost lease headlines, and the reset the scope check made of what the
+        process left in the checkout is still on the record."""
+        self.test_process([finding(1)])
+        launched = launch.LaunchResult(session_id="filing", lease_lost=True)
+        answer = filing.FilingResult(filing.Filed(error="no assistant record"),
+                                     launch_result=launched)
+
+        def leave_a_change(*args, **kwargs):
+            with open(os.path.join(self.repo, "tracker.md"), "a") as handle:
+                handle.write("- [ ] T-2 half written\n")
+            return answer
+
+        with mock.patch.object(filing, "run", side_effect=leave_a_change):
+            outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
+        notes = "\n".join(outcome.record["notes"])
+        self.assertIn("left tracker.md changed and uncommitted", notes)
+        self.assertIn("block could not be read: no assistant record", notes)
+        self.assert_checkout_clean()
+
     def test_ran_is_kept_only_when_the_block_was_read_and_the_ids_confirmed(self):
         self.test_process([finding(1)])
         self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],

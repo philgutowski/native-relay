@@ -2183,8 +2183,14 @@ class Feeder:
                      if isinstance(entry, dict) and entry.get("id") is not None]
         if kind == testloop.TOUR and status == testloop.RAN:
             loop["rounds"] += 1
-        if status == testloop.RAN:
-            loop["planned_areas"] += [area for area in plan if area not in loop["planned_areas"]]
+        # An area is planned when its pass ran, and also when its planning card was confirmed
+        # filed on a pass that then failed (code review): the card exists on the tracker, and
+        # asking the next tour for it again would file a second one for the same area.
+        planned = list(plan) if status == testloop.RAN else []
+        planned += [loop["filed"][card_id].get("area") for card_id in sorted(attended)
+                    if loop["filed"][card_id].get("area") not in planned
+                    and loop["filed"][card_id].get("area") is not None]
+        loop["planned_areas"] += [area for area in planned if area not in loop["planned_areas"]]
         patches = testloop.area_patches(loop["filed"], loop["checks"],
                                         settings.max_patches_per_area)
         loop["patches"] = dict(patches.counts)
@@ -2198,7 +2204,7 @@ class Feeder:
         loop["passes"].append({
             "pass": record.get("pass"), "kind": kind, "status": status, "reason": reason,
             "at": now.isoformat(timespec="seconds"), "cycle": self.state["cycles"], "cards": list(sent), "filed": new,
-            "commented": commented, "planned": list(plan) if status == testloop.RAN else [],
+            "commented": commented, "planned": planned,
             "record_path": record.get("record_path")})
         self.log("test pass %s, a %s, %s%s: filed %s, commented %s" % (
             record.get("pass"), kind, status, ": " + reason if reason else "", _ids(new),
@@ -2219,7 +2225,7 @@ class Feeder:
                 self.notify(message)
         self.emit(EVENT_TEST_PASS, kind=kind, status=status, reason=reason,
                   pass_number=record.get("pass"), cards=list(sent), filed=new,
-                  commented=commented, planned=list(plan) if status == testloop.RAN else [],
+                  commented=commented, planned=planned,
                   record_path=record.get("record_path"),
                   transcripts=record.get("transcripts") or {},
                   read_from=record.get("read_from") or {})
@@ -2941,9 +2947,15 @@ def status_loop(state, paths, now):
             passes.append({"pass": entry.get("pass"), "kind": entry.get("kind"),
                            "status": entry.get("status"),
                            "filed": len(cards) if isinstance(cards, list) else 0})
-    generations = {}
+    # The filed cards are counted the way the budget counts them (issue #115): an attended
+    # planning card is shown apart, so the status agrees with the budget stop sentence and
+    # the stop event rather than reading as a spent budget that is not.
+    generations, planning = {}, 0
     filed = loop_filed(state)
     for record in filed.values():
+        if isinstance(record, dict) and record.get("attended") is True:
+            planning += 1
+            continue
         generation = record.get("generation") if isinstance(record, dict) else None
         key = (str(generation) if isinstance(generation, int)
                and not isinstance(generation, bool) else "unreadable")
@@ -2952,7 +2964,8 @@ def status_loop(state, paths, now):
     return {"enabled": settings.enabled, "report_only": settings.report_only,
             "rounds": loop.get("rounds", 0), "max_rounds": settings.max_rounds,
             "started_at": started, "hours_used": hours, "max_hours": settings.max_hours,
-            "passes": passes, "cards_filed": len(filed), "generations": generations,
+            "passes": passes, "cards_filed": loop_cards_filed(loop), "generations": generations,
+            "planning_cards": planning,
             "stopped_areas": [str(area) for area in areas] if isinstance(areas, list) else [],
             "stop": stop, "sidecar_problem": problem}
 
@@ -2981,7 +2994,8 @@ def status_report(paths, hostname=None, now=datetime.now):
 def loop_lines(report):
     """The browser test loop lines of `feed --status` (R26), none when the loop is off: on and
     report only, the round and the clock against their caps, the cards filed per pass, the
-    filed cards by generation, the stopped areas, and the stop reason."""
+    filed cards by generation with the planning cards apart, the stopped areas, and the stop
+    reason."""
     loop = report.get("test_loop")
     if not loop:
         return []
@@ -3005,8 +3019,11 @@ def loop_lines(report):
         "#%s %s %s %d" % (entry.get("pass"), entry.get("kind"), entry.get("status"),
                           entry.get("filed", 0)) for entry in passes) or "no pass yet"))
     generations = loop.get("generations") or {}
-    lines.append("test loop filed cards: %d%s" % (loop.get("cards_filed", 0), "".join(
-        ", generation %s: %d" % (key, generations[key]) for key in sorted(generations))))
+    planning = loop.get("planning_cards") or 0
+    lines.append("test loop filed cards: %d%s%s" % (
+        loop.get("cards_filed", 0),
+        "".join(", generation %s: %d" % (key, generations[key]) for key in sorted(generations)),
+        ", planning cards: %d" % planning if planning else ""))
     lines.append("test loop stopped areas: %s" % _ids(loop.get("stopped_areas")))
     stop = loop.get("stop")
     if isinstance(stop, dict):

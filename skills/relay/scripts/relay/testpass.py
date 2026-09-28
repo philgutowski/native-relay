@@ -25,7 +25,7 @@ A pass takes both Leases for its whole length and renews them on the heartbeat, 
 `status` words, `ran`, `not_run`, and `failed`, plus notes, so the closed halt class set in
 `contracts.py` is untouched (KTD12). `ran` means the Test process reported and, when there was
 something to file, the Filing process ended with a readable `relay-filed` block in bounds; a
-Filing step that did not complete fails the pass with its own sentence (`filing_failure`), so
+Filing step that did not complete fails the pass with its own sentence (`filing_failures`), so
 the Feeder never reads a filing failure as findings that produced no card.
 """
 import json
@@ -406,23 +406,27 @@ def _append(path, text):
         handle.write(text)
 
 
-def filing_failure(result, scope, allowed, pre_head, timeout_seconds):
-    """The sentence a pass fails with when its Filing step did not complete, or None when a
-    readable `relay-filed` block was read from a process that ran to its end in bounds (issue
-    #115). Five causes, first one wins: the process could not be launched, it timed out, the
+def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
+    """The sentences for every way the Filing step did not complete, most telling first, or an
+    empty list when a readable `relay-filed` block was read from a process that ran to its end
+    in bounds (issue #115). Five causes: the process could not be launched, it timed out, the
     Lease was lost while it ran, its block could not be read, or the scope check reset its
-    commit. Each is a filing failure and not an account of the findings: a pass recorded `ran`
-    with no new card on one of these would stop the loop on open findings that no card ever
-    answered, so the pass is `failed`, which the Feeder notifies once and counts as no round."""
+    commit. The first is the pass's reason and the rest are its notes, so a reset of the
+    checkout is on the record even when a lost Lease is the headline (code review). Each is a
+    filing failure and not an account of the findings: a pass recorded `ran` with no new card
+    on one of these would stop the loop on open findings that no card ever answered, so the
+    pass is `failed`, which the Feeder notifies once and counts as no round."""
     launched = result.launch_result
+    sentences = []
     if launched.launch_error:
-        return "the filing process could not be launched: %s" % launched.launch_error
+        sentences.append("the filing process could not be launched: %s" % launched.launch_error)
     if launched.timed_out:
-        return "the filing process timed out after %d seconds" % timeout_seconds
+        sentences.append("the filing process timed out after %d seconds" % timeout_seconds)
     if launched.lease_lost:
-        return "the lease was lost while the filing process ran"
-    if not result.filed.ok:
-        return "the filing process's block could not be read: %s" % result.filed.error
+        sentences.append("the lease was lost while the filing process ran")
+    if not result.filed.ok and not launched.timed_out:
+        # A timeout writes itself as the block's error, so that sentence is the timeout's.
+        sentences.append("the filing process's block could not be read: %s" % result.filed.error)
     if not scope.ok:
         # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
         # inside it left uncommitted. Both reset, and the sentence says which (code review).
@@ -432,9 +436,9 @@ def filing_failure(result, scope, allowed, pre_head, timeout_seconds):
         else:
             what = "left %s changed and uncommitted in the checkout" % (
                 ", ".join(scope.changed) or "the tree")
-        return ("the filing process %s; the checkout was reset to %s and nothing it filed "
-                "there counts" % (what, pre_head[:12]))
-    return None
+        sentences.append("the filing process %s; the checkout was reset to %s and nothing it "
+                         "filed there counts" % (what, pre_head[:12]))
+    return sentences
 
 
 def run(manifest, config, request, env, out=None, home=None, adapter=None, now=time.time,
@@ -694,10 +698,13 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     # before anything is read back or recorded.
     scope = gitwrite.closeout_scope_check(repo, pre_head, allowed, ops=store, task_id=pass_id,
                                           env=env)
-    failure = filing_failure(result, scope, allowed, pre_head, filing_seconds)
-    # The confirmation runs on a failed filing too, over whatever entries were read: on a
-    # tracker outside the checkout a card filed before the failure exists, and the record
-    # and the Feeder's filed map say so.
+    failures = filing_failures(result, scope, allowed, pre_head, filing_seconds)
+    record["notes"].extend(failures[1:])
+    # The confirmation runs on a failed filing too, over whatever entries were read. Only the
+    # scope reset leaves a readable block, since the other causes end the process before its
+    # final message; on a tracker outside the checkout the cards that block names exist, and
+    # the record and the Feeder's filed map say so rather than letting the next tour file
+    # them again.
     confirmation = filing.confirm(result.filed.entries, adapter, known=known)
     record["notes"].extend(confirmation.notes)
     by_number = {index: finding for index, finding in enumerate(to_file, 1)}
@@ -726,8 +733,8 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
                                             [entry["id"] for entry in record["filed"]]))
     # `ran` only when a readable block was confirmed (issue #115): a pass that filed nothing
     # because its Filing step did not complete is not a pass whose findings went unanswered.
-    if failure:
-        return finish(FAILED, failure)
+    if failures:
+        return finish(FAILED, failures[0])
     return finish(RAN)
 
 

@@ -619,8 +619,10 @@ design_note = ""
   pass point. The Filing process runs on the manifest's `[closeout] model` under its closeout
   timeout. A Filing process that could not launch, timed out, lost the lease, left no readable
   `relay-filed` block, or had its commit reset by the scope check fails the pass with that
-  sentence as its reason: the pass is `ran` only when a readable block was confirmed, so a
-  filing that did not complete is never read as findings that produced no card.
+  sentence as its reason: a pass that had something to file is `ran` only when a readable
+  block was confirmed, so a filing that did not complete is never read as findings that
+  produced no card. A pass with nothing to file, or a report only pass, launches no Filing
+  process and is `ran` on its report alone.
 - **`timeout_minutes`** bounds one Test process; past it the pass is `failed`.
 - **`max_rounds`** caps full tours that ran, **`max_hours`** caps the loop's clock from its
   first pass, and **`max_cards_total`** caps the cards the whole loop files, the planning card

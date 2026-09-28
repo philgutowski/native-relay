@@ -370,6 +370,24 @@ class Areas(LoopCase):
                          (["fixture"], ["fixture"]))
         self.assertTrue(any("Search are no longer headings" in note for note in self.notes))
 
+    def test_a_planning_card_confirmed_on_a_pass_that_then_failed_is_not_asked_for_again(self):
+        """Code review on issue #115: on a tracker outside the checkout the planning card exists
+        when the filing then fails on a scope reset, so the area is planned and the next tour
+        does not file a second card for it."""
+        self.seed(rounds=1, stopped_areas=["Search"])
+        self.adapter.ready_cards = [card(1), card(2)]
+        failed = {"status": testloop.FAILED, "findings": [finding(area="Cart")],
+                  "reason": "the filing process changed src/x.py in the checkout, outside any "
+                            "path; the checkout was reset to abc and nothing it filed there counts",
+                  "filed": [filed(14, attended=True, cause="docs/tour.md")]}
+        self.pass_script = [failed, {}]
+        self.plans = [{"2": "halted"}, {"2": "landed"}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["plan"] for call in self.passes], [["Search"], []])
+        self.assertEqual(self.loop()["planned_areas"], ["Search"])
+        self.assertEqual(self.loop()["passes"][0]["planned"], ["Search"])
+        self.assertEqual(self.loop()["passes"][0]["status"], testloop.FAILED)
+
     def test_a_plan_area_on_a_pass_that_did_not_run_is_asked_for_again(self):
         self.seed(rounds=1, stopped_areas=["Search"])
         self.adapter.ready_cards = [card(1), card(2)]
