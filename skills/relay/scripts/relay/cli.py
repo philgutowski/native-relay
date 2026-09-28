@@ -644,7 +644,15 @@ def cmd_summary(args, env, out):
     if failure:
         return failure
     store = _store_for(manifest, env)
-    data = summary.build(manifest, store)
+    # Issue #80: a best effort adapter, never a refused command. `summary` has never needed
+    # tracker credentials to read state and print, and it still does not: this is only for the
+    # one, additional, live check that lets an item lag finding clear itself without a run, and
+    # losing that chance to an unconfigured or unreachable tracker is not a reason to fail here.
+    try:
+        adapter = adapters.build(manifest, env=env)
+    except Exception:
+        adapter = None
+    data = summary.build(manifest, store, adapter=adapter)
     if args.as_json:
         out.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
     else:

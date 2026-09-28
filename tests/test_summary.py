@@ -756,6 +756,47 @@ class CardAuditChecks(CauseLineTable):
         self.assertEqual(kinds, [("card_left_in_review", "T-2")])
         self.assertIn("move T-2 to Todo by hand", data["pending_checks"][0]["text"])
 
+    def test_an_unreadable_record_finding_prefers_a_later_audit_finding_with_a_real_status(self):
+        """Issue #80: the Closeout's own board read can fail (a rate limit, for one) and write
+        board_item_not_terminal with an unreadable status, while the run end audit reads the
+        board cleanly minutes later. The audit's line is the later reading and the one the
+        operator can act on, so it survives instead of the record's own unreadable line."""
+        self.store.upsert("T-1", status=contracts.STATUS_LANDED, halt_class=contracts.HALT_LANDED,
+                          landing_ref="b" * 40, wall_seconds=1.0, active_seconds=1.0,
+                          findings=[{"class": contracts.BOARD_ITEM_NOT_TERMINAL, "task": "T-1",
+                                     "card_status": "unreadable", "terminal_status": "Done",
+                                     "evidence": "the project item could not be read to confirm "
+                                                 "the move: rate limited",
+                                     "observed_at": "2026-09-01T00:00:00+00:00"}])
+        self.store.write_audit([
+            self.finding(contracts.AUDIT_ITEM_NOT_TERMINAL, "T-1",
+                         "T-1 landed and its card reads CLOSED, but its project item reads In "
+                         "review. Move the item to `Done` by hand."),
+        ])
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise(["T-1"])
+        kinds = [(check["kind"], check["task"]) for check in data["pending_checks"]]
+        self.assertEqual(kinds, [(contracts.AUDIT_ITEM_NOT_TERMINAL, "T-1")])
+        self.assertIn("Move the item to `Done` by hand", data["pending_checks"][0]["text"])
+
+    def test_a_record_finding_with_no_later_reading_says_when_it_was_observed(self):
+        """Issue #80: with no persisted audit finding to prefer over it, the record's own line
+        still shows, and now names when it was observed, since nothing else here says how stale
+        that reading might be."""
+        self.store.upsert("T-1", status=contracts.STATUS_LANDED, halt_class=contracts.HALT_LANDED,
+                          landing_ref="b" * 40, wall_seconds=1.0, active_seconds=1.0,
+                          findings=[{"class": contracts.BOARD_ITEM_NOT_TERMINAL, "task": "T-1",
+                                     "card_status": "In review", "terminal_status": "Done",
+                                     "evidence": "the project item reads In review after the "
+                                                 "closeout",
+                                     "observed_at": "2026-09-01T00:00:00+00:00"}])
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise(["T-1"])
+        checks = [c for c in data["pending_checks"] if c["kind"] == "board_item_not_terminal"]
+        self.assertEqual(len(checks), 1, data["pending_checks"])
+        self.assertIn("move T-1 to Done by hand", checks[0]["text"])
+        self.assertIn("(observed 2026-09-01T00:00:00+00:00)", checks[0]["text"])
+
 
 class PathGateRaisers(CauseLineTable):
     """Issue #8. One class, two raisers, opposite repairs. The record shape here is the one the
