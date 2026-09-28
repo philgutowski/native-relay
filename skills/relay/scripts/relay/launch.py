@@ -30,7 +30,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from . import backends, contracts, host, manifest as manifest_module
+from . import backends, contracts, host, limits, manifest as manifest_module
 
 SIGKILL_GRACE_SECONDS = 15
 TICK_SECONDS = 1.0
@@ -310,6 +310,7 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     result.args = list(args)
     result.binary_path = shutil.which(args[0], path=env.get("PATH"))
 
+    _mark_attempt(log_path)
     result.host_at_start = _probe(host_probe)
     started_wall = time.time()
     started = time.monotonic()
@@ -434,6 +435,26 @@ def launch(manifest, task, brief_text, log_path, timeout_seconds, session_id=Non
     result.transcript_path, result.transcript_present = find_transcript(
         home, cwd, session_id, backend=task.backend, log_path=log_path)
     return result
+
+
+def _mark_attempt(log_path):
+    """Append the attempt boundary to the process's log before the process exists, so an
+    attempt that never starts, or prints nothing a reader knows, still has a line of its own
+    that `limits` stops at. Best effort: a log that cannot be written here reads as a log
+    written before the line existed, and the append below reports the fault if it persists.
+
+    An attempt before this one can leave the log without a final newline, killed mid line or
+    ending on plain text, and a boundary appended straight after it would be glued onto that
+    line where no reader can parse it. So the line starts on a fresh one."""
+    try:
+        with open(log_path, "a+b") as log:
+            torn = False
+            if log.tell():
+                log.seek(-1, os.SEEK_END)
+                torn = log.read(1) != b"\n"
+            log.write((("\n" if torn else "") + limits.attempt_line()).encode("utf-8"))
+    except OSError:
+        pass
 
 
 def _probe(host_probe):

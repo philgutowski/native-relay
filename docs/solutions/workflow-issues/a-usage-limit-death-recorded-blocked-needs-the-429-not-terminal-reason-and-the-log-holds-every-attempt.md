@@ -120,3 +120,29 @@ looked.
 The `init` bound has one hole the reader cannot close from the log. An attempt that prints
 nothing, a CLI that fails to start for one, leaves no `init` line of its own, so the walk runs
 into the attempt before it and reads that attempt's `result` as this one's.
+
+## Follow up: issue #94, the runner marks each attempt itself
+
+The hole is closed by a line the runner owns. `launch.launch` appends
+`{"type": "system", "subtype": "relay_attempt", "at": ...}` (`limits.attempt_line`) to the
+process's log after the argv is built and before `Popen`, so a launch that fails with OSError
+still leaves it. `limits` stops at whichever of that line and `init` it meets first walking
+back. A log from before the change has no such line and reads as it did. Three things about it
+are not visible from the reader alone.
+
+- Every reader of the log has to pass the line over, and not all of them did by default. The
+  stream normalizers print nothing for it, but the claude transcript fallback counted it into
+  `line_count` and the codex reader counted it into `decoded_events`, which decides KTD4
+  readability. Both filter it through `limits.is_attempt_boundary`. A new reader of a stdout log
+  must do the same.
+- A boundary appended straight after a torn last line is glued onto it and parses as nothing,
+  which reopens the hole on exactly the deaths it exists for, a kill mid line or a plain text
+  failure with no final newline. The launcher writes a newline first when the log's last byte
+  is not one.
+- A launch that never started now reads unconfirmed, not refuted, when its wall time is under
+  the quick death bound: the log holds its boundary and nothing else. That is the card's
+  specified reading. The failure is still told from a limit by what acts on the reading.
+
+Classification is still per log, not per attempt: the claude fallback and the codex event count
+read every attempt a relaunch on the same backend left behind. The boundary now makes that
+fixable, and issue #95 carries it.

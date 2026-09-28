@@ -13,7 +13,7 @@ import unittest
 
 import _paths
 import _repo
-from relay import backends, contracts, launch, manifest as mf
+from relay import backends, contracts, launch, limits, manifest as mf
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
@@ -330,6 +330,54 @@ class LaunchFailure(LaunchCase):
         self.assertIn("claude", result.launch_error)
         self.assertFalse(result.timed_out)
         self.assertIsNone(result.exit_code)
+
+    def test_a_process_that_could_not_start_still_leaves_the_attempt_boundary(self):
+        env = dict(self.base_env, PATH=os.path.join(self.tmp.name, "empty"))
+        os.makedirs(os.path.join(self.tmp.name, "empty"), exist_ok=True)
+        self.assertIsNotNone(self.go(base_env=env).launch_error)
+        with open(self.log) as handle:
+            events = [json.loads(line) for line in handle]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(limits.is_attempt_boundary(events[0]), events)
+
+
+class AttemptBoundary(LaunchCase):
+    """Issue #94: every launch appends the runner's own boundary line to the log before the
+    process starts, so the limit reader can tell one attempt from the next."""
+
+    def test_two_launches_of_one_task_leave_two_boundaries_in_order(self):
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        write_entry(self.queue, 2, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        self.go()
+        self.go()
+        with open(self.log) as handle:
+            lines = handle.read().splitlines()
+        marks = [index for index, line in enumerate(lines)
+                 if line.startswith("{") and limits.is_attempt_boundary(json.loads(line))]
+        self.assertEqual(len(marks), 2, lines)
+        # Each boundary opens its own attempt: first line of the log, and ahead of the second
+        # attempt's output, with the first attempt's output between the two.
+        self.assertEqual(marks[0], 0)
+        self.assertTrue(any("stub_done" in line for line in lines[marks[0]:marks[1]]))
+        self.assertTrue(any("stub_done" in line for line in lines[marks[1]:]))
+        first, second = (json.loads(lines[index])["at"] for index in marks)
+        self.assertLessEqual(first, second)
+
+    def test_a_log_ending_mid_line_gets_its_boundary_on_a_line_of_its_own(self):
+        with open(self.log, "w") as handle:
+            handle.write('{"type": "assistant"}\nerror: unknown option')
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        self.go()
+        with open(self.log) as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual(lines[1], "error: unknown option")
+        self.assertTrue(limits.is_attempt_boundary(json.loads(lines[2])), lines[:3])
+
+    def test_the_boundary_is_not_streamed_as_process_output(self):
+        write_entry(self.queue, 1, os.path.join(TRANSCRIPTS, "success.jsonl"))
+        streamed = []
+        self.go(stream=streamed.append)
+        self.assertFalse(any(limits.ATTEMPT_SUBTYPE in line for line in streamed), streamed)
 
 
 class TimeoutWithASurvivingGrandchild(LaunchCase):

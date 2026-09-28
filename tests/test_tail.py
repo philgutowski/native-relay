@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 import _paths
-from relay import backends, cli, contracts, state, tail
+from relay import backends, cli, contracts, limits, state, tail
 from test_cli import CliCase
 from test_run import CLOSE_SH, task_branch_sh
 
@@ -785,6 +785,45 @@ class FollowerGuard(FollowCase):
         self.terminal()
         self.go()
         self.assertFalse([row for row in self.lines if "no decoded events" in row])
+
+
+class AttemptBoundary(FollowCase):
+    """Issue #94: the launcher's boundary line is the runner's, not the process's, so no
+    backend's follower prints anything for it or counts it as a decoded event."""
+
+    BOUNDARY = limits.attempt_line()
+
+    def test_the_boundary_decodes_to_no_event_on_every_backend(self):
+        for name in contracts.BACKEND_PINS:
+            module = backends.build(name)
+            for raw in (self.BOUNDARY, self.BOUNDARY.encode("utf-8")):
+                with self.subTest(backend=name, kind=type(raw).__name__):
+                    self.assertEqual(module.normalize_stream(raw), ([], None))
+
+    def test_a_grok_boundary_prints_only_the_text_the_attempt_before_left_pending(self):
+        module = backends.build("grok")
+        events, state = module.normalize_stream(self.BOUNDARY, ["half a ", "message"])
+        self.assertEqual((events, state), (["half a message"], None))
+
+    def test_the_follower_prints_nothing_for_it_on_any_backend(self):
+        for name in contracts.BACKEND_PINS:
+            with self.subTest(backend=name):
+                self.lines = []
+                self.manifest = _Manifest(["T-1"], backends={"T-1": name})
+                self.append("T-1", self.BOUNDARY)
+                self.terminal()
+                self.go()
+                self.assertIn("== T-1 task ==", self.text)
+                self.assertNotIn(limits.ATTEMPT_SUBTYPE, self.text)
+                self.assertNotIn('"system"', self.text)
+                os.remove(self.log("T-1"))
+
+    def test_a_log_of_boundaries_alone_still_warns_as_silent(self):
+        count = (tail.SILENT_LOG_BYTES // len(self.BOUNDARY)) + 100
+        self.append("T-1", self.BOUNDARY * count)
+        self.terminal()
+        self.go()
+        self.assertEqual(len([row for row in self.lines if "no decoded events" in row]), 1)
 
 
 class FollowTakesNoLease(FollowCase):
