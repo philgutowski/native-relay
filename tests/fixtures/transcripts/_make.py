@@ -393,6 +393,124 @@ def closeout_tracker_denied():
     return finish(lines, CLOSEOUT_SKIPPED_TEXT)
 
 
+TEST_PROMPT = (
+    "Relay test pass. The app is served at http://127.0.0.1:8765 and already serves commit "
+    "abc1234. This is a full tour. Report in a relay-test-report block."
+)
+
+
+def test_finding(number, area="Search", severity="high", card=None):
+    """One finding of the shape KTD4 names, numbered so a fixture with ten stays readable."""
+    return {
+        "title": "Finding %d: the %s page drops its last row" % (number, area.lower()),
+        "severity": severity,
+        "kind": "defect",
+        "area": area,
+        "design": False,
+        "cause": {"file": "app/%s.py" % area.lower(), "line": 40 + number, "verdict": "defect"},
+        "steps": ["Open %s" % area, "Load a set of three items"],
+        "expected": "Three rows",
+        "observed": "Two rows, the third is missing",
+        "done_when": ["A set of three items shows three rows on %s" % area],
+        "card": card,
+    }
+
+
+def test_report_block(payload):
+    return "```relay-test-report\n%s\n```\n" % json.dumps(payload, indent=2)
+
+
+# Longer than classify.LAST_MESSAGE_CHARS (200) on purpose, and with an approval step the
+# process reached and left unapproved (AE4), and prose after the block: only the last block
+# counts and it is read whole, so neither the length nor the trailing prose may lose a finding.
+TEST_REPORT_TEXT = (
+    "Toured all three areas. Search drops its last row, and the invoice flow renders its "
+    "approval step correctly; I stopped there without approving it.\n\n"
+    + test_report_block({
+        "status": "ran",
+        "reason": "",
+        "approval_steps": ["Send the invoice"],
+        "findings": [test_finding(1), test_finding(2, area="Invoices", severity="medium")],
+    })
+    + "\nScreenshots are under /tmp/relay-test-shots for the operator.\n"
+)
+TEST_REPORT_TEN_TEXT = (
+    "A long tour with ten findings.\n\n"
+    + test_report_block({
+        "status": "ran",
+        "reason": "",
+        "findings": [test_finding(n, severity=("high", "medium", "low")[n % 3])
+                     for n in range(1, 11)],
+    })
+)
+TEST_REPORT_NOT_RUN_TEXT = (
+    "The app answered every page with its sign in form, and the session file the tour "
+    "document names is missing, so I typed nothing and stopped.\n\n"
+    + test_report_block({
+        "status": "not_run",
+        "reason": "the app asked for a sign in and the session file is missing",
+        "findings": [],
+    })
+)
+# A stale block earlier in the same message, then the one that counts.
+TEST_REPORT_TWO_BLOCKS_TEXT = (
+    "First draft:\n\n"
+    + test_report_block({"status": "ran", "reason": "", "findings": [test_finding(9)]})
+    + "\nCorrected after reading the cause:\n\n"
+    + test_report_block({"status": "ran", "reason": "", "findings": [test_finding(1)]})
+)
+TEST_REPORT_NONE_TEXT = (
+    "Toured all three areas and found one defect on Search. Filing it now.\n\n"
+    "Actually I cannot file anything from here, so here is the finding in prose: the search "
+    "page drops its last row, cause app/search.py line 41."
+)
+TEST_REPORT_MALFORMED_TEXT = (
+    "Toured all three areas.\n\n"
+    "```relay-test-report\n{\"status\": \"ran\", \"findings\": [{\"title\": \"unterminated\"\n```\n"
+)
+
+
+def build_test_prefix():
+    """A Test process's own shape: the prompt, one driver run from the shell, one code read."""
+    lines = []
+    p = user_prompt(None, TEST_PROMPT)
+    lines.append(p)
+    a1 = assistant(p["uuid"], [tool_use("toolu_01DRIVE", "Bash", {
+        "command": "python3 tools/drive.py --page /search --screenshot /tmp/relay-test-shots/search.png"})],
+        "tool_use")
+    lines.append(a1)
+    lines.append(tool_result(a1["uuid"], "toolu_01DRIVE", "console: none\nrows: 2"))
+    a2 = assistant(lines[-1]["uuid"], [tool_use("toolu_01READ", "Read", {
+        "file_path": CWD + "/app/search.py"})], "tool_use")
+    lines.append(a2)
+    lines.append(tool_result(a2["uuid"], "toolu_01READ", "def results(items):\n    return items[:-1]\n"))
+    return lines
+
+
+def test_report():
+    return finish(build_test_prefix(), TEST_REPORT_TEXT)
+
+
+def test_report_ten():
+    return finish(build_test_prefix(), TEST_REPORT_TEN_TEXT)
+
+
+def test_report_not_run():
+    return finish(build_test_prefix(), TEST_REPORT_NOT_RUN_TEXT)
+
+
+def test_report_two_blocks():
+    return finish(build_test_prefix(), TEST_REPORT_TWO_BLOCKS_TEXT)
+
+
+def test_report_none():
+    return finish(build_test_prefix(), TEST_REPORT_NONE_TEXT)
+
+
+def test_report_malformed():
+    return finish(build_test_prefix(), TEST_REPORT_MALFORMED_TEXT)
+
+
 if __name__ == "__main__":
     write("success.jsonl", success)
     write("blocked.jsonl", blocked)
@@ -417,4 +535,10 @@ if __name__ == "__main__":
     write("closeout_skipped_long.jsonl", closeout_skipped_long)
     write("closeout_unfinished.jsonl", closeout_unfinished)
     write("closeout_tracker_denied.jsonl", closeout_tracker_denied)
+    write("test_report.jsonl", test_report)
+    write("test_report_ten.jsonl", test_report_ten)
+    write("test_report_not_run.jsonl", test_report_not_run)
+    write("test_report_two_blocks.jsonl", test_report_two_blocks)
+    write("test_report_none.jsonl", test_report_none)
+    write("test_report_malformed.jsonl", test_report_malformed)
     print("fixtures written to", HERE)

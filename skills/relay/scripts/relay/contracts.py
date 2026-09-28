@@ -30,6 +30,15 @@ CLOSEOUT_COMPLETE_LINE = "Documentation complete"
 CLOSEOUT_SKIPPED_LINE = "Documentation skipped"
 CLOSEOUT_TERMINAL_LINES = (CLOSEOUT_COMPLETE_LINE, CLOSEOUT_SKIPPED_LINE)
 
+# The Test process's report contract (browser test loop plan, KTD4): its final message ends
+# with one fenced block under this tag holding one JSON object, whose `status` is one of these
+# two words. Only the last such block counts, and `testbrief.parse` reads it from the full final
+# message in the transcript, never from the digest's 200 character tail.
+TEST_REPORT_FENCE_TAG = "relay-test-report"
+TEST_REPORT_RAN = "ran"
+TEST_REPORT_NOT_RUN = "not_run"
+TEST_REPORT_STATUSES = (TEST_REPORT_RAN, TEST_REPORT_NOT_RUN)
+
 
 # CLI contracts, observed on CLI_VERSION_TESTED and documented nowhere.
 # A denied tool call is a `user` transcript line whose tool_result content begins with this.
