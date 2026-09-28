@@ -209,6 +209,21 @@ class SharedContract(AdapterCase):
             self.assertEqual(adapter.filing_instructions(("loop",), "note"),
                              adapter.filing_instructions(("loop",), "note"), name)
 
+    def test_every_adapter_accepts_an_issue_type_and_only_jira_reads_it(self):
+        """Issue #120: `filing.values` hands the sidecar's `issue_type` to every adapter, so
+        every one accepts the keyword. Jira's create call needs it; a GitHub issue and a
+        markdown line have no type, so those two render the same sentence with and without."""
+        for name, adapter in self.each():
+            plain = adapter.filing_instructions(("loop",), "", backend="claude")
+            typed = adapter.filing_instructions(("loop",), "", backend="claude", issue_type="Bug")
+            if name == "jira":
+                self.assertIn("`Bug`", typed)
+                self.assertNotIn("`Bug`", plain)
+                self.assertIn("`%s`" % jira_adapter.DEFAULT_ISSUE_TYPE, plain)
+            else:
+                self.assertEqual(plain, typed, name)
+                self.assertNotIn("Bug", typed, name)
+
     def test_every_adapter_returns_the_status_shape_verify_reads(self):
         ids = {"jira": "ABC-83", "github": "12", "markdown": "T-2"}
         for name, adapter in self.each():
@@ -644,23 +659,26 @@ class Jira(AdapterCase):
             self.assertIn("getAccessibleAtlassianResources", text, outcome)
             self.assertRegex(text, r"(?i)never call getAccessibleAtlassianResources")
 
-    def test_the_filing_tools_are_the_closeout_tools_plus_card_creation_and_search(self):
-        """Browser test loop plan, KTD5: a Filing process on Jira creates cards and looks for
-        open ones through Atlassian MCP, and nothing else is added."""
+    def test_the_filing_tools_are_the_closeout_tools_plus_creation_search_and_the_types_read(self):
+        """Browser test loop plan, KTD5, and issue #120: a Filing process on Jira creates cards,
+        looks for open ones, and reads the project's issue types through Atlassian MCP, since
+        the create call requires a type name; nothing else is added."""
         tools = self.jira(self.opener()).filing_allowed_tools()
         self.assertEqual(tools, jira_adapter.CLOSEOUT_TOOLS + (
             "mcp__atlassian__createJiraIssue",
             "mcp__atlassian__searchJiraIssuesUsingJql",
+            "mcp__atlassian__getJiraProjectIssueTypesMetadata",
         ))
         self.assertNotIn("mcp__atlassian__getAccessibleAtlassianResources", tools)
         self.assertNotIn("mcp__atlassian__editJiraIssue", tools)
         self.assertEqual(self.jira(self.opener()).filing_allowed_tools(backend="claude"), tools)
 
-    def test_grok_filing_tools_use_the_native_allow_form_and_gain_the_same_pair(self):
+    def test_grok_filing_tools_use_the_native_allow_form_and_gain_the_same_three(self):
         tools = self.jira(self.opener()).filing_allowed_tools(backend="grok")
         self.assertEqual(tools, jira_adapter.GROK_CLOSEOUT_TOOLS + (
             "MCPTool(atlassian__createJiraIssue)",
             "MCPTool(atlassian__searchJiraIssuesUsingJql)",
+            "MCPTool(atlassian__getJiraProjectIssueTypesMetadata)",
         ))
         for tool in tools:
             self.assertTrue(tool.startswith("MCPTool(atlassian__"), tool)
@@ -683,10 +701,38 @@ class Jira(AdapterCase):
         self.assertNotIn("JIRA_API_TOKEN", text)
         self.assertNotIn("transition", text.lower())
 
-    def test_grok_filing_instructions_name_the_grok_tool_spellings_including_the_pair(self):
+    def test_filing_instructions_name_the_issue_type_its_read_and_the_labels_field(self):
+        """Issue #120: createJiraIssue requires `issueTypeName` and takes labels only in
+        `additional_fields`. The sentence names the type, the default when the sidecar names
+        none, the read that confirms the project has it, and what to do when it does not:
+        never a create under a guessed type."""
+        adapter = self.jira(self.opener())
+        text = adapter.filing_instructions(("loop", "web"), "")
+        self.assertEqual(jira_adapter.DEFAULT_ISSUE_TYPE, "Task")
+        self.assertIn("its projectKey `EX`, its issueTypeName `Task`", text)
+        self.assertIn("`additional_fields` in the form `{\"labels\": [\"loop\", \"web\"]}`", text)
+        self.assertIn("getJiraProjectIssueTypesMetadata for `EX`", text)
+        self.assertIn("confirm `Task` is among them", text)
+        self.assertRegex(text, r"(?i)create nothing under another type")
+        self.assertLess(text.index("getJiraProjectIssueTypesMetadata"),
+                        text.index("An attended planning card"))
+        self.assertIn("label `attended` in the same `additional_fields` labels array", text)
+        # The sidecar's override replaces the default everywhere the type is named.
+        typed = adapter.filing_instructions(("loop", "web"), "", issue_type="  Bug  ")
+        self.assertIn("its issueTypeName `Bug`", typed)
+        self.assertIn("confirm `Bug` is among them", typed)
+        self.assertNotIn("`Task`", typed)
+        # Without loop labels the attended label still goes in the same field.
+        bare = adapter.filing_instructions((), "")
+        self.assertNotIn("`{\"labels\": [\"loop\"", bare)
+        self.assertIn("`additional_fields` in the form `{\"labels\": [\"attended\"]}`", bare)
+        self.assertIn("its issueTypeName `Task`", bare)
+
+    def test_grok_filing_instructions_name_the_grok_tool_spellings_including_the_three(self):
         text = self.jira(self.opener()).filing_instructions(("loop",), "", backend="grok")
         self.assertIn("atlassian__createJiraIssue", text)
         self.assertIn("atlassian__searchJiraIssuesUsingJql", text)
+        self.assertIn("atlassian__getJiraProjectIssueTypesMetadata", text)
         self.assertIn("not mcp__atlassian__ names", text)
         self.assertIn("JIRA_API_TOKEN", text)
         self.assertNotIn("JIRA_API_TOKEN", self.jira(self.opener()).filing_instructions(("loop",), ""))
@@ -927,6 +973,12 @@ class GitHub(AdapterCase):
         self.assertNotIn("--label", text)
         self.assertNotIn("design note", text)
 
+    def test_an_issue_type_changes_nothing_on_github(self):
+        """Issue #120: the keyword is the shared signature's; `gh issue create` takes no type."""
+        adapter = self.github(self.run_for())
+        self.assertEqual(adapter.filing_instructions(("loop",), "", issue_type="Bug"),
+                         adapter.filing_instructions(("loop",), ""))
+
     def test_the_filing_create_and_comment_commands_match_the_write_patterns(self):
         """A denied `gh issue create` in a Filing process reads as a tracker write denial, the
         way a denied `gh issue close` does in a Closeout."""
@@ -1138,6 +1190,12 @@ class Markdown(AdapterCase):
         self.assertNotIn("`[x]`", text)
         # Without labels the title carries no bracketed words.
         self.assertNotIn("brackets", self.markdown().filing_instructions((), ""))
+
+    def test_an_issue_type_changes_nothing_on_markdown(self):
+        """Issue #120: a line in a file has no type; the keyword is the shared signature's."""
+        adapter = self.markdown()
+        self.assertEqual(adapter.filing_instructions(("loop",), "", issue_type="Bug"),
+                         adapter.filing_instructions(("loop",), ""))
 
     def test_the_filing_instructions_are_the_same_with_and_without_a_push(self):
         """KTD13: the loop pairs only with a Manifest that does not push, and the sentence

@@ -311,16 +311,28 @@ def render(manifest, task, card, mode=None, branch=None):
         raise BriefError("brief template for %s names an unknown placeholder %s" % (mode, exc))
 
 
-def _paths_in(text):
-    """Every `.claude/` path in a text, extended to the end of its token."""
-    found = []
-    for match in contracts.CLAUDE_DIR_SCAN_REGEX.finditer(text or ""):
+def path_spans(text):
+    """The `(start, end)` span of every `.claude/` path in a text, each extended to the end of
+    its token and shorn of trailing full stops. This is the scan's whole token grammar, and it
+    is the one place that grammar lives (issue #120): `filing.describe_paths` rewrites exactly
+    these spans, so a form the scan catches, a markdown wrapper or a nested config directory,
+    can never survive the rewrite and reach a card."""
+    text = text or ""
+    spans = []
+    for match in contracts.CLAUDE_DIR_SCAN_REGEX.finditer(text):
         start = match.end() - len(".claude/")
         end = start
         while end < len(text) and text[end] not in PATH_TAIL_STOP:
             end += 1
-        found.append(text[start:end].rstrip("."))
-    return found
+        while end > start and text[end - 1] == ".":
+            end -= 1
+        spans.append((start, end))
+    return spans
+
+
+def _paths_in(text):
+    """Every `.claude/` path in a text, extended to the end of its token."""
+    return [text[start:end] for start, end in path_spans(text)]
 
 
 def scan(card, brief_text):

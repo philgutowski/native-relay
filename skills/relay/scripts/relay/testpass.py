@@ -438,8 +438,9 @@ def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
         sentences.append("the filing process could not be launched: %s" % launched.launch_error)
     if launched.timed_out:
         sentences.append("the filing process timed out after %d seconds" % timeout_seconds)
-    if not result.filed.ok and not launched.timed_out:
-        # A timeout writes itself as the block's error, so that sentence is the timeout's.
+    if not result.filed.ok and not launched.timed_out and not launched.launch_error:
+        # A timeout writes itself as the block's error, so that sentence is the timeout's, and
+        # a process that never launched left no block to read (issue #120).
         sentences.append("the filing process's block could not be read: %s" % result.filed.error)
     if scope is not None and not scope.ok:
         # Two shapes, as `_run_closeout` reads them: a path outside the bound, or a change
@@ -718,8 +719,9 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         return finish(FAILED, "the checkout's HEAD does not resolve to a commit before filing")
     filing_seconds = overrides.get("filing_seconds") or manifest.timeouts.closeout_minutes * 60
     result = filing.run(manifest, to_file, adapter, store, task.backend, pass_id,
-                        labels=loop.labels, design_note=loop.design_note, home=home,
-                        base_env=env, stream=stream, timeout_seconds=filing_seconds, **kwargs)
+                        labels=loop.labels, design_note=loop.design_note,
+                        issue_type=loop.issue_type, home=home, base_env=env, stream=stream,
+                        timeout_seconds=filing_seconds, **kwargs)
     record["transcripts"]["filing"] = result.launch_result.transcript_path
     record["read_from"]["filing"] = result.filed.source
     record["briefs"]["filing"] = result.brief_path

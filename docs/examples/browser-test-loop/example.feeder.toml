@@ -58,3 +58,9 @@ labels = ["ready", "test-loop"]
 # Both default to empty, which routes a design card like any other.
 design_model = "fable"
 design_note = "Follow the project's design skill and its design document before changing any page."
+
+# The type a filed card is created as, on a tracker whose create call needs one. Jira requires
+# an issue type name; empty means Task, which every Jira project template has. Name a type the
+# project has, since the Filing process files nothing under one it lacks. GitHub issues and
+# markdown lines have no type and ignore this.
+issue_type = ""

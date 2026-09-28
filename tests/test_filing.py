@@ -80,18 +80,22 @@ class FakeFilingAdapter:
     def filing_allowed_tools(self, backend=None):
         return self.tools
 
-    def filing_instructions(self, labels, design_note, backend=None):
-        self.calls.append(("filing_instructions", tuple(labels), design_note, backend))
+    def filing_instructions(self, labels, design_note, backend=None, issue_type=""):
+        self.calls.append(("filing_instructions", tuple(labels), design_note, backend,
+                           issue_type))
         text = self.sentence + " Labels: %s." % ", ".join(labels)
         if design_note:
             text += " Design note: %s" % design_note
+        if issue_type:
+            text += " Type: %s." % issue_type
         return text
 
 
-def render(findings=None, adapter=None, labels=("loop",), design_note="", backend=None):
+def render(findings=None, adapter=None, labels=("loop",), design_note="", backend=None,
+           issue_type=""):
     return filing.render(findings if findings is not None else [finding()],
                          adapter or FakeFilingAdapter(), labels=labels,
-                         design_note=design_note, backend=backend)
+                         design_note=design_note, backend=backend, issue_type=issue_type)
 
 
 def data_block(text):
@@ -145,16 +149,43 @@ class ParseText(unittest.TestCase):
             ([{"finding": 1, "action": "filed"}], "entry 1: id must be a non empty string"),
             ([{"finding": 1, "action": "filed", "id": "1"},
               {"finding": 1, "action": "commented", "id": "2"}], "entry 2: finding 1 appears twice"),
-            # Code review: one card per finding cuts both ways.
+            # Code review: one new card per finding cuts both ways.
             ([{"finding": 1, "action": "filed", "id": "45"},
               {"finding": 2, "action": "filed", "id": "45"}], "entry 2: card 45 appears twice"),
             ([{"finding": 1, "action": "filed", "id": 45},
               {"finding": 2, "action": "commented", "id": "45"}], "entry 2: card 45 appears twice"),
+            ([{"finding": 1, "action": "commented", "id": "45"},
+              {"finding": 2, "action": "filed", "id": 45}], "entry 2: card 45 appears twice"),
+            ([{"finding": 1, "action": "commented", "id": "45"},
+              {"finding": 2, "action": "commented", "id": "45"},
+              {"finding": 3, "action": "filed", "id": "45"}], "entry 3: card 45 appears twice"),
         )
         for payload, error in cases:
             filed = filing.parse_text(block(payload))
             self.assertFalse(filed.ok, payload)
             self.assertEqual(filed.error, error)
+
+    def test_any_number_of_commented_entries_may_name_one_card(self):
+        """Issue #120: two findings on one defect each add a comment to the one open card. The
+        old rule refused the whole block, so a card filed in the same pass existed on the
+        tracker and was never recorded, charged to the caps, routed, or checked."""
+        payload = [{"finding": 1, "action": "commented", "id": "45"},
+                   {"finding": 2, "action": "filed", "id": "46"},
+                   {"finding": 3, "action": "commented", "id": 45},
+                   {"finding": 4, "action": "commented", "id": "45"}]
+        filed = filing.parse_text(block(payload), count=4)
+        self.assertTrue(filed.ok, filed.error)
+        self.assertEqual([(entry["finding"], entry["action"], entry["id"])
+                          for entry in filed.entries],
+                         [(1, "commented", "45"), (2, "filed", "46"), (3, "commented", "45"),
+                          (4, "commented", "45")])
+        # And `confirm` reads each of them back as a comment on the one existing card, with
+        # the filed card kept as the pass's one new card.
+        adapter = FakeFilingAdapter(cards={"45": {"title": "open"}, "46": {"title": "new"}})
+        confirmation = filing.confirm(filed.entries, adapter)
+        self.assertEqual(confirmation.filed_ids, ("46",))
+        self.assertEqual(confirmation.commented_ids, ("45", "45", "45"))
+        self.assertEqual(confirmation.notes, ())
 
     def test_a_finding_number_past_the_briefs_count_is_an_error_when_the_count_is_given(self):
         payload = [{"finding": 3, "action": "filed", "id": "9"}]
@@ -380,12 +411,23 @@ class ChosenFindings(unittest.TestCase):
         # A truthy value that is not True is not a mark: the pass code sets a bool.
         self.assertNotIn(filing.ATTENDED_LINE, data_block(render([finding(attended="yes")])))
 
+    def test_the_adapter_receives_the_issue_type_and_an_empty_one_by_default(self):
+        """Issue #120: the sidecar's `issue_type` reaches the adapter's sentence, and the
+        default is the empty string the adapter reads as its own default."""
+        adapter = FakeFilingAdapter()
+        text = render(adapter=adapter, issue_type="Bug")
+        self.assertEqual(adapter.calls[-1][4], "Bug")
+        self.assertIn("Type: Bug.", text)
+        adapter = FakeFilingAdapter()
+        render(adapter=adapter)
+        self.assertEqual(adapter.calls[-1][4], "")
+
     def test_the_adapter_receives_the_labels_the_design_note_and_the_backend(self):
         adapter = FakeFilingAdapter()
         text = render(adapter=adapter, labels=("loop", "bug"), design_note="Take the design route.",
                       backend="claude")
         self.assertEqual(adapter.calls, [("filing_instructions", ("loop", "bug"),
-                                          "Take the design route.", "claude")])
+                                          "Take the design route.", "claude", "")])
         self.assertIn(TRACKER_SENTENCE, text)
         self.assertIn("Labels: loop, bug.", text)
         self.assertIn("Design note: Take the design route.", text)
@@ -468,8 +510,68 @@ class ConfigDirectory(unittest.TestCase):
         self.assertNotIn(".claude/settings", text)
 
     def test_describe_paths_on_plain_text_is_the_identity(self):
-        for text in ("app/search.py line 4", "", "nothing here", "claude/x", "a .claudex/ b"):
-            self.assertEqual(filing.describe_paths(text), text)
+        for text in ("app/search.py line 4", "", "nothing here", "claude/x", "a .claudex/ b",
+                     None):
+            self.assertEqual(filing.describe_paths(text), text or "")
+
+    def test_describe_paths_uses_the_launch_scans_grammar_for_every_form_it_catches(self):
+        """Issue #120: the earlier private token pattern wanted a slash or the token's start
+        before the segment, so a path wrapped in markdown emphasis, or one nested under
+        another config directory, survived the rewrite, reached the card, and then scanned out
+        every later Task brief quoting it. The spans are now `brief.path_spans`, the scan's own
+        grammar, so whatever the scan catches, the rewrite describes."""
+        forms = {
+            "**.claude/settings.json**": "**settings.json** under the agent config directory",
+            "*.claude/hooks/pre.sh*": "*hooks/pre.sh* under the agent config directory",
+            "[.claude/skills/x/SKILL.md](link)":
+                "[skills/x/SKILL.md under the agent config directory](link)",
+            "(.claude/settings.json)": "(settings.json under the agent config directory)",
+            "'.claude/x' and \".claude/y\"": ("'x under the agent config directory' and "
+                                             "\"y under the agent config directory\""),
+            "the file .claude/settings.json.": ("the file settings.json under the agent config "
+                                                "directory."),
+            "under .claude/ alone": "under the agent config directory alone",
+            # The head before a `/.claude/` segment is kept, as the cause line always was.
+            "tools/.claude/skills/x/SKILL.md":
+                "skills/x/SKILL.md under the agent config directory in tools",
+            "**tools/.claude/x**": "x** under the agent config directory in **tools",
+            # Nested: describing the outer segment uncovers the inner one, and the rewrite
+            # repeats until the scan finds nothing.
+            "tools/.claude/a/.claude/b": ("b under the agent config directory in a under the "
+                                          "agent config directory in tools"),
+            ".claude/.claude/x": ("x under the agent config directory under the agent config "
+                                  "directory"),
+            # A glued suffix (code review): the head is not moved past a `file:line` colon, so
+            # the line number is not read as part of the head directory.
+            "a/.claude/b/c.py:12": "a/b/c.py under the agent config directory:12",
+            "in a/.claude/b/c.py, line 12": "in b/c.py under the agent config directory in a, line 12",
+            "(tools/.claude/x)": "(x under the agent config directory in tools)",
+            "see -.claude/x": "see -.claude/x",     # not a form the scan catches either
+            "foo.claude/bar": "foo.claude/bar",
+        }
+        for text, expected in forms.items():
+            described = filing.describe_paths(text)
+            self.assertEqual(described, expected, text)
+            self.assertEqual(brief.scan({}, described), [], text)
+            # Idempotent: a described text is left alone.
+            self.assertEqual(filing.describe_paths(described), described, text)
+
+    def test_the_rewrite_and_the_scan_share_one_span_reader(self):
+        with mock.patch.object(brief, "path_spans", return_value=[]) as spans:
+            self.assertEqual(filing.describe_paths("x .claude/y"), "x .claude/y")
+        spans.assert_called_once_with("x .claude/y")
+        self.assertEqual(brief.path_spans("a .claude/b. c"), [(2, 11)])
+
+    def test_a_form_the_scan_catches_in_any_field_is_described_before_it_reaches_the_brief(self):
+        shape = finding(title="**.claude/settings.json** is ignored",
+                        steps=["Open [.claude/skills/x/SKILL.md](x)"],
+                        observed="wrote tools/.claude/a/.claude/b\n",
+                        done_when=["*.claude/hooks/pre.sh* runs"],
+                        cause={"file": "**.claude/settings.json**", "line": 1,
+                               "verdict": "defect"})
+        text = render([shape])
+        self.assertEqual(brief.scan({}, text), [])
+        self.assertNotIn(".claude/", text)
 
     def test_the_rendered_brief_passes_the_scan_with_and_without_such_a_cause(self):
         plain = render()
@@ -705,6 +807,44 @@ class RunTheProcess(unittest.TestCase):
         self.assertTrue(result.launch_result.timed_out)
         self.assertFalse(result.filed.ok)
         self.assertIn("timed out", result.filed.error)
+
+    def test_a_rendered_brief_the_scan_would_refuse_is_a_filed_error_and_nothing_launches(self):
+        """Issue #120: the finding fields are described in words, but the adapter's sentence is
+        the tracker's own and reaches the brief as written. A hit there is a `Filed` error
+        naming the path, on a launch result that says nothing ran, and the stub is never
+        started, since a card carrying the path would scan out every later brief quoting it."""
+        adapter = FakeFilingAdapter(sentence="Append each finding to .claude/tracker.md.")
+        launched = []
+
+        def popen(args, **kwargs):
+            launched.append(args)
+            raise AssertionError("a filing process was launched")
+
+        self.entry(self.transcript(block([])))
+        store = state.StateStore(self.manifest.path, self.repo, home=self.home)
+        result = filing.run(self.manifest, [finding()], adapter, store, "claude", "pass-4",
+                            base_env=self.base_env(), home=self.home, stream=lambda line: None,
+                            timeout_seconds=30, popen=popen)
+        self.assertEqual(launched, [])
+        self.assertFalse(result.filed.ok)
+        self.assertTrue(result.filed.error.startswith("no filing process was launched: the "
+                                                      "rendered filing brief names "
+                                                      ".claude/tracker.md, "), result.filed.error)
+        self.assertIn(brief.MENTION_RULE, result.filed.error)
+        self.assertEqual(result.filed.entries, ())
+        # The launch error carries no lead clause, since the pass prefixes its own (code review).
+        self.assertEqual(filing.REFUSED_BRIEF_LEAD + result.launch_result.launch_error,
+                         result.filed.error)
+        self.assertFalse(result.launch_result.timed_out)
+        self.assertFalse(result.launch_result.lease_lost)
+        self.assertEqual(result.launch_result.session_id, "pass-4")
+        self.assertEqual((result.findings, result.digest), ([], {}))
+        # The brief is still written and recorded, so the operator can read what was refused.
+        self.assertTrue(os.path.exists(result.brief_path))
+        with open(result.brief_path) as handle:
+            self.assertEqual(state.sha256_of(handle.read()), result.brief_sha256)
+        # The stub's queue entry was never taken.
+        self.assertTrue(os.path.exists(os.path.join(self.queue, "1", "entry.json")))
 
     def test_a_denied_tracker_write_becomes_a_finding_on_the_result(self):
         """The Filing process is where a card creation is first refused, so the classifier's

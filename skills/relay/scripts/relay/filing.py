@@ -22,7 +22,6 @@ report.
 """
 import json
 import os
-import re
 import string
 from dataclasses import dataclass, field, replace
 
@@ -71,6 +70,11 @@ ATTENDED_LINE = ("Attended planning card: yes, file this the way the tracker ins
 # segment would trip the `.claude/` scan on the brief and, copied into a card, on every later
 # brief that carries the card.
 CONFIG_DIR_DESCRIPTION = "the agent config directory"
+
+# The characters after a path token that end its phrase, for `describe_paths`: closing quotes
+# and brackets, and the punctuation a sentence continues with. A colon is deliberately absent,
+# since `file:line` glues a suffix onto the path.
+_PHRASE_CLOSERS = set(")]}\"'`,;.")
 
 
 @dataclass(frozen=True)
@@ -134,11 +138,6 @@ def allowed_tools(manifest, adapter, backend=None):
     return tuple(tools)
 
 
-# A path token in free text: everything up to the characters `brief.PATH_TAIL_STOP` names as
-# the end of a path, on both sides of the segment.
-_PATH_TOKEN_RE = re.compile(r"[^\s\"'`()\[\]{},;:<>]*\.claude/[^\s\"'`()\[\]{},;:<>]*")
-
-
 def describe_file(path):
     """A cause file as the brief carries it. A path under `.claude/` is described in words,
     since the literal segment is refused under dontAsk whatever the allowlist says (R41) and a
@@ -156,19 +155,37 @@ def describe_file(path):
 
 
 def describe_paths(text):
-    """`describe_file` applied to every such path inside free text (code review: the segment
-    can arrive in a title, a step, or the observed text as easily as in the cause, and the
-    template then tells the process the finding already describes the location in words). A
-    token that merely contains the letters, like `foo.claude/`, is not the path and is left."""
+    """`describe_file` applied to every path the launch scan would find inside free text (code
+    review: the segment can arrive in a title, a step, or the observed text as easily as in the
+    cause, and the template then tells the process the finding already describes the location
+    in words). The spans come from `brief.path_spans`, the scan's own grammar, so a path the
+    scan catches is a path this rewrites (issue #120): the earlier private token pattern missed
+    a path wrapped in markdown emphasis and left a nested config directory half described, and
+    each reached the card and then scanned out every later brief quoting it. One span is
+    rewritten per pass, and the rewrite repeats until the scan finds nothing, since a nested
+    segment's span lies inside its parent's and describing one can uncover the next. A token
+    that merely contains the letters, like `foo.claude/`, is not the path and is left.
 
-    def replace(match):
-        token = match.group(0)
-        stripped = token.rstrip(".")
-        if not contracts.CLAUDE_DIR_PATH_REGEX.search(stripped):
-            return token
-        return describe_file(stripped) + token[len(stripped):]
-
-    return _PATH_TOKEN_RE.sub(replace, str(text if text is not None else ""))
+    The scan does not report the head before a `/.claude/` segment, and the description puts
+    the head last, so the head is pulled in only when the token ends the phrase (whitespace,
+    the end of the text, or closing punctuation follows): `tools/.claude/x` reads "x under the
+    agent config directory in tools", while `a/.claude/b.py:12` keeps its order as "a/b.py under
+    the agent config directory:12" rather than moving the line number into the head (code
+    review)."""
+    text = str(text if text is not None else "")
+    while True:
+        spans = brief.path_spans(text)
+        if not spans:
+            return text
+        start, end = spans[0]
+        terminal = end >= len(text) or text[end].isspace() or text[end] in _PHRASE_CLOSERS
+        if terminal and start > 0 and text[start - 1] == "/":
+            while start > 0 and text[start - 1] not in brief.PATH_TAIL_STOP:
+                start -= 1
+        described = describe_file(text[start:end])
+        if described == text[start:end]:
+            return text        # cannot happen: the span starts at the segment; stay finite
+        text = text[:start] + described + text[end:]
 
 
 def _line(value):
@@ -225,11 +242,13 @@ def _finding_block(number, finding):
     return "\n".join(lines)
 
 
-def values(findings, adapter, labels=(), design_note="", backend=None):
+def values(findings, adapter, labels=(), design_note="", backend=None, issue_type=""):
     """Every placeholder the template uses. `findings` are the validated findings the pass
-    chose to file, in the order it chose, numbered from 1 in that order; `labels` and
-    `design_note` are the sidecar's, handed to the adapter, which renders the tracker's own
-    filing sentence. An empty list is refused rather than briefing a process to file nothing."""
+    chose to file, in the order it chose, numbered from 1 in that order; `labels`,
+    `design_note`, and `issue_type` are the sidecar's, handed to the adapter, which renders the
+    tracker's own filing sentence (an empty `issue_type` is the adapter's documented default,
+    and a tracker without card types ignores it). An empty list is refused rather than briefing
+    a process to file nothing."""
     findings = tuple(findings or ())
     if not findings:
         raise ValueError("a filing pass needs at least one finding")
@@ -246,7 +265,8 @@ def values(findings, adapter, labels=(), design_note="", backend=None):
         "findings": "\n\n".join(blocks),
         "tracker_instructions": adapter.filing_instructions(tuple(labels or ()),
                                                             str(design_note or ""),
-                                                            backend=backend),
+                                                            backend=backend,
+                                                            issue_type=str(issue_type or "")),
         "filed_tag": contracts.FILED_FENCE_TAG,
         "filed_action": ACTION_FILED,
         "commented_action": ACTION_COMMENTED,
@@ -262,12 +282,13 @@ def _template_text():
         raise brief.BriefError("filing brief template could not be read: %s" % exc)
 
 
-def render(findings, adapter, labels=(), design_note="", backend=None):
+def render(findings, adapter, labels=(), design_note="", backend=None, issue_type=""):
     """The brief for one Filing process. Deterministic: the same inputs render byte identical
     text, so a filing rerun after a halt tells its process the same thing."""
     template = string.Template(_template_text())
     try:
-        return template.substitute(values(findings, adapter, labels, design_note, backend))
+        return template.substitute(values(findings, adapter, labels, design_note, backend,
+                                          issue_type))
     except KeyError as exc:
         raise brief.BriefError("filing brief template names an unknown placeholder %s" % exc)
 
@@ -293,7 +314,7 @@ def parse_text(text, count=None):
     if not isinstance(payload, list):
         return Filed(error="the %s block must hold one JSON array" % contracts.FILED_FENCE_TAG)
     entries = []
-    seen_numbers, seen_ids = set(), set()
+    seen_numbers, actions_by_id = set(), {}
     for index, entry in enumerate(payload):
         label = "entry %d" % (index + 1)
         if not isinstance(entry, dict):
@@ -315,11 +336,16 @@ def parse_text(text, count=None):
                 or not str(card_id).strip():
             return Filed(error="%s: id must be a non empty string" % label)
         card_id = str(card_id).strip()
-        # One card per finding cuts both ways (code review): two findings naming one card
-        # would charge the caps twice for one card and claim a card that does not exist.
-        if card_id in seen_ids:
+        # A new card is one finding's (code review): two findings claiming one `filed` card
+        # would charge the caps twice for one card and claim a card that does not exist, and a
+        # `filed` beside a `commented` on the same id claims a new card that was already open.
+        # Two `commented` entries on one card are ordinary (issue #120): two findings on the
+        # same defect each add a comment to the one open card, and refusing the block would
+        # leave a card filed in the same pass unrecorded, uncharged, and unchecked.
+        seen_actions = actions_by_id.setdefault(card_id, set())
+        if seen_actions and (action == ACTION_FILED or ACTION_FILED in seen_actions):
             return Filed(error="%s: card %s appears twice" % (label, card_id))
-        seen_ids.add(card_id)
+        seen_actions.add(action)
         entries.append({"finding": number, "action": action, "id": card_id})
     return Filed(entries=tuple(entries))
 
@@ -372,23 +398,51 @@ def confirm(entries, adapter, known=()):
     return Confirmation(filed=tuple(filed), commented=tuple(commented), notes=tuple(notes))
 
 
+REFUSED_BRIEF_LEAD = "no filing process was launched: "
+
+
+def scan_refusal(hits):
+    """The sentence for a rendered Filing brief the launch scan would refuse (issue #120). The
+    brief is written and never sent: a literal config directory path in it would be copied onto
+    the card, and every later Task brief quoting that card would then scan out at launch, so the
+    card would never be built. It is the `LaunchResult.launch_error`, which the pass prefixes
+    with its own "could not be launched" clause, and the `Filed.error` carries
+    `REFUSED_BRIEF_LEAD` in front of it instead, so neither reading doubles a clause."""
+    paths = sorted({hit["path"] for hit in hits})
+    return ("the rendered filing brief names %s, and a card carrying that path would scan out "
+            "every later brief that quotes it (R41). %s" % (", ".join(paths), brief.MENTION_RULE))
+
+
 def run(manifest, findings, adapter, store, backend, process_id, labels=(), design_note="",
-        timeout_seconds=None, task_model=None, **launch_kwargs):
-    """Render, launch, and read the ending. Returns what happened; it changes no git state and
-    writes nothing to the tracker itself. The caller confirms the ids through `confirm`, runs
-    the markdown scope check, and records the pass.
+        timeout_seconds=None, task_model=None, issue_type="", **launch_kwargs):
+    """Render, scan, launch, and read the ending. Returns what happened; it changes no git state
+    and writes nothing to the tracker itself. The caller confirms the ids through `confirm`,
+    runs the markdown scope check, and records the pass.
 
     `process_id` names the brief and the log under the state directory, the way a task id names
     a Closeout's. `timeout_seconds` defaults to the Manifest's closeout timeout. The process
     runs on the Manifest's closeout model and effort, through the same task record a Closeout
     launches with, so a non claude backend gets `task_model` in place of the claude vocabulary
-    the closeout model is written in (code review, and U14's codex 400 on `sonnet`)."""
+    the closeout model is written in (code review, and U14's codex 400 on `sonnet`).
+
+    The rendered brief goes through the launch scan before anything launches (issue #120). The
+    finding fields are described in words by `describe_paths`, but the adapter's sentence and
+    the sidecar's design note are not, so a hit is still possible; it comes back as a `Filed`
+    error naming the path, with a `LaunchResult` whose `launch_error` says nothing ran."""
     findings = tuple(findings or ())
-    text = render(findings, adapter, labels=labels, design_note=design_note, backend=backend)
+    text = render(findings, adapter, labels=labels, design_note=design_note, backend=backend,
+                  issue_type=issue_type)
     brief_path = store.path("briefs", process_id + ".filing.md")
     with open(brief_path, "w", encoding="utf-8") as handle:
         handle.write(text)
     os.chmod(brief_path, 0o600)
+
+    hits = brief.scan({}, text)
+    if hits:
+        refusal = scan_refusal(hits)
+        return FilingResult(Filed(error=REFUSED_BRIEF_LEAD + refusal), [], {},
+                            launch.LaunchResult(session_id=process_id, launch_error=refusal),
+                            brief_path, state.sha256_of(text))
 
     if timeout_seconds is None:
         timeout_seconds = manifest.timeouts.closeout_minutes * 60

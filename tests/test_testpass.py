@@ -428,6 +428,25 @@ class TourAndFiling(PassCase):
         self.assertEqual(self.entries_taken(), 2)
         self.assert_checkout_clean()
 
+    def test_a_filing_brief_the_scan_refuses_fails_the_pass_with_one_clause_and_no_launch(self):
+        """Issue #120: `filing.run` refuses a rendered brief the launch scan hits and launches
+        nothing. The pass reason is the launch clause plus the refusal once, not the block's
+        error doubled onto it, and the queue's filing entry is never taken."""
+        self.test_process([finding(1)])
+        self.queue_entry(self.transcript(filed_text([]), "filing-2"))
+        hits = [{"source": "brief", "path": ".claude/skills/design/SKILL.md"}]
+        with mock.patch.object(filing.brief, "scan", return_value=hits):
+            outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"],
+                         "the filing process could not be launched: " + filing.scan_refusal(hits))
+        self.assertEqual(outcome.record["reason"].count("filing brief names"), 1)
+        self.assertNotIn("no filing process was launched", outcome.record["reason"])
+        self.assertNotIn("block could not be read", "\n".join(outcome.record["notes"]))
+        self.assertEqual(outcome.record["filed"], [])
+        self.assertEqual(self.entries_taken(), 1)
+        self.assert_checkout_clean()
+
     def test_a_filing_process_that_could_not_launch_fails_the_pass(self):
         """The cause the stub cannot stage on its own, answered by `filing.run` itself: it is
         the pass's reason, and the block's own error is not."""
@@ -442,6 +461,9 @@ class TourAndFiling(PassCase):
         self.assertEqual(outcome.record["reason"], "the filing process could not be launched: "
                                                    "could not start claude: not found")
         self.assertEqual(outcome.record["filed"], [])
+        # Issue #120: a process that never launched left no block to read, so the block's own
+        # error is not a second note beside the launch error.
+        self.assertNotIn("block could not be read", "\n".join(outcome.record["notes"]))
         self.assert_checkout_clean()
 
     def test_a_lost_lease_during_filing_fails_the_pass_with_no_scope_check_and_no_reset(self):

@@ -576,13 +576,15 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         """A Filing process files through `gh`, the way the Closeout closes through it."""
         return CLOSEOUT_TOOLS
 
-    def filing_instructions(self, labels, design_note, backend=None):
+    def filing_instructions(self, labels, design_note, backend=None, issue_type=""):
         """The Filing process's tracker sentence (browser test loop plan, KTD5): search first,
         comment on a match, else create with the loop's labels and add the issue to the
         Manifest's project, so the Feeder's ready read, which lists issues by label, can return
         it (R13). `labels` are the sidecar's `[test_loop] labels`; `design_note` the sidecar's
         note for a design card (R14). Neither is code: both are rendered as text the process
-        follows, and the runner makes no write here."""
+        follows, and the runner makes no write here. `issue_type` is accepted for the shared
+        signature and ignored: `gh issue create` takes no type, and the loop's labels are how
+        a reader tells its cards apart (issue #120)."""
         label_flags = " ".join("--label %s" % _quote(label) for label in labels)
         labelled = ("with every one of these labels, %s, " % ", ".join("`%s`" % label for label in labels)
                     if labels else "")

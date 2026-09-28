@@ -170,6 +170,17 @@ character was added to the class. `contracts.CLAUDE_DIR_SCAN_REGEX` in
 `skills/relay/scripts/relay/contracts.py` is the production form; `tests/test_contracts.py`'s
 `ClaudeDirScanRegex` class pins both the newly-caught forms and the suffix non-match.
 
+**One grammar, two readers, 2026-09-28 (issue #120).** The browser test loop's Filing brief
+rewrites a config directory path in a finding into words, so the path never reaches a card and
+then every later brief quoting that card. That rewrite had its own token pattern, which wanted a
+slash or the token's start before the segment, while the scan's class above accepts `[` and `*`
+as well. A path in markdown emphasis therefore passed the rewrite and tripped the scan, and a
+segment nested under another config directory was half described. `brief.path_spans` is now the
+one token grammar: the scan reads its spans and `filing.describe_paths` rewrites exactly them,
+repeating until the scan finds nothing, and `filing.run` scans the rendered brief before launching
+so a hit from text the rewrite does not see, the adapter's sentence or the sidecar's design note,
+is a refusal and not a launch. Two regexes for one rule drift; one reader with two callers cannot.
+
 The same check belongs on the way out as a backstop, because a plan can be right and an
 implementation can still wander:
 
