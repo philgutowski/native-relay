@@ -265,8 +265,12 @@ def _audit_cards(cfg):
         cfg.store.write_audit(findings)
     except Exception:
         pass
-    _clear_seen_out_of_review(cfg, observed)
-    _retire_confirmed_item_findings(cfg, item_seen)
+    # The audit still reads and reports a deferred task's card; only the two record repairs below
+    # pass it over, since a run with `--defer` leaves that record as it was (R10).
+    _clear_seen_out_of_review(cfg, {task_id: status for task_id, status in observed.items()
+                                    if task_id not in cfg.defer})
+    _retire_confirmed_item_findings(cfg, {task_id: seen for task_id, seen in item_seen.items()
+                                          if task_id not in cfg.defer})
     if cfg.stream is not None:
         for line in audit.lines(findings):
             try:
@@ -1117,10 +1121,15 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
     allowed_paths = tuple(manifest_module.completed_allowed_paths(manifest))
     if policy not in scheduler.POLICIES:
         return RunOutcome(EXIT_CONFIG, message="run policy must be serial or parallel")
+    defer = frozenset(defer)
+    # A deferred task is left out of the schedule, so its card is not read and the plan printed
+    # below does not show it building. The drive still walks every manifest task, reads only the
+    # schedule's edges, and settles a deferred one through `_begin_task`'s early return.
+    scheduled = tuple(task for task in manifest.tasks if task.id not in defer)
     # This is the entire pre-launch repository/card inspection.  It is intentionally read-only;
     # a missing card text becomes an uncertainty edge and the ordinary launch read rechecks it.
     task_text = {}
-    for task in manifest.tasks:
+    for task in scheduled:
         try:
             card = adapter.read(task.id)
         except Exception:
@@ -1132,7 +1141,7 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
             task_text[task.id] = "\n".join(str(part) for part in (
                 card.get("title", ""), card.get("description", ""),
                 *(entry.get("body", "") for entry in comments if isinstance(entry, dict))))
-    schedule = scheduler.build_schedule(manifest.tasks, repo, task_text, policy=policy)
+    schedule = scheduler.build_schedule(scheduled, repo, task_text, policy=policy)
     schedule_base = gitread.rev_parse(repo, default)
     store.write_schedule({
         "policy": schedule.policy,
@@ -1147,7 +1156,7 @@ def dispatch(manifest, adapter=None, store=None, home=None, base_env=None, strea
             stream(line)
     config = _Run(manifest, adapter, store, repo, default, env, base_env, home, stream,
                   retry_blocked, overrides, launch_kwargs, now, allowed_paths, schedule=schedule,
-                  defer=frozenset(defer))
+                  defer=defer)
     outcome = RunOutcome(EXIT_OK, store=store)
     wrote_terminal = False
     try:
@@ -1438,7 +1447,7 @@ def retry_blocked_argv(retry_blocked):
 def defer_argv(defer):
     """The flags that carry `defer` to a child `run`: one `--defer ID` per id, in a stable
     order, and nothing for an empty set. Unlike `--retry-blocked` there is no bare form."""
-    return [part for task_id in sorted(defer or ()) for part in ("--defer", task_id)]
+    return [part for task_id in sorted(defer) for part in ("--defer", task_id)]
 
 
 # One sentence for both refusals, `cmd_run`'s before a detach and `run_triple`'s before the lease.
@@ -1447,8 +1456,8 @@ TRIPLE_DEFER_REFUSAL = ("--defer is unavailable under execution.mode triple, whi
 
 
 class _Undeferred:
-    """The store as the startup re-verify sees it on a run with `--defer`: every record but the
-    deferred ones, and every other call passed straight through. The re-verify runs before any
+    """The store as the startup re-verify sees it on a run with `--defer`: no deferred record is
+    listed or found, and every other call is passed straight through. The re-verify runs before any
     task is begun and restamps each halted record's `verify` and reads its card, so the early
     return in `_begin_task` alone would still leave a deferred halted record rewritten (R10)."""
 
@@ -1458,6 +1467,9 @@ class _Undeferred:
     def records(self):
         return {task_id: record for task_id, record in self._store.records().items()
                 if task_id not in self._defer}
+
+    def get(self, task_id):
+        return None if task_id in self._defer else self._store.get(task_id)
 
     def __getattr__(self, name):
         return getattr(self._store, name)
@@ -1491,14 +1503,15 @@ def _begin_task(cfg, task):
         store.upsert(task.id, status=contracts.STATUS_EXCLUDED, excluded_reason=task.reason,
                      skip_reason=None)
         return
+    if status == contracts.STATUS_LANDED:
+        return
     # KTD6, R10. Before anything is read or written for it: no upsert, no branch, no card read,
     # so the record, the branch, and the card are what they were. Ahead of the blocked check, so
-    # an id also given to `--retry-blocked` is deferred.
+    # an id also given to `--retry-blocked` is deferred. Past the landed check, so a landed task
+    # the run would not have touched anyway is not announced as held.
     if task.id in cfg.defer:
         if stream is not None:
             stream("%s deferred by --defer; left as it was for this run" % task.id)
-        return
-    if status == contracts.STATUS_LANDED:
         return
     branch = gitwrite.task_branch_for(task.id, cfg.manifest.project.branch_prefix)
 

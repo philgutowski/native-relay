@@ -3510,6 +3510,60 @@ class Defer(RunCase):
         self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
         self.assertIsNone(self.store().lease())
 
+    def test_the_run_end_audit_writes_nothing_to_a_deferred_record(self):
+        """The audit clears `card_in_review_by_run` on a record whose card it finds out of review.
+        Deferred, the record keeps the flag: this run leaves it exactly as it was."""
+        self.halt_t2()
+        self.store().upsert("T-2", card_in_review_by_run=True)
+        before = self.raw_record("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        outcome = self.go(defer=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+
+    def go_dispatch(self, **kwargs):
+        kwargs.setdefault("base_env", self.base_env())
+        kwargs.setdefault("home", self.home)
+        kwargs.setdefault("stream", lambda line: None)
+        kwargs.setdefault("launch_kwargs", {"sigkill_grace_seconds": 2, "heartbeat_interval": 0})
+        return runner.dispatch(self.manifest, **kwargs)
+
+    def test_a_dispatch_leaves_a_deferred_halted_record_alone_and_runs_the_rest(self):
+        self.halt_t2()
+        before = self.raw_record("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        read = []
+        adapter = adapters.build(self.manifest, env=self.base_env())
+        real_read = adapter.read
+        adapter.read = lambda task_id: read.append(task_id) or real_read(task_id)
+        said = []
+        outcome = self.go_dispatch(defer=frozenset({"T-2"}), policy="serial", adapter=adapter,
+                                   stream=said.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        self.assertNotIn("T-2", read, "dispatch read the deferred task's card")
+        self.assertNotIn("T-2", self.store().read()["schedule"]["task_ids"])
+        self.assertIn("T-2 deferred by --defer; left as it was for this run", said)
+
+    def test_a_parallel_dispatch_with_every_task_deferred_completes(self):
+        outcome = self.go_dispatch(defer=frozenset({"T-1", "T-2", "T-3"}), policy="parallel")
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().records(), {})
+        self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
+
+    def test_a_landed_task_named_in_defer_is_not_announced(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.go(defer=frozenset({"T-2", "T-3"}))
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        said = []
+        self.go(defer=frozenset({"T-1", "T-2", "T-3"}), stream=said.append)
+        self.assertFalse(any(line.startswith("T-1 deferred") for line in said), said)
+        self.assertIn("T-2 deferred by --defer; left as it was for this run", said)
+
     def test_defer_argv_names_each_id_and_is_empty_for_none(self):
         self.assertEqual(runner.defer_argv(frozenset({"T-3", "T-1"})),
                          ["--defer", "T-1", "--defer", "T-3"])

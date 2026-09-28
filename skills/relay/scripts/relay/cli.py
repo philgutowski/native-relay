@@ -328,17 +328,14 @@ def cmd_run(args, env, out):
         out.write("refusing to run an invalid manifest; fix it and run validate again\n")
         return EXIT_CONFIG
     retry_blocked = retry_blocked_value(args.retry_blocked)
-    if isinstance(retry_blocked, frozenset):
-        # A mistyped id would retry nothing and say nothing, which is the one outcome the
-        # operator asked for this flag to avoid.
-        unknown = sorted(retry_blocked - {task.id for task in manifest.tasks})
-        if unknown:
-            out.write("--retry-blocked names %s, not a task in this manifest\n"
-                      % ", ".join(unknown))
-            return EXIT_CONFIG
-    defer, failure = _defer_value(args, manifest, out)
-    if failure:
-        return failure
+    # A mistyped id would retry nothing and say nothing, which is the one outcome the operator
+    # asked for this flag to avoid.
+    if isinstance(retry_blocked, frozenset) and _unlisted("--retry-blocked", retry_blocked,
+                                                          manifest, out):
+        return EXIT_CONFIG
+    defer = frozenset(args.defer)
+    if _unlisted("--defer", defer, manifest, out):
+        return EXIT_CONFIG
     if defer and manifest.execution.mode == "triple":
         # Refused here as well as in `run_triple`, so a detached run is refused in the
         # operator's shell rather than in a log nobody is reading.
@@ -350,7 +347,7 @@ def cmd_run(args, env, out):
     if getattr(args, "detach", False) or getattr(args, "follow", False):
         # `--follow` implies `--detach`: a foreground run is already in the foreground, so there
         # would be nothing to follow.
-        return _detach(args, manifest, env, out)
+        return _detach(args, manifest, env, out, defer=defer)
     run_kwargs = {
         "adapter": adapter,
         "home": env.get("HOME"),
@@ -372,15 +369,14 @@ def cmd_run(args, env, out):
     return outcome.exit_code
 
 
-def _defer_value(args, manifest, out):
-    """`--defer` as the runner takes it, a frozenset, or the config exit for an id the manifest
-    does not list: a mistyped id would defer nothing and launch the task it was meant to hold."""
-    defer = frozenset(getattr(args, "defer", None) or ())
-    unknown = sorted(defer - {task.id for task in manifest.tasks})
+def _unlisted(flag, ids, manifest, out):
+    """Whether `ids` names a task the manifest does not list, saying which when it does. The
+    caller refuses with the config exit before the lease. A mistyped `--defer` id would defer
+    nothing and launch the very task it was meant to hold."""
+    unknown = sorted(ids - {task.id for task in manifest.tasks})
     if unknown:
-        out.write("--defer names %s, not a task in this manifest\n" % ", ".join(unknown))
-        return None, EXIT_CONFIG
-    return defer, None
+        out.write("%s names %s, not a task in this manifest\n" % (flag, ", ".join(unknown)))
+    return bool(unknown)
 
 
 def _wait_seconds(args):
@@ -420,7 +416,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     return command
 
 
-def _detach(args, manifest, env, out, verb="run"):
+def _detach(args, manifest, env, out, verb="run", defer=frozenset()):
     """Start the same `run` in its own session and return, or follow it when asked. `setsid` does
     not exist on macOS, so the /relay skill had to improvise a wrapper on the first Cratekit run;
     `start_new_session` is the portable form. `caffeinate -i` keeps a Mac awake for the run when
@@ -432,8 +428,7 @@ def _detach(args, manifest, env, out, verb="run"):
                              retry_blocked_value(args.retry_blocked),
                              notify_on=getattr(args, "notify", False),
                              wait_minutes=getattr(args, "wait_for_lease", None),
-                             verb=verb, policy=getattr(args, "policy", None),
-                             defer=frozenset(getattr(args, "defer", None) or ()))
+                             verb=verb, policy=getattr(args, "policy", None), defer=defer)
     if shutil.which("caffeinate"):
         command = ["caffeinate", "-i"] + command
     following = getattr(args, "follow", False)
@@ -820,9 +815,9 @@ def cmd_dispatch(args, env, out):
     manifest, failure = _load_dispatch_target(args.target, env, out)
     if failure:
         return failure
-    defer, failure = _defer_value(args, manifest, out)
-    if failure:
-        return failure
+    defer = frozenset(args.defer)
+    if _unlisted("--defer", defer, manifest, out):
+        return EXIT_CONFIG
     adapter, failure = _adapter_for(manifest, env, out)
     if failure:
         return failure
@@ -833,7 +828,7 @@ def cmd_dispatch(args, env, out):
     args.policy = policy
     if getattr(args, "detach", False) or getattr(args, "follow", False):
         args.manifest = args.target
-        return _detach(args, manifest, env, out, verb="dispatch")
+        return _detach(args, manifest, env, out, verb="dispatch", defer=defer)
     outcome = run_module.dispatch(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
                                   retry_blocked=args.retry_blocked,
                                   policy=policy, defer=defer,
