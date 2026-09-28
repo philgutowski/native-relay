@@ -104,7 +104,7 @@ from datetime import datetime, timedelta
 
 from . import (adapters, brief, contracts, gitread, limits, manifest as manifest_module,
                manifestedit, run as run_module, state as state_module,
-               summary as summary_module, testloop)
+               summary as summary_module, testbrief, testloop)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -151,6 +151,10 @@ EVENT_LIMIT = "limit"
 LIMIT_MARK = "mark"
 LIMIT_MOVE = "move"
 LIMIT_HOLD = "hold"
+# The browser test loop's two words (browser test loop plan, U6, KTD10). One `test_pass` per
+# pass the feeder started, whatever its status, and one `test_loop_stopped` when the loop ends.
+EVENT_TEST_PASS = "test_pass"
+EVENT_TEST_LOOP_STOPPED = "test_loop_stopped"
 # Written by `feed --follow`, never by a feeder: the follower's own line for a feeder it found
 # gone without a `leaving` event, killed or never started.
 EVENT_NOT_RUNNING = "not_running"
@@ -207,6 +211,16 @@ class CycleContext:
     deferred: frozenset = frozenset()
     retries: frozenset = frozenset()
     terminal: object = None
+
+
+@dataclass(frozen=True)
+class PassDone:
+    """What one browser test pass left the feeder: `new` the cards it confirmed filed and
+    recorded, `ready` those of them the ready source returns, for the drain tour's choice
+    between going round and leaving, and `status` the pass record's own word."""
+    new: tuple = ()
+    ready: tuple = ()
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -682,6 +696,10 @@ class Deps:
     # subprocess.TimeoutExpired past it; `start_hook` returns at once with the process started.
     run_hook: object = None
     start_hook: object = None
+    # One browser test pass (browser test loop plan, U6, KTD2): (manifest_path, kind, cards,
+    # stopped_areas, plan_areas, budget, model) -> the pass record as a dict, always one, with
+    # `exit_code` beside the record's own keys. None on a Feeder whose loop is off.
+    run_test_pass: object = None
 
 
 def _state_store(manifest, env):
@@ -896,16 +914,21 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
     """The real effects. `child_stdout` is where each run's output goes; None inherits the
     feeder's own, which under `--detach` is the output file beside the manifest."""
 
-    def run_cycle(manifest_path, retry_ids=(), defer_ids=()):
-        # A frozenset, so the ids stay named: never the bare flag, which retries every one.
-        command = ([sys.executable, "-u", runner_entry(), "run", manifest_path]
-                   + run_module.retry_blocked_argv(frozenset(retry_ids))
-                   + run_module.defer_argv(frozenset(defer_ids)))
-        if notify_on:
-            command.append("--notify")
+    def runner_command(verb, manifest_path, argv):
+        """The runner's own entry, with `verb` and its arguments, as every launch here makes it:
+        a `run` and a browser test pass alike."""
+        command = [sys.executable, "-u", runner_entry(), verb, manifest_path] + list(argv)
         if config.caffeinate and shutil.which("caffeinate", path=env.get("PATH")):
             # Keeps a Mac awake for the length of the run. Absent off macOS, and then skipped.
             command = ["caffeinate", "-i"] + command
+        return command
+
+    def run_cycle(manifest_path, retry_ids=(), defer_ids=()):
+        # A frozenset, so the ids stay named: never the bare flag, which retries every one.
+        command = runner_command("run", manifest_path,
+                                 run_module.retry_blocked_argv(frozenset(retry_ids))
+                                 + run_module.defer_argv(frozenset(defer_ids))
+                                 + (["--notify"] if notify_on else []))
         return subprocess.run(command, env=env, stdin=subprocess.DEVNULL, check=False,
                               stdout=child_stdout,
                               stderr=subprocess.STDOUT if child_stdout else None).returncode
@@ -999,11 +1022,78 @@ def build_deps(config, env, notifier=None, notify_on=False, sleep=None, child_st
                                     stdin=subprocess.DEVNULL, stdout=output,
                                     stderr=subprocess.STDOUT, start_new_session=True)
 
+    def run_test_pass(manifest_path, kind, cards=(), stopped_areas=(), plan_areas=(),
+                      budget=None, model=None):
+        # The `test` verb, launched the way `run_cycle` launches `run` (KTD2), so the processes
+        # a pass starts never share the feeder's own process or signal handling. Its output is
+        # passed on line by line to where a run's output goes, as it comes, and its last line,
+        # the record's path, is kept.
+        command = runner_command("test", manifest_path,
+                                 pass_argv(kind, cards, stopped_areas, plan_areas, budget, model))
+        last = ""
+        with subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+            for raw in proc.stdout:
+                try:
+                    if child_stdout is not None:
+                        os.write(child_stdout.fileno(), raw)
+                    else:
+                        sys.stdout.write(raw.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+                except (OSError, ValueError, AttributeError):
+                    pass
+                line = raw.decode("utf-8", errors="replace").strip()
+                if line:
+                    last = line
+        return read_pass_output(proc.returncode, last)
+
     return Deps(sleep=sleep or time.sleep, now=datetime.now, run_cycle=run_cycle,
                 read_summary=read_summary, lease_held=lease_held,
                 build_adapter=lambda manifest: adapters.build(manifest, env=env),
                 run_command=run_command, notifier=notifier, run_hook=run_hook,
-                start_hook=start_hook)
+                start_hook=start_hook, run_test_pass=run_test_pass)
+
+
+def pass_argv(kind, cards=(), stopped_areas=(), plan_areas=(), budget=None, model=None):
+    """The `test` verb's arguments after the manifest for one pass. `--cards` comes last,
+    because it takes every argument after it."""
+    argv = []
+    for name in stopped_areas:
+        argv += ["--stopped-area", str(name)]
+    for name in plan_areas:
+        argv += ["--plan-area", str(name)]
+    if budget is not None:
+        argv += ["--budget", str(budget)]
+    if model:
+        argv += ["--model", str(model)]
+    if kind == testloop.CHECK:
+        argv += ["--cards"] + [str(card) for card in cards]
+    else:
+        argv.append("--tour")
+    return argv
+
+
+def read_pass_output(code, output):
+    """The pass record the `test` verb left, from its exit code and its output, as a dict with
+    `exit_code` and `record_path` beside the record's own keys. There is always one: a verb that
+    wrote none, refused on configuration or on a held Lease, or one whose record cannot be read,
+    reads as a pass that did not run or failed, with its last line of output as the reason, so
+    the loop records it like any other and never mistakes it for a pass that ran. The verb's
+    exit codes are every verb's: 0 ran, 1 refused, 2 not run or failed, 3 a Lease held."""
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    last = lines[-1] if lines else ""
+    if code in (EXIT_OK, EXIT_HALTED) and last.endswith(".json"):
+        try:
+            with open(last, encoding="utf-8") as handle:
+                record = json.load(handle)
+        except (OSError, ValueError) as exc:
+            return {"status": testloop.FAILED, "exit_code": code, "record_path": last,
+                    "reason": "the pass record %s could not be read: %s" % (last, exc)}
+        if isinstance(record, dict):
+            return dict(record, exit_code=code, record_path=last)
+    status = testloop.NOT_RUN if code == EXIT_LEASE else testloop.FAILED
+    return {"status": status, "exit_code": code, "record_path": None,
+            "reason": "relay test exited %s: %s" % (code, last or "no output")}
 
 
 def new_state():
@@ -1016,6 +1106,41 @@ def new_state():
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
             "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}, "hold": None,
             "last_held": {}}
+
+
+def new_loop_state(now):
+    """The state file's `test_loop` key (browser test loop plan, KTD10). `rounds` counts the
+    tours that ran; `passes` one summary per pass; `filed` {card id: generation, area, design,
+    cause file} for each card the loop confirmed filed; `checks` {landed card id: the areas its
+    check filed in}, which `testloop.area_patches` reads; `patches` its counts; `stopped_areas`
+    the areas at the patch cap and `planned_areas` those a planning card was asked for;
+    `unchecked` the landed cards whose check has not run yet; `stop` None, or the record of why
+    the loop ended."""
+    return {"started_at": now.isoformat(timespec="seconds"), "rounds": 0, "passes": [],
+            "filed": {}, "checks": {}, "patches": {}, "stopped_areas": [], "planned_areas": [],
+            "unchecked": [], "stop": None}
+
+
+def loop_stop_sentence(reason, loop, settings):
+    """The sentence for a `testloop` stop word, for the log, the notice, and the stop record."""
+    if reason == testloop.STOP_CLEAN:
+        return "a full tour found nothing above low"
+    if reason == testloop.STOP_OPEN_FINDINGS:
+        return ("a full tour's high and medium findings produced no new card: each went to an "
+                "open card, a stopped area, or was never confirmed")
+    if reason == testloop.STOP_ROUNDS:
+        return "%d tours ran, the max_rounds cap of %d" % (loop.get("rounds", 0),
+                                                         settings.max_rounds)
+    if reason == testloop.STOP_CLOCK:
+        return "the loop started at %s and max_hours is %d" % (loop.get("started_at"),
+                                                               settings.max_hours)
+    if reason == testloop.STOP_BUDGET:
+        return "%d cards filed, the max_cards_total cap of %d" % (len(loop.get("filed") or {}),
+                                                                  settings.max_cards_total)
+    if reason == testloop.STOP_REPORT_ONLY:
+        return ("report only mode runs one full tour, and its findings are in the findings "
+                "file beside the manifest")
+    return reason
 
 
 def _torn_line(path):
@@ -1265,6 +1390,10 @@ class Feeder:
             self.log("a runner holds the lease on this manifest, not appending, waiting")
             return self.wait(config.lease_wait_seconds, "lease_held")
         if not self.dry_run:
+            if self.loop_on():
+                # Before the pre cycle hook, so a board whose ready labels it derives derives
+                # them for what the tour filed too (KTD9).
+                self.start_tour(manifest)
             self.pre_cycle(manifest)
 
         text = self._read(self.paths.manifest)
@@ -1367,7 +1496,7 @@ class Feeder:
                     scan_refused.append(card_id)
                 elif card_id not in held:
                     fresh_ids.append(card_id)
-            return self.idle(readable, fresh_ids, scan_refused)
+            return self.idle(manifest, readable, fresh_ids, scan_refused)
 
         self.state["cycles"] += 1
         self.state.get("process", {})["cycle"] = self.state["cycles"]
@@ -1400,7 +1529,7 @@ class Feeder:
             status: sorted((task["id"] for task in by_status.get(status, ())), key=natural_key)
             for status in (STATUS_LANDED, STATUS_HALTED, STATUS_BLOCKED, STATUS_SKIPPED)})
 
-    def idle(self, readable, fresh_ids, scan_refused=()):
+    def idle(self, manifest, readable, fresh_ids, scan_refused=()):
         """Nothing was appended and no listed task is left to run, while no runner holds the
         lease. Four things look like that and only one is a true empty queue.
 
@@ -1423,7 +1552,9 @@ class Feeder:
 
         What is left is a true empty queue. By default the feeder leaves at once rather than
         keep a process alive to poll an empty board. `idle_waits_max` above zero waits that many
-        times first, for a board where a person releases cards through the day."""
+        times first, for a board where a person releases cards through the day. With the browser
+        test loop on, a full tour runs before that leave, and when it filed a card the ready
+        source returns, the feeder goes round to build it instead (KTD9)."""
         config = self.config
         if not readable:
             if self.strike("unreadable_waits", UNREADABLE_WAITS_MAX):
@@ -1446,6 +1577,10 @@ class Feeder:
                                           "is left to run, and no runner holds the lease. Reword "
                                           "the named cards to release them."
                                           % ", ".join(scan_refused), "empty_queue_scanned")
+            if self.drain_tour(manifest):
+                self.state["idle_waits"] = 0
+                self.save_state()
+                return EXIT_OK if self.once else None
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
                                       "on the board is blocked, denied or attended, or there "
@@ -1487,6 +1622,14 @@ class Feeder:
         outcome = self.apply_rules(data, after, mine, by_status, start,
                                    self.passed_over(data, start))
         held = self.post_cycle(manifest, code, by_status, merge)
+        if self.loop_on():
+            # After the hook (KTD9), and never on a default branch a held hook or a stopping
+            # rule has put in question; then the landed cards wait for the next check. A
+            # detached hook is only started here, so it runs beside the check as it runs beside
+            # the next Cycle, which is what detached means.
+            self.check_landed(manifest, [task["id"] for task in by_status[STATUS_LANDED]],
+                              run=not held and not (isinstance(outcome, int)
+                                                    and outcome != EXIT_OK))
         if isinstance(outcome, Pending):
             return self.hold(held) if held else self.wait(outcome.seconds, outcome.reason)
         if held:
@@ -1758,6 +1901,287 @@ class Feeder:
                 card["id"], model, active[model].until.isoformat(timespec="seconds"), target))
             model = target
         return model, notes
+
+    # The browser test loop (browser test loop plan, U6, KTD9, KTD10). Every decision is asked
+    # of `testloop`; this only gathers the facts, starts the pass, and records the answer.
+    def loop_on(self):
+        return self.config.test_loop.enabled and not self.dry_run
+
+    def loop_state(self):
+        """The `test_loop` key of the state file, made at the first pass point of a loop that is
+        on. A Feeder whose loop is off never calls this, so its state is today's (AE8)."""
+        fresh = new_loop_state(self.deps.now())
+        loop = self.state.get("test_loop")
+        if not isinstance(loop, dict):
+            loop = self.state["test_loop"] = fresh
+        for key, value in fresh.items():
+            loop.setdefault(key, value)
+        return loop
+
+    def loop_stopped(self):
+        loop = self.state.get("test_loop")
+        return isinstance(loop, dict) and bool(loop.get("stop"))
+
+    @staticmethod
+    def loop_started_at(loop):
+        """The loop's start, or the earliest time there is when it cannot be read, so a damaged
+        state file ends the loop on its clock rather than restarting the clock (R16)."""
+        try:
+            return datetime.fromisoformat(loop["started_at"])
+        except (KeyError, TypeError, ValueError):
+            return datetime.min
+
+    def loop_model(self):
+        """The model a pass runs on: the loop's own, moved along its `[models] fallback` chain
+        while it is marked, or None when every model on the chain is held (step 8)."""
+        model = self.config.test_model
+        table, now = self.config.model_fallback, self.deps.now()
+        active = limits.active_marks(self.exhausted_models(), now)
+        if limits.is_held(model, active, table, now):
+            return None
+        if model in active:
+            target = limits.resolve_fallback(model, table, set(active))
+            self.log("the test pass model %s is marked until %s, running the pass on %s"
+                     % (model, active[model].until.isoformat(timespec="seconds"), target))
+            return target
+        return model
+
+    def start_tour(self, manifest):
+        """At the first Cycle of a loop with no tour that ran, a full tour before the ready
+        read (R5). A tour that did not run counts for nothing, so the next Cycle tries again."""
+        if self.loop_stopped() or self.loop_state()["rounds"]:
+            return
+        self.test_pass(manifest, testloop.TOUR)
+
+    def check_landed(self, manifest, landed, run=True):
+        """After a Cycle that landed cards, a check of the ones `testloop` selects (R4, R18),
+        with the cards landed earlier whose check never ran. A check that was not started, by
+        `run` false or by a held model, or that was not run, leaves its cards in `unchecked` for
+        the next check (code review), so a landing is never dropped unchecked for a reason that
+        was the app's or the account's. A check that failed does not carry its cards: a card
+        the pass refuses to read would otherwise fail every check after it."""
+        loop = self.state.get("test_loop")
+        if self.loop_stopped() or not (landed or (isinstance(loop, dict)
+                                                  and loop.get("unchecked"))):
+            return
+        loop = self.loop_state()
+        waiting = [str(card) for card in loop["unchecked"]]
+        waiting += [str(card) for card in landed if str(card) not in waiting]
+        cards = testloop.cards_to_check(waiting, loop["filed"])
+        if not cards:
+            loop["unchecked"] = []
+            self.log("this cycle landed only last generation cards %s, so no check runs"
+                     % _ids(waiting))
+            return
+        done = self.test_pass(manifest, testloop.CHECK, cards) if run else None
+        loop = self.loop_state()
+        if done is not None and done.status != testloop.NOT_RUN:
+            loop["unchecked"] = []
+        elif not loop.get("stop"):
+            loop["unchecked"] = list(cards)
+            self.log("the check of %s did not run and waits for the next check" % _ids(cards))
+        self.save_state()
+
+    def drain_tour(self, manifest):
+        """In `idle`, before leaving on a true empty queue, a full tour (R5). True when it
+        confirmed a filed card the ready source returns, so the feeder goes round to build it
+        rather than leave; a filed card the ready source does not return was notified by
+        `record_pass`, and touring again would only file past it."""
+        if not self.loop_on() or self.loop_stopped():
+            return False
+        passes = self.loop_state()["passes"]
+        if (passes and passes[-1].get("kind") == testloop.TOUR
+                and passes[-1].get("cycle") == self.state["cycles"]):
+            # No run since that tour, so nothing new has landed for a second one to find: a
+            # start tour that did not run, or filed only what the ready source lacks, is not
+            # repeated at the same commit before leaving (code review).
+            self.log("a tour already ran since the last run, so none runs before leaving")
+            return False
+        done = self.test_pass(manifest, testloop.TOUR)
+        if done is None or not done.ready:
+            return False
+        self.log("the drain tour filed %s, going round to build them instead of leaving"
+                 % _ids(done.ready))
+        return True
+
+    def test_pass(self, manifest, kind, cards=()):
+        """One pass of `kind`, through `Deps.run_test_pass`, recorded by `record_pass`. Returns
+        its `PassDone`, or None when no pass started: the loop is stopped, the clock or the card
+        budget stops it now, or every model on the loop model's chain is held."""
+        loop, settings = self.loop_state(), self.config.test_loop
+        if loop.get("stop"):
+            return None
+        # Only the clock and the card budget stop a pass that did not run, so asking about one
+        # here is asking whether either has run out before this pass starts.
+        reason = testloop.should_stop(testloop.PassResult(kind=kind, status=testloop.NOT_RUN),
+                                      loop["rounds"], self.loop_started_at(loop),
+                                      self.deps.now(), len(loop["filed"]),
+                                      report_only=settings.report_only, settings=settings)
+        if reason:
+            self.stop_loop(reason)
+            return None
+        model = self.loop_model()
+        if model is None:
+            self.log("the %s test pass waits for the next pass point: %s is held, with no free "
+                     "model along its fallback chain" % (kind, self.config.test_model))
+            return None
+        stopped = tuple(loop["stopped_areas"])
+        headings = self.tour_headings(manifest)
+        if headings is not None and any(area not in headings for area in stopped):
+            # `relay test` refuses an area that is not a heading, so a renamed heading would
+            # fail every pass after it (code review). The area is tested again under its name.
+            gone = [area for area in stopped if area not in headings]
+            self.report_once("test_area_gone", "the stopped areas %s are no longer headings of "
+                             "the tour document, so the loop tests them again"
+                             % ", ".join(gone))
+            stopped = tuple(area for area in stopped if area in headings)
+        plan = tuple(area for area in stopped if area not in loop["planned_areas"])
+        budget = max(0, settings.max_cards_total - len(loop["filed"]))
+        self.log("starting a %s test pass on %s%s, stopped areas %s, planning %s, budget %d"
+                 % (kind, model, " of %s" % _ids(cards) if cards else "", _ids(stopped),
+                    _ids(plan), budget))
+        record = self.deps.run_test_pass(self.paths.manifest, kind, cards=tuple(cards),
+                                         stopped_areas=stopped, plan_areas=plan, budget=budget,
+                                         model=model)
+        return self.record_pass(manifest, kind, tuple(str(card) for card in cards), plan,
+                                record if isinstance(record, dict) else {})
+
+    def record_pass(self, manifest, kind, sent, plan, record):
+        """Record one pass under `test_loop` and ask `testloop.should_stop` (KTD10): each new
+        confirmed card with its generation, area, design flag, and cause file; the areas each
+        checked card's check filed in, and from them the patch counts and the areas newly at
+        the cap (R19); the round, for a tour that ran; one `test_pass` event. A pass that did not
+        run or failed is notified once per reason and counts as no round."""
+        loop, settings, now = self.loop_state(), self.config.test_loop, self.deps.now()
+        status = record.get("status")
+        reason = str(record.get("reason") or "")
+        if status not in (testloop.RAN, testloop.NOT_RUN, testloop.FAILED):
+            reason = "the pass record carries no status the loop knows: %r" % (status,)
+            status = testloop.FAILED
+        new, attended = [], set()
+        for entry in record.get("filed") or ():
+            if not isinstance(entry, dict) or entry.get("id") in (None, ""):
+                continue
+            card_id = str(entry["id"])
+            if card_id in loop["filed"]:
+                continue
+            parent = entry.get("card")
+            loop["filed"][card_id] = {
+                "generation": testloop.generation_for(kind, parent, sent, loop["filed"]),
+                "area": entry.get("area"), "design": entry.get("design") is True,
+                "cause_file": entry.get("cause_file"), "attended": entry.get("attended") is True,
+                "kind": kind, "pass": record.get("pass")}
+            new.append(card_id)
+            if entry.get("attended") is True:
+                attended.add(card_id)
+            if kind == testloop.CHECK and parent is not None and str(parent) in sent:
+                areas = loop["checks"].setdefault(str(parent), [])
+                if entry.get("area") not in areas:
+                    areas.append(entry.get("area"))
+        commented = [str(entry.get("id")) for entry in record.get("commented") or ()
+                     if isinstance(entry, dict) and entry.get("id") is not None]
+        if kind == testloop.TOUR and status == testloop.RAN:
+            loop["rounds"] += 1
+        if status == testloop.RAN:
+            loop["planned_areas"] += [area for area in plan if area not in loop["planned_areas"]]
+        patches = testloop.area_patches(loop["filed"], loop["checks"],
+                                        settings.max_patches_per_area)
+        loop["patches"] = dict(patches.counts)
+        for area in patches.reached:
+            if area in loop["stopped_areas"]:
+                continue
+            loop["stopped_areas"].append(area)
+            self.report_once("test_area:" + area, "the %s area took %d patches and still fails: "
+                             "the loop stops testing it and files one attended planning card "
+                             "for it at the next pass" % (area, patches.counts[area]))
+        loop["passes"].append({
+            "pass": record.get("pass"), "kind": kind, "status": status, "reason": reason,
+            "at": now.isoformat(timespec="seconds"), "cycle": self.state["cycles"], "cards": list(sent), "filed": new,
+            "commented": commented, "planned": list(plan) if status == testloop.RAN else [],
+            "record_path": record.get("record_path")})
+        self.log("test pass %s, a %s, %s%s: filed %s, commented %s" % (
+            record.get("pass"), kind, status, ": " + reason if reason else "", _ids(new),
+            _ids(commented)))
+        # One notice per kind and status until a pass of that kind runs (step 7): a reason
+        # often carries a changing line, so keying by the sentence would notify every pass and
+        # grow the state file (code review). The log has every one.
+        if status == testloop.RAN:
+            for word in (testloop.NOT_RUN, testloop.FAILED):
+                self.state["reported"].pop("test_pass:%s:%s" % (kind, word), None)
+        else:
+            message = "the %s test pass %s: %s" % (
+                kind, "was not run" if status == testloop.NOT_RUN else "failed",
+                reason or "no reason recorded")
+            key = "test_pass:%s:%s" % (kind, status)
+            if key not in self.state["reported"]:
+                self.state["reported"][key] = message
+                self.notify(message)
+        self.emit(EVENT_TEST_PASS, kind=kind, status=status, reason=reason,
+                  pass_number=record.get("pass"), cards=list(sent), filed=new,
+                  commented=commented, planned=list(plan) if status == testloop.RAN else [],
+                  record_path=record.get("record_path"),
+                  transcripts=record.get("transcripts") or {})
+        ready = self.ready_filed([card_id for card_id in new if card_id not in attended],
+                                 manifest)
+        result = testloop.PassResult(
+            kind=kind, status=status, new_cards=len(new),
+            findings=tuple(finding for finding in record.get("findings") or ()
+                           if isinstance(finding, dict)))
+        stop = testloop.should_stop(result, loop["rounds"], self.loop_started_at(loop), now,
+                                    len(loop["filed"]), report_only=settings.report_only,
+                                    settings=settings)
+        if stop:
+            self.stop_loop(stop, record)
+        self.save_state()
+        return PassDone(new=tuple(new), ready=tuple(ready), status=status)
+
+    def tour_headings(self, manifest):
+        """The tour document's headings as the checkout holds it, or None when it cannot be
+        read, which the pass itself then refuses with its own sentence."""
+        path = os.path.join(manifest.project.repo, self.config.test_loop.tour)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return testbrief.headings(handle.read())
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def ready_filed(self, filed, manifest):
+        """The cards in `filed` the ready source returns. Each one it does not return is
+        notified once, naming them (step 10): a configuration problem for the operator, not a
+        reason for another tour. An attended planning card is left out by the caller, since it
+        is a person's and a ready source is right not to return it. A source that cannot be read
+        is no evidence, and every card is taken as ready for the next Cycle's own read."""
+        if not filed:
+            return []
+        cards, readable = self.ready_cards(manifest)
+        if not readable:
+            return list(filed)
+        offered = {str(card["id"]) for card in cards}
+        missing = [card_id for card_id in filed if card_id not in offered]
+        if missing:
+            self.report_once("test_unready", "the test loop filed %s and the tracker confirmed "
+                             "them, but the ready source does not return them, so the feeder "
+                             "will not build them; check that the ready source admits a card "
+                             "carrying the loop's labels" % ", ".join(missing))
+        return [card_id for card_id in filed if card_id in offered]
+
+    def stop_loop(self, reason, record=None):
+        """End the loop for `reason`, a `testloop` stop word: the stop record, one
+        `test_loop_stopped` event, and one notice (R20). The feeder goes on building the cards
+        already filed under its ordinary rules, and starts no further pass."""
+        loop = self.loop_state()
+        sentence = loop_stop_sentence(reason, loop, self.config.test_loop)
+        loop["stop"] = {"reason": reason, "message": sentence,
+                        "at": self.deps.now().isoformat(timespec="seconds"),
+                        "pass": (record or {}).get("pass")}
+        message = ("the browser test loop stopped, %s: %s. The feeder goes on building the cards "
+                   "already filed" % (reason, sentence))
+        self.log(message)
+        self.notify(message)
+        self.emit(EVENT_TEST_LOOP_STOPPED, reason=reason, message=sentence,
+                  pass_number=(record or {}).get("pass"), rounds=loop["rounds"],
+                  cards_filed=len(loop["filed"]))
+        self.save_state()
 
     # Blocked tasks and their retries (issue #39).
     def report_blocked(self, task):
