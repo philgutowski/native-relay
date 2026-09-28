@@ -650,7 +650,10 @@ and an operator runs the same verb by hand. A pass takes both Leases, runs the s
 launches a Test process, decides in code what to file, launches a Filing process with exactly
 that, and leaves a pass record beside the Manifest. Its outcome is the record's own `status`,
 `ran`, `not_run`, or `failed`, never a Halt class: a pass is not a Task and writes no Task record,
-so the closed set is untouched.
+so the closed set is untouched. The entries of a Test process's report are called findings in
+the report's own contract, and they are not the Finding defined above: that is the Runner's
+observation on a Task record, while a report finding is a defect or an improvement in the app
+under test, which may become a card.
 
 The code between the two processes is the point. The per pass cap, the loop's card budget, the
 rule that low findings go to a lows file and never to the Tracker, report only mode, the stopped

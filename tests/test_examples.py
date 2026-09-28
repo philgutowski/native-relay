@@ -5,6 +5,7 @@ can run `relay validate` on one without editing Relay (R38). And nothing in what
 real project, tracker site, or person (R40).
 """
 import ast
+import contextlib
 import dataclasses
 import glob
 import json
@@ -172,6 +173,19 @@ def read(path):
         return handle.read()
 
 
+@contextlib.contextmanager
+def tempfile_path(content=None):
+    """A path in a fresh temporary directory, holding `content` when it is given."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "state.json")
+        if content is not None:
+            with open(path, "w") as handle:
+                handle.write(content)
+        yield path
+
+
 def toml_value(value):
     """A `TestLoop` default as the documentation's TOML block spells it."""
     if isinstance(value, bool):
@@ -204,6 +218,55 @@ class BrowserTestLoopExample(unittest.TestCase):
             self.assertIn(label, loop.labels)
         self.assertIn("attended", config.denied_labels)
         self.assertIn(loop.design_model, config.allowed_models)
+
+    def test_relay_test_accepts_the_example_sidecar_beside_the_github_example(self):
+        """The pass's own refusal is the authority on what a loop sidecar needs, so a rule it
+        gains reaches the shipped example here rather than at an operator's first pass."""
+        import tempfile
+
+        from relay import testpass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _repo.make_repo(tmp)
+            with open(os.path.join(EXAMPLES, "manifest-github-projects.toml")) as handle:
+                text = handle.read()
+            text = re.sub(r'^repo = ".*"$', 'repo = "%s"' % repo, text, count=1, flags=re.M)
+            path = os.path.join(tmp, "example.toml")
+            with open(path, "w") as handle:
+                handle.write(text)
+            manifest = mf.load(path)
+            config = feeder.load_config(os.path.join(LOOP_EXAMPLE, "example.feeder.toml"))
+            for request in (testpass.Request(kind=testloop.TOUR),
+                            testpass.Request(kind=testloop.TOUR, report_only=True)):
+                self.assertIsNone(testpass.refusal(manifest, config, request))
+
+    def test_the_driver_parses_its_steps_and_keeps_goto_on_the_app(self):
+        import argparse
+        import types
+
+        # Compiled from its source rather than imported, so no bytecode cache is written into
+        # the shipped example folder.
+        path = os.path.join(LOOP_EXAMPLE, "drive.py")
+        drive = types.ModuleType("example_drive")
+        drive.__file__ = path
+        exec(compile(read(path), path, "exec"), drive.__dict__)
+        # An attribute selector keeps its `=`: the fill separator is `=>`.
+        self.assertEqual(drive.parse_step("fill:input[name=q]=>lamp"),
+                         ("fill", "input[name=q]=>lamp"))
+        self.assertEqual(drive.parse_step("click:#send"), ("click", "#send"))
+        self.assertEqual(drive.parse_step("sleep:250"), ("sleep", "250"))
+        for bad in ("fill:input[name=q]", "fill:=>lamp", "sleep:soon", "hover:#x", "click:",
+                    "nocolon"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                drive.parse_step(bad)
+        self.assertTrue(drive.same_host("http://127.0.0.1:8765/a", "http://127.0.0.1:8765/b"))
+        self.assertFalse(drive.same_host("http://127.0.0.1:8765/a", "https://example.com/b"))
+        with tempfile_path() as missing:
+            self.assertIn("does not exist", drive.read_state(missing))
+        with tempfile_path('{"cookies": [], "origins": []}') as good:
+            self.assertIsNone(drive.read_state(good))
+        with tempfile_path("not json") as bad:
+            self.assertIn("could not be read", drive.read_state(bad))
 
     def test_the_example_sidecar_writes_every_key_and_its_caps_are_the_defaults(self):
         """A default that moves in code has to move in the file an operator copies."""
@@ -288,7 +351,7 @@ class BrowserTestLoopExample(unittest.TestCase):
 
     def test_the_loop_documentation_uses_no_dashes(self):
         paths = [AUTHORING, CONCEPTS, README, SKILL] + sorted(
-            glob.glob(os.path.join(LOOP_EXAMPLE, "*")))
+            path for path in glob.glob(os.path.join(LOOP_EXAMPLE, "*")) if os.path.isfile(path))
         for path in paths:
             text = read(path)
             for dash in ("–", "—"):

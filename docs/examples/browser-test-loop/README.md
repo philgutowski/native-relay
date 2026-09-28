@@ -99,12 +99,37 @@ if not os.path.isdir(TREE):
 else:
     subprocess.run(["git", "-C", TREE, "checkout", "--detach", commit], check=True)
 
-if os.path.exists(PID):                     # stop the server this script started last time
+def ours(pid):
+    """True when pid is still the server this script started, not a process that reused it."""
+    shown = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                           text=True).stdout
+    return "example_app" in shown
+
+
+def alive(pid):
     try:
-        os.killpg(int(open(PID).read()), signal.SIGTERM)
-    except (ProcessLookupError, ValueError):
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+try:                                        # stop the server this script started last time
+    with open(PID) as handle:
+        old = int(handle.read())
+except (OSError, ValueError):
+    old = None
+if old and ours(old):
+    try:
+        os.killpg(old, signal.SIGTERM)
+        for _ in range(30):                 # wait for it to exit and free the port
+            if not alive(old):
+                break
+            time.sleep(1)
+        else:
+            os.killpg(old, signal.SIGKILL)
+    except ProcessLookupError:
         pass
-    time.sleep(2)
 
 env = dict(os.environ, EXAMPLE_OUTBOUND="stub")   # mail, payments, webhooks go to local files
 with open(os.path.join(HOME, "server.log"), "a") as log:
@@ -118,34 +143,40 @@ deadline = time.monotonic() + 120
 while time.monotonic() < deadline:
     try:
         with urllib.request.urlopen(url + "/__version", timeout=5) as response:
-            served = json.load(response).get("commit")
+            reply = json.load(response)
+        served = reply.get("commit") if isinstance(reply, dict) else None
         if served == commit:
             print("serving %s" % commit)
             sys.exit(0)
         print("serving %s, not %s" % (served, commit))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:    # not up yet, or a page that is not the version
         print("not up yet: %s" % exc)
     time.sleep(2)
 print("the app did not serve %s within two minutes" % commit)
 sys.exit(1)
 ```
 
-The server is started in a session of its own so it survives `prepare` exiting 0; the pass ends
-the process group only on a timeout or a lost lease. Its output goes to its own log, not to the
+The server is started in a session of its own, so it survives `prepare` exiting 0. That also puts
+it outside the process group the pass ends when `prepare` times out or the lease is lost: a
+`prepare` ended that way can leave the server running, at the old commit or a half moved one,
+and the next `prepare` stops it through the pid file before starting the new one. The pid is
+checked against the server's command before it is signalled, so a pid the system has since
+given to another process is left alone. The server's output goes to its own log, not to the
 prepare log the pass keeps.
 
 ## How it stops
 
-The loop stops at the first of these, each named by its own reason word in the log, the
-`test_loop_stopped` event, one notice, and `feed <manifest> --status`:
+After each pass the feeder asks these in this order, and the first that holds stops the loop,
+named by its own reason word in the log, the `test_loop_stopped` event, one notice, and
+`feed <manifest> --status`:
 
+- `report_only`: a report only loop ran its one full tour.
 - `clean`: a full tour found nothing above low.
+- `budget`: the loop filed `max_cards_total` cards, 30 by default.
 - `open_findings`: a full tour's high and medium findings produced no new card, because each
   went to an open card, a stopped area, or was never confirmed.
 - `round_cap`: `max_rounds` full tours ran, six by default.
 - `clock_cap`: `max_hours` passed since the loop's first pass, 24 by default.
-- `budget`: the loop filed `max_cards_total` cards, 30 by default.
-- `report_only`: a report only loop ran its one full tour.
 
 After it stops the feeder goes on building the cards already filed, under its ordinary rules,
 and starts no further pass.

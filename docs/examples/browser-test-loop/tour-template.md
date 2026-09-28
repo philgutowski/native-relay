@@ -8,14 +8,14 @@ browser, does its steps, and closes the browser before it returns. Run
 
     python3 tools/drive.py visit --url http://127.0.0.1:8765/search \
         --state ~/.example-app/storage-state.json --signin-marker form#signin \
-        --step fill:#query=lamp --step press:Enter --step wait:.result \
+        --step 'fill:#query=>lamp' --step press:Enter --step wait:.result \
         --screenshot /tmp/search.png --text
 
 The signed in session is the storage state file `~/.example-app/storage-state.json`, outside
 the repository, written once by the operator with `python3 tools/drive.py signin`. Pass it to
 every `visit` with `--state`, and pass `--signin-marker form#signin`, the selector only the sign
-in page matches. When `visit` exits 3 the file is missing, and when it exits 4 the app showed
-its sign in page: stop and report the pass as `not_run`. Never type a credential.
+in page matches. When `visit` exits 3 the file is missing or unreadable, and when it exits 4
+the app showed its sign in page: stop and report the pass as `not_run`. Never type a credential.
 
 Outbound integrations are stubbed while the loop runs: mail, payments, and webhooks go to local
 files and never leave the machine. That is a second line of defense, not permission. Every

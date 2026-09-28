@@ -654,9 +654,12 @@ https with a host.
 ready read. After a cycle that landed cards, once it has settled and its `post_cycle` hook has
 run, a check of the landed cards that are not the last generation. In an idle cycle, before
 leaving on a true empty queue, a full tour; when it filed a card the ready source returns, the
-feeder goes round to build it instead of leaving. A check that did not run keeps its cards for
-the next check. A pass that is `not_run` or `failed` counts as no round, is logged, and is
-notified once per kind and status until a pass of that kind runs.
+feeder goes round to build it instead of leaving. A check that is `not_run`, or that never
+started because the loop model was held, the post cycle hook held, or the cycle's own rules
+stopped the feeder, keeps its cards for the next check. A check that `failed` does not: its
+cards are never checked, since a card the pass refuses to read would otherwise fail every check
+after it. A pass that is `not_run` or `failed` counts as no round, is logged, and is notified
+once per kind and status until a pass of that kind runs.
 
 **Generations.** A card filed by a tour, or by checking a card the loop did not file, is
 generation 1. A card filed by checking a generation 1 card is generation 2, the last: its fix
@@ -667,18 +670,21 @@ feeding itself.
 a batch while another card the loop filed with the same cause file is in that batch or listed
 and unsettled, and logs it once. Cards the loop did not file are batched as before.
 
-**How the loop stops.** At the first of these, each with its own reason word, written to the
-state file's stop record, the `test_loop_stopped` event, one notice, and `feed --status`:
+**How the loop stops.** After each pass the feeder asks these in this order, and the first
+that holds is the stop, with its own reason word, written to the state file's stop record, the
+`test_loop_stopped` event, one notice, and `feed --status`. So a tour that both reaches
+`max_rounds` and brings the loop to `max_cards_total` stops on `budget`, not `round_cap`.
 
+- `report_only`: a report only loop ran its one full tour.
 - `clean`: a full tour found nothing above low. A check pass with only lows never stops the
   loop.
+- `budget`: the loop has filed `max_cards_total` cards. This is also asked before a pass starts.
 - `open_findings`: a full tour's high and medium findings produced no new card, each going to an
   open card it was commented onto, a stopped area, or a claim the tracker never confirmed. This
   is not a clean stop.
 - `round_cap`: `max_rounds` full tours ran.
-- `clock_cap`: `max_hours` have passed since the loop started, checked at every pass point.
-- `budget`: the loop has filed `max_cards_total` cards.
-- `report_only`: a report only loop ran its one full tour.
+- `clock_cap`: `max_hours` have passed since the loop started. This is also asked before a pass
+  starts, so it stops the loop at the next pass point.
 
 A stopped loop starts no further pass, and the feeder goes on building the cards already filed
 under its ordinary rules. The loop's stop does not end the feeder.
