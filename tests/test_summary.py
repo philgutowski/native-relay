@@ -730,6 +730,24 @@ class LimitPassedOverChecks(CauseLineTable):
         self.assertEqual(json.loads(json.dumps(data))["limit_passed_over"],
                          data["limit_passed_over"])
 
+    def test_a_blocked_task_passed_over_is_told_apart(self):
+        """A blocked record ran only because it was named in --retry-blocked; a later run without
+        the flag leaves it alone, so the line cannot promise a launch for it alone."""
+        self.store.upsert("T-2", status=contracts.STATUS_BLOCKED,
+                          halt_class=contracts.HALT_NO_ENVELOPE, branch=None, findings=[])
+        self.store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=[
+            {"task": "T-2", "model": "fable"}, {"task": "T-3", "model": "fable"}])
+        check, = self.summarise(["T-2", "T-3"])["pending_checks"]
+        self.assertEqual(check["text"],
+                         "fable reported its usage limit, so this run did not launch T-2, T-3 on "
+                         "it. A later run will launch them. T-2 is blocked, so name it in "
+                         "--retry-blocked.")
+
+    def test_a_malformed_entry_does_not_stop_the_summary(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=[{"model": "fable"}])
+        check, = self.summarise([])["pending_checks"]
+        self.assertEqual(check["model"], "fable")
+
     def test_a_run_that_passed_nothing_over_prints_nothing_about_it(self):
         self.store.write_terminal(contracts.RUN_COMPLETED)
         data = self.summarise([])

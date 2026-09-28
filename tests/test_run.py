@@ -3736,6 +3736,34 @@ class UsageLimitBreaker(RunCase):
         self.assertEqual(self.untaken_entries(), [])
         self.assertEqual(self.passed_over(), [{"task": "T-2", "model": "fable"},
                                               {"task": "T-3", "model": "fable"}])
+        # A later run without the flag leaves a blocked record alone, so the line says so.
+        text = summary_module.render(summary_module.build(self.manifest, self.store()))
+        self.assertIn("T-2 is blocked, so name it in --retry-blocked.", text)
+
+    def test_a_confirmed_death_the_run_continued_past_stops_its_model_too(self):
+        """The halted route: T-1's work is complete and its log ends in a 429, the gate refuses
+        it, and the run continues past the halt."""
+        with open(self.manifest_path, "w") as handle:
+            handle.write(FIVE_MANIFEST.replace("__REPO__", self.repo).replace(
+                'command = ["true"]', "command = %s" % json.dumps(
+                    ["bash", "-c", GATE_REFUSES_SH % "src/t_1.py"]))
+                + "\n[on_halt]\ncontinue_past_task_halt = true\n")
+        self.manifest = mf.load(self.manifest_path)
+        self.queue_entry("success.jsonl", task_branch_sh("T-1"), init=True,
+                         result_lines=[LIMIT_REJECTED, LIMIT_RESULT])
+        self.closeout_halted("T-1")
+        self.lands("T-4", "T-5")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        record = self.store().get("T-1")
+        self.assertEqual((record["status"], record["halt_class"], record["continued_past"]),
+                         (contracts.STATUS_HALTED, contracts.HALT_GATE_REFUSED, True))
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertIsNone(self.store().get("T-3"))
+        self.assertEqual(self.store().get("T-5")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.untaken_entries(), [])
+        self.assertEqual(self.passed_over(), [{"task": "T-2", "model": "fable"},
+                                              {"task": "T-3", "model": "fable"}])
 
     def test_a_blocked_record_nobody_asked_to_retry_is_not_named(self):
         """It would not have launched in this run or in a later one without the flag, so the

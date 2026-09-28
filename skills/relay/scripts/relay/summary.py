@@ -150,18 +150,30 @@ def _task_entry(store, record):
     }
 
 
-def _limit_passed_over_checks(passed_over):
+def _limit_passed_over_checks(passed_over, entries):
     """Usage limit plan, R11: one check per model a serial run stopped launching on, naming the
     Tasks it passed over, in the order the run met them. `task` is None, as on the unpushed
-    check, since the line is about a model; the ids are in `tasks`."""
+    check, since the line is about a model; the ids are in `tasks`.
+
+    A passed over Task still reading blocked was named in `--retry-blocked`, and a later run
+    without that flag leaves a blocked record alone, so the line says so for those ids rather
+    than promise a launch that will not happen."""
+    status = {entry["id"]: entry["status"] for entry in entries}
     by_model = {}
     for entry in passed_over or ():
-        by_model.setdefault(entry.get("model"), []).append(entry.get("task"))
-    return [{"kind": "limit_passed_over", "task": None, "model": model, "tasks": ids,
-             "text": "%s reported its usage limit, so this run did not launch %s on it. A later "
-                     "run will launch %s." % (model, ", ".join(ids),
-                                               "it" if len(ids) == 1 else "them")}
-            for model, ids in by_model.items()]
+        by_model.setdefault(str(entry.get("model")), []).append(str(entry.get("task")))
+    checks = []
+    for model, ids in by_model.items():
+        text = ("%s reported its usage limit, so this run did not launch %s on it. A later run "
+                "will launch %s." % (model, ", ".join(ids), "it" if len(ids) == 1 else "them"))
+        blocked = [task_id for task_id in ids if status.get(task_id) == contracts.STATUS_BLOCKED]
+        if blocked:
+            text += (" %s %s blocked, so name %s in --retry-blocked."
+                     % (", ".join(blocked), "is" if len(blocked) == 1 else "are",
+                        "it" if len(blocked) == 1 else "them"))
+        checks.append({"kind": "limit_passed_over", "task": None, "model": model, "tasks": ids,
+                       "text": text})
+    return checks
 
 
 def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_audit=None,
@@ -295,7 +307,7 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
             if _item_confirmed_terminal_now(adapter, task_id, item_cache):
                 continue
         checks.append({"kind": klass, "task": task_id, "text": finding.get("text") or ""})
-    checks += _limit_passed_over_checks(limit_passed_over)
+    checks += _limit_passed_over_checks(limit_passed_over, entries)
     if run_status == contracts.RUN_HALTED:
         checks.append({"kind": "halted", "task": halt_task,
                        "text": "the run halted on %s with class %s. Repair by hand, then run "

@@ -649,8 +649,8 @@ class StateStore:
 
         `limit_passed_over` (usage limit plan, R11) is the listed Tasks a serial run did not
         launch because their model had reported its usage limit earlier in the run, each
-        `{task, model}`. Always written, empty on a run that passed nothing over, so a reader can
-        tell a run that had nothing to say from one written before the key existed."""
+        `{task, model}`. Always written, and empty on a run that passed nothing over, which
+        includes every dispatch and triple run, since neither has the breaker."""
         record = {
             "run_status": run_status,
             "halt_task": halt_task,

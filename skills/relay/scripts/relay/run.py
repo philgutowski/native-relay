@@ -1499,8 +1499,11 @@ def _one_task(cfg, task):
     begun = _begin_task(cfg, task)
     if begun is None:
         return
-    cfg.launched_ids.add(task.id)
     launched = _launch_begun(cfg, begun, cwd=cfg.repo)
+    # Only once a process has started. A launch that raised or could not start one leaves the
+    # log's last attempt, and the record's `wall_seconds`, describing an earlier attempt.
+    if not launched.launch_error:
+        cfg.launched_ids.add(task.id)
     return _complete_task(cfg, begun, launched, tree_repo=cfg.repo)
 
 
@@ -1523,13 +1526,14 @@ def _note_usage_limit(cfg, task):
         reading, _resets_at = limits.read_death(record, tail, 0)
     except Exception:
         return
-    model = record.get("model") or task.model
-    if reading != limits.CONFIRMED or model in cfg.limited_models:
+    # The Manifest's model, which is what the running upsert wrote on the record for this launch
+    # and what `_begin_task` compares against, so the two sides read one source.
+    if reading != limits.CONFIRMED or task.model in cfg.limited_models:
         return
-    cfg.limited_models.add(model)
+    cfg.limited_models.add(task.model)
     if cfg.stream is not None:
         cfg.stream("%s died of a usage limit on %s; this run launches nothing more on %s"
-                   % (task.id, model, model))
+                   % (task.id, task.model, task.model))
 
 
 def _begin_task(cfg, task):
@@ -1566,7 +1570,7 @@ def _begin_task(cfg, task):
     # in it. Returned from with nothing read or written, the way `--defer` returns, so the Task
     # keeps whatever record it had and a later run launches it like any Task never reached. Past
     # the blocked check, so only a Task this run would otherwise have launched is named as passed
-    # over: a blocked record nobody asked to retry would not launch in a later run either.
+    # over: a blocked record nobody asked to retry was not going to launch in this run.
     if task.model in cfg.limited_models:
         cfg.limit_passed_over.append({"task": task.id, "model": task.model})
         if stream is not None:
