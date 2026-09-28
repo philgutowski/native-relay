@@ -425,35 +425,145 @@ tell a live Feeder from a stale one without a process listing.
 Three rules carry it. Only cards the Ready source returns are appended, so a unit never launches
 before its foundation lands. A Task that halts twice is written into the Manifest as excluded
 with its reason, because a Runner relaunches a halted Task on every run for ever. And a Cycle
-whose launched Tasks all died quickly, with nothing landed, is read as a usage limit and waited
-out without counting those halts. A halt whose class is run scoped is never counted either:
-its cause lies outside the Task, so the Feeder stops for a person rather than exclude a card for
-it. The usage limit rule is a heuristic, a rule of thumb that is usually
-right, and not a detection: the Runner has no usage limit handling for it to lean on.
-The same rule runs per model when the sidecar names a fallback for one: a quick death on that
-model marks it exhausted for a while and moves its Task to the fallback, uncounted, even when
-Tasks on other models landed in the same Cycle. A move is neither a wait nor a sign the limit
-has passed, so a Cycle whose quick deaths all moved, with nothing landed, leaves the count of
-waits where it was. A Task moved back and forth between two models that fall back to each other
-still runs the waits out.
+touched by a usage limit follows the state machine the Usage limit entry below names, marking,
+moving, holding, or waiting a Task rather than simply counting an ordinary halt. A halt whose
+class is run scoped is never counted either: its cause lies outside the Task, so the Feeder stops
+for a person rather than exclude a card for it.
 
-A limit death is not always a halt. A Task process that printed only the CLI's limit message
-and exited in seconds has no return envelope, so the Runner records it blocked, and a blocked
-record is one no later run relaunches unasked. On a model with a fallback the Feeder reads such
-a record as a limit death too, when it died quickly and its log does not say otherwise, and it
-counts beside the halts as a quick death for both rules. When a fallback is free the Task moves
-there. When none is, because the fallback is itself exhausted or died in the same Cycle, and
-nothing landed, the Cycle is waited out as a whole. In those two cases the blocked Task is
-queued for a retry: the next run relaunches it by id with `--retry-blocked`, and no other
-blocked record with it. A queued retry holds its place in the batch like a halted Task, so the
-Cycle after a wait relaunches the dead Tasks first and appends fresh cards only into whatever
-room they leave. A limit death with no free fallback in a Cycle where something landed, or a
-death was slow, holds its model back: the model is marked exhausted as a move would mark it,
-and while none of its fallbacks is free a card routed to it is not appended at all, rather than
-kept on the model to die in seconds. A model a Task landed on in the same Cycle is not held.
-A blocked one is queued for a retry that waits while its model is held. A halted one is still counted, because the Runner relaunches a halted Task on every
-run whatever the Feeder holds. On a model with no fallback entry, or with the fallback off, a
-blocked record is read as a limit death only when its log's `result` line says 429.
+### Usage limit
+
+One question, asked of a death whose process this Cycle actually launched: did the account's
+limit for that model end it. The answer comes from the last attempt's own log, read by
+`limits.py`, and is one of three words. Confirmed is a 429: the last attempt's `result` line
+carries `api_error_status` 429, the CLI's own account limit signal. Refuted is everything else
+that leaves evidence: a `result` line with any other status, a death with no wall time at all
+because no process ran, or a death that took longer than `quick_death_seconds` with no `result`
+line. Unconfirmed is a quick death, one that ended inside `quick_death_seconds`, whose last
+attempt printed no `result` line at all, so nothing in the log rules a limit in or out. A record
+whose process did not launch this Cycle carries an older attempt's log and is never read. In
+order:
+
+| Check | Answer |
+|---|---|
+| The record's process did not launch this Cycle | not read, an older attempt's evidence |
+| The last attempt ends in a `result` line, `api_error_status` 429 | confirmed |
+| The last attempt ends in a `result` line, any other status | refuted |
+| The last attempt has no `result` line, the death was inside `quick_death_seconds` | unconfirmed |
+| The last attempt has no `result` line, the death took longer | refuted |
+
+429 is what is detected. Everything unconfirmed is still inferred from timing alone, and it is
+asked to do less than it once did: only the whole Cycle wait below, never a mark on a model.
+
+A model is Marked when a confirmed death sets it an expiry: the CLI's own reset time, read from
+a rejected `rate_limit_event` in the same log, when it still lies ahead, otherwise
+`fallback_hours` after the death. A later confirmed death on a Marked model replaces the mark
+with its own, since the newer death is the newer truth. A Task listed on a Marked model, or
+found on one at the start of a Cycle, is Moved to the first open model along its fallback chain;
+with none open it is Held, left where it is, taking no room in the batch, and named to the run as
+Deferred so it is not launched. A Held Task is Moved once a fallback along its chain opens, and
+returns to its own model once that model's mark itself expires. The whole Cycle wait fires
+instead of a mark when a death is only Unconfirmed: nothing landed this Cycle, every death in it
+was quick, and at least one had no log to confirm or refute it. The Cycle waits
+`limit_wait_seconds` under reason `usage_limit`, and the streak `limit_waits` climbs by one; past
+`limit_waits_max` waits in a row the Feeder leaves with reason `limit_waits_exhausted`. The
+streak survives a restart, and clears on a Cycle where something landed, a death was slow, or
+nothing died, and by `feed --clear-limits`.
+
+The states a Task passes through once a limit has touched it, one row per transition:
+
+| From | On | To |
+|---|---|---|
+| Listed | the run starts, its model unmarked | Launched |
+| Listed | the run starts, its model marked, a fallback is open | Moved |
+| Listed | the run starts, its model marked, no fallback is open | Held |
+| Launched | its verdict passes | Landed |
+| Launched | the death reads confirmed | Confirmed |
+| Launched | the death reads unconfirmed | Unconfirmed |
+| Launched | the death reads refuted, or was slow | Ordinary |
+| Confirmed | a fallback model is open | Moved |
+| Confirmed | no fallback model is open | Held |
+| Moved | the next run | Launched |
+| Held | a fallback's mark expires | Moved |
+| Held | its own mark expires | Launched |
+| Unconfirmed | nothing landed, every death this Cycle was quick | Waited |
+| Unconfirmed | anything else | Ordinary |
+| Waited | after the wait | Launched |
+| Waited | the streak passes `limit_waits_max` | Reported |
+| Ordinary | recorded blocked | Reported |
+| Ordinary | recorded halted | Counted |
+| Counted | `max_halts` reached | Excluded |
+
+The states a model passes through:
+
+| From | On | To |
+|---|---|---|
+| Open | a confirmed death | Marked |
+| Marked | a further confirmed death | Marked, its expiry restamped |
+| Marked | `fallback_hours` pass, its CLI reset time passes, or `feed --clear-limits` | Open |
+
+Held describes a model rather than a state of its own: it is Marked with no model along its
+fallback chain Open, read fresh from the marks and the table each time it is asked, never stored.
+
+A serial run with no Feeder above it reads the same confirmed signal, narrower. Once a Task ends
+in a confirmed limit death, the run launches no further Task on that model for the rest of that
+run; the Tasks it passes over keep whatever record they had, named by the terminal record and the
+summary alongside the model, and the run still completes with exit 0, since a later run launches
+them like any Task it has not yet reached. `run --defer ID` asks for the same treatment by name
+instead of by evidence, for one listed Task, for one run, leaving its record, branch, and card
+exactly as they were; an id the Manifest does not list refuses the run, and a Manifest whose
+execution mode is triple refuses the flag outright.
+
+Every mark, move, and hold this machine makes is one `limit` event, carrying `action`, `model`,
+`to`, `tasks`, and `until`. `feed --status` lists every Marked model with its expiry and where
+that time came from, every Held Task with the model that holds it, and the streak. `feed
+--clear-limits` clears the marks, the streak, and the held snapshot in one step; the retry queue
+stays, since a queued retry runs on its own once the mark it waited on is gone. It refuses beside
+a live Feeder unless paired with `--restart`.
+
+### Reason words
+
+The complete words a `waiting` or `leaving` event, and a run's own `left_reason`, carry, as they
+stand in `feeder.py`. No word here is renamed or removed by this entry; the `limit` event above
+is the one addition.
+
+Six waiting words:
+
+- `lease_held`, another Runner holds the Lease on this Manifest or on its target repository.
+- `model_held`, everything left to run this Cycle is Held on a model with no fallback Open, so
+  the Feeder waits up to the earliest mark's expiry.
+- `usage_limit`, nothing landed this Cycle, every death was quick, and at least one was
+  Unconfirmed, so the whole Cycle wait covers a possible limit.
+- `unreadable_source`, the Ready source failed to read, with nothing left to run, so the Feeder
+  asks again.
+- `idle_scanned`, nothing is ready except cards the launch scan refuses, so the Feeder waits
+  rather than call the queue empty.
+- `idle`, nothing is ready and nothing is unsettled, a plain empty queue waited before it leaves.
+
+Nineteen leaving words:
+
+- `state_unreadable`, the Feeder's own state file could not be read at start.
+- `interrupted`, the Feeder process was interrupted from the keyboard.
+- `crashed`, the Feeder's own loop raised an exception it did not expect.
+- `once`, `--once` finished its one Cycle instead of waiting for the next.
+- `restart`, a `--restart` or `--pin` is taking over from this Feeder.
+- `stop_file`, an operator's stop file, or `--stop`, asked the Feeder to leave after this Cycle.
+- `post_cycle_held`, a blocking post cycle hook exited nonzero with `post_cycle_hold` set, or a
+  hold it already recorded still stands.
+- `manifest_error`, the Manifest failed to load.
+- `ready_source`, the sidecar names no ready policy this tracker can answer.
+- `checkout`, the target repository's checkout is dirty, or off its default branch.
+- `run_refused`, the Runner refused the Manifest or the environment.
+- `unreadable_source`, the Ready source failed to read for too many Cycles in a row with nothing
+  left to run.
+- `all_refused`, every ready card was refused by `validate` for the model it is routed to.
+- `empty_queue_scanned`, the queue is empty except for cards the launch scan refuses.
+- `empty_queue`, the queue is empty, nothing ready and nothing left to run.
+- `run_scoped_halt`, the run halted on a class that puts something outside the Task in question,
+  so no halt was counted.
+- `exclusion_failed`, a Task that reached `max_halts` could not be written into the Manifest as
+  excluded.
+- `limit_waits_exhausted`, the whole Cycle wait's streak passed `limit_waits_max`.
+- `retry_unknown`, `--retry-blocked` named an id the Manifest does not list.
 
 The Feeder is the one piece of runner code that writes a Manifest. Every write is a text edit
 that is parsed back and compared with the change intended, validated by the manifest module from

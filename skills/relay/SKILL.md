@@ -15,7 +15,7 @@ authoring procedure as a plain document, for an operator on any host.
 
 Read `CONCEPTS.md` at the repo root for the vocabulary: Runner, Manifest, Task process, Closeout
 process, Backend, Halt class, Verify-landed, and for a continuous run Feeder, Cycle, Batch, Ready
-source, Model routing. Use those words with the operator.
+source, Model routing, Usage limit, Reason words. Use those words with the operator.
 
 ## The runner
 
@@ -49,6 +49,7 @@ python3 <runner> run <manifest> --detach        # the same, in its own session, 
 python3 <runner> run <manifest> --detach --notify  # the same, notifying the desktop with nobody attached
 python3 <runner> run <manifest> --detach --wait-for-lease  # queue behind a live runner on this manifest or repo, then run
 python3 <runner> run <manifest> --follow        # detach, then follow it here; implies --detach
+python3 <runner> run <manifest> --defer T-4     # leave that one listed task alone for this run; repeatable
 python3 <runner> pair split <manifest>          # write claude and grok sibling manifests plus a pair file
 python3 <runner> pair validate <pair>           # check a pair file and both members
 python3 <runner> dispatch <pair>                # run both backends at once, merging in the pair's order
@@ -67,6 +68,7 @@ python3 <runner> feed <manifest> --dry-run --detach  # refused: a dry run never 
 python3 <runner> feed <manifest> --once         # one cycle: append a batch, run it, read the summary, leave
 python3 <runner> feed <manifest> --detach --notify  # the continuous run, in its own session
 python3 <runner> feed <manifest> --stop         # ask the feeder to leave after its current cycle
+python3 <runner> feed <manifest> --clear-limits # clear marks and the streak; the retry queue stays; refused beside a live feeder without --restart
 python3 <runner> feed <manifest> --release      # clear a failed post cycle hook's hold once the default branch is repaired; starts nothing
 python3 <runner> feed <manifest> --pin --detach --notify  # ask, wait for it to leave, take its place, pinned; --pin already carries restart semantics
 python3 <runner> feed <manifest> --pin --detach --retry-blocked T-4  # the same, relaunching that one blocked task next cycle, pinned
@@ -594,9 +596,9 @@ its default
 branch, the ready source is not configured, the runner refused the manifest, the run halted with
 a run scoped class (nothing is counted against the task then), a task that halted twice could
 not be excluded, every ready card was refused with the model it is routed to, or the ready
-source could not be read three cycles in a row with nothing left to run. 2 every task has died
-quickly for `limit_waits_max` waits (16 by default, eight hours), with only fallback moves
-between them, which is not a usage limit or one that outlasts the waits, so read the summary; or a blocking
+source could not be read three cycles in a row with nothing left to run. 2 the whole cycle wait's
+streak passed `limit_waits_max` waits (16 by default, eight hours) with reason
+`limit_waits_exhausted`, so read the summary; or a blocking
 post cycle hook failed with `post_cycle_hold` on, notified once when the hold is set whatever
 else that cycle already decided. That hold is saved in the state file, and
 every later start, `--restart`, `--pin`, `--detach`, `--dry-run`, or a cron `--once`, is refused
@@ -613,41 +615,34 @@ is never built until the card is fixed; a card whose text names a `.claude/` pat
 cause. And a card whose routing failed `validate`, a model that belongs to another backend, is
 left out of the manifest and named in the log until its routing changes.
 
-When one model's account runs out while others still work, a fallback keeps the queue moving.
-With `[models] fallback = { fable = "opus" }` in the sidecar, a fable task that dies within
-`quick_death_seconds` is read as fable's usage limit, a heuristic and not a detection: fable is
-marked exhausted for `fallback_hours` (5 by default), the task is moved to opus in the manifest
-and relaunched there next run, its halt is not counted, and new fable cards go to opus until the
-mark expires. A fallback that is itself exhausted, or a quick death with no fallback in a cycle
-where nothing landed, leaves the whole cycle wait in charge. Moving a task to another model is off
-unless the sidecar configures `[models] fallback`; the model hold described below is not, and
-applies whether or not one is configured, once the death is confirmed.
-A cycle whose quick deaths all moved, with nothing landed, leaves the count of waits where it
-was; every other cycle that does not wait resets it. So two models that fall back to each other still reach exit 2 when a task
-keeps dying quickly on both, rather than moving it back and forth every time a mark expires.
+`CONCEPTS.md`'s Usage limit entry names the whole state machine behind a usage limit, confirmed,
+refuted, or unconfirmed, marked, held, moved, deferred, and its Reason words entry lists every
+`waiting` and `leaving` word this skill's commands can print. What belongs here are the flags
+that machine takes.
 
-A limit death is sometimes recorded `blocked` with class `no_envelope` rather than halted: the
-process printed only the CLI's limit message and exited in seconds. The fallback covers that too.
-The feeder reads the task's stdout log, where a `result` line with `api_error_status` 429 confirms
-the limit and a `result` line with any other outcome, a 404 for a model the account cannot reach
-for one, rules it out; with no `result` line the time rule decides alone. A blocked task it moves
-is relaunched by passing `--retry-blocked <id>` for it alone to the next run, so no older blocked
-task is revived with it. It counts as a quick death for the whole cycle wait as well, so a cycle
-whose deaths are all blocked limit deaths with no free fallback, and where nothing landed, is
-waited out like a cycle of halts. In a cycle the whole cycle wait takes, it waits with the rest,
-holds its place in the batch, and then relaunches on its own model with `--retry-blocked`, so
-the cycle after the wait runs the dead tasks first and appends fresh cards only into the room
-they leave. In a cycle where something landed, or a death was slow, a limit death with no free
-fallback holds its model back instead: the model is marked exhausted, cards routed to it are not
-appended while none of its fallbacks is free, and a blocked one waits while its model is held and
-then relaunches with `--retry-blocked`. A model a task landed on that cycle is never held. A halted one there is still counted toward `max_halts`.
-When held cards and waiting retries are all that is left, the feeder waits (reason
-`model_held`) rather than leave. A blocked limit death on a model with no fallback entry, or with
-the fallback off, is read the same way only when its log's `result` line says 429. To relaunch one blocked task by hand, `feed <manifest> --restart
---detach --retry-blocked <id>` queues it for the next cycle, never `run` beside a live feeder. Every
-`--retry-blocked` id is checked against the manifest before the restart, before anything detaches
-and before a running feeder is asked to leave; an id the manifest does not list is refused at the
-terminal with exit 1, and the running feeder is left untouched.
+`[models] fallback = { fable = "opus" }` and `fallback_hours` in the sidecar turn on the per model
+side of it: off by default, so with nothing configured a limited model only ever holds the whole
+cycle wait's attention. A task the machine moves or holds is relaunched with `--retry-blocked
+<id>` for that id alone, so no older blocked record is revived with it; queue one by hand the same
+way, `feed <manifest> --restart --detach --retry-blocked <id>`, never `run` beside a live feeder.
+Every `--retry-blocked` id is checked against the manifest before the restart, before anything
+detaches and before a running feeder is asked to leave; an id the manifest does not list is
+refused at the terminal with exit 1, and the running feeder is left untouched.
+
+`run --defer <id>`, repeatable, leaves one listed task alone for one run: no record write, no
+branch, no card read, and the run continues past it to the rest of the list. An id the manifest
+does not list refuses the run before the lease is taken; a triple manifest refuses the flag
+outright. The serial run's own breaker uses the same evidence without being asked: once a task
+ends in a confirmed limit death, `run` launches no further task on that model for the rest of
+that run, names the ones it passed over on the terminal record and in the summary beside the
+model, and still completes with exit 0.
+
+`feed <manifest> --clear-limits` clears every mark and the usage limit wait streak in one step,
+for an operator who knows the limit is over; the retry queue stays, since a queued retry runs on
+its own once the mark it waited on is gone. With no feeder alive it clears and leaves;
+`--restart` clears as the new feeder takes over; against a live feeder with neither it refuses and
+says why. `feed <manifest> --status` lists every marked model with its expiry and where that time
+came from, and every held task with the model that holds it, beside the streak.
 
 Start a feeder pinned to a commit, `feed <manifest> --pin`, rather than from a checkout somebody
 may still edit: it launches the runner from its own tree at every cycle, so an edit made there can

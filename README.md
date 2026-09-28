@@ -144,7 +144,8 @@ python3 skills/relay/scripts/relay_cli.py feed <manifest> --stop      # leave af
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --release   # clear a failed post cycle hook's hold; starts nothing
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --restart --detach --notify
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --retry-blocked T-4  # relaunch one blocked task next cycle
-python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle; --json for data
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --clear-limits  # clear marks and the streak; the retry queue stays; refused beside a live feeder without --restart
+python3 skills/relay/scripts/relay_cli.py feed <manifest> --status    # running? and its last cycle, marks, held tasks, and the streak; --json for data
 python3 skills/relay/scripts/relay_cli.py feed <manifest> --follow    # new events as JSON lines until it leaves
 ```
 
@@ -165,19 +166,15 @@ project's own ready command prints as JSON. The batch is small, three by default
 that lands in one cycle releases its dependants in the next. This is what lets a feeder run a
 queue whose cards depend on each other, which a plain manifest must not list. **A task that halts
 twice is excluded**, with the reason written into the manifest, because the runner relaunches a
-halted task on every run. **A cycle whose launched tasks all died within ten minutes, with
-nothing landed, is read as a usage limit** and waited out for thirty minutes without counting
-those halts. That last one is a heuristic, not a detection: Relay has no usage limit handling.
+halted task on every run. **A cycle touched by a usage limit** follows the state machine
+`CONCEPTS.md`'s Usage limit entry names, marking, moving, holding, or waiting a task rather than
+counting an ordinary halt; 429 in a task's log is what is detected, and only the whole cycle wait
+still leans on timing alone.
 
-When the sidecar names a fallback for a model (`[models] fallback`, off by default), a task on
-that model that dies quickly is read the same way, per model: the model is marked exhausted for
-`fallback_hours` (5 by default), the task is moved to the fallback and relaunched there next run,
-its halt is not counted, and new cards on the model go to the fallback until the mark expires. A
-limit death with no free fallback, once confirmed, holds its model back instead: the model is
-marked exhausted, cards routed to it are left out of the batch while none of its fallbacks is
-free, and a blocked one waits for the mark to clear. This holds whether or not a fallback is
-configured for that model. When only held cards and their waiting retries are left to run, the
-feeder waits with reason `model_held` rather than leave.
+`[models] fallback` and `fallback_hours` in the sidecar (off by default) set the per model side of
+that same machine, so a limit on one model moves its tasks to another rather than losing the
+whole cycle to it. `CONCEPTS.md` names every transition; `run --defer` and `feed --clear-limits`
+are covered below.
 
 Every project fact is data in a sidecar file beside the manifest and named from its stem. For
 `queue.toml` the feeder reads `queue.feeder.toml` (settings, all optional), `queue.order`
@@ -221,7 +218,10 @@ scans clean and later trips the scan a second time.
 **It answers for itself.** `feed <manifest> --status` says whether that manifest's feeder is
 running and what its last cycle did: what it appended, what landed, halted, blocked, or was
 skipped, and what it is doing now, waiting on a usage limit until a given time for example, or
-why it left. The answer comes from the pid the feeder recorded in its state file, checked
+why it left. It also lists every model marked exhausted with its expiry and where that time came
+from, every task held back by one, and the usage limit wait streak; `feed <manifest>
+--clear-limits` clears all three in one step, refused beside a live feeder unless paired with
+`--restart`. The answer comes from the pid the feeder recorded in its state file, checked
 against the manifest's own lock file, so another manifest's feeder or a recycled pid can never
 read as this one alive; a process listing cannot tell two boards apart. `status <manifest>`
 adds the same answer as one `feeder:` line. For a watcher, the feeder writes one JSON line per
@@ -229,8 +229,9 @@ moment to `queue.feeder.events.jsonl`: `started`, `cycle_started` (the ids appen
 `cycle_result` (the run's exit code and the ids by outcome), `post_cycle_started` (a blocking post
 cycle hook has begun) and `post_cycle` (a blocking hook's result, including a hold; a detached
 hook has none yet, so its `post_cycle` is written when it starts, carrying its pid and no exit
-code), `waiting` (a reason and when it ends), and `leaving` (the exit code and a reason word such
-as `stop_file` or `empty_queue`).
+code), `waiting` (a reason and when it ends), `limit` (a mark, a move, or a hold, naming the
+model), and `leaving` (the exit code and a reason word such as `stop_file` or `empty_queue`).
+`CONCEPTS.md`'s Reason words entry lists every one of those words.
 Every line names its manifest and its pid. `feed <manifest> --follow` prints new lines as they
 come and ends when the feeder leaves, or with a `not_running` line of its own when the feeder
 is gone without saying so; `--events` prints the lines so far. A feeder handing over to
@@ -317,6 +318,7 @@ python3 skills/relay/scripts/relay_cli.py validate <manifest> --list
 python3 skills/relay/scripts/relay_cli.py run <manifest>
 python3 skills/relay/scripts/relay_cli.py run <manifest> --detach --notify
 python3 skills/relay/scripts/relay_cli.py run <manifest> --follow --phases --bar
+python3 skills/relay/scripts/relay_cli.py run <manifest> --defer T-4   # leave that one listed task alone for this run, repeatable
 python3 skills/relay/scripts/relay_cli.py status <manifest>
 python3 skills/relay/scripts/relay_cli.py tail <manifest> --bar
 python3 skills/relay/scripts/relay_cli.py summary <manifest>
@@ -403,6 +405,14 @@ the task's record. A stranded task branch is still refused the same way, judged 
 and baseline the record already carries, so the edit does not get a task past it; a blocked task
 needs `--retry-blocked` before a reassignment reaches it. `--retry-blocked T-4` retries that task
 alone, where the bare flag retries every blocked record.
+
+A run also protects itself. Once a task ends in a confirmed usage limit death, `run` launches no
+further task on that model for the rest of that run; the tasks it passes over keep their record
+untouched and a later run reaches them like any task it has not tried yet, so a limit on one model
+costs at most one task on it, not the whole remaining list. `run --defer T-4` asks for the same
+treatment by name instead of by evidence, leaving that one listed task alone for one run; an id
+the manifest does not list refuses the run, and a triple manifest refuses the flag outright.
+`CONCEPTS.md`'s Usage limit entry names the whole state machine this and the feeder share.
 
 ## Where things are
 
