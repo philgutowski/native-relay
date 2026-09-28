@@ -195,6 +195,12 @@ class ReviewStep(BriefCase):
             self.assertIn(key + ":", local)
         self.assertNotIn("plan_path", local)
 
+    def test_the_brief_warns_that_a_bare_fence_line_ends_the_envelope(self):
+        """Issue #111: the reader closes the block at a line that is only backticks, so the
+        contract the process reads has to say so beside the `status:` line hazard."""
+        local = self.render()
+        self.assertRegex(local, r"(?i)only three backticks ends the block")
+
 
 def steps_section(text):
     """The numbered steps only. The review rule in the Rules section names the review skill too,

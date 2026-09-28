@@ -397,6 +397,28 @@ class EnvelopeParsing(unittest.TestCase):
         self.assertEqual(env["status"], "complete")
         self.assertTrue(env["fenced"])
 
+    def test_an_indented_envelope_still_parses_as_a_fenced_block(self):
+        """Code review on #111: a process that writes the block inside a list item indents the
+        closer with the rest. The old grammar accepted that, and the anchored closer must not
+        push it down to the whole message scan."""
+        env = classify.parse_envelope(
+            "Result:\n  ```relay-envelope\n  status: complete\n  blockers: none\n  ```\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["blockers"], [])
+
+    def test_a_longer_closing_fence_still_closes_the_block(self):
+        env = classify.parse_envelope("```relay-envelope\nstatus: complete\n````\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+
+    def test_a_bare_fence_line_in_the_whole_message_scan_is_not_an_item(self):
+        """An untagged block never matches the opener, so the whole message is scanned, and the
+        closer line used to reach `_list_after` as an empty blocker."""
+        env = classify.parse_envelope("```\nstatus: blocked\nblockers:\n- the gate is red\n```\n")
+        self.assertFalse(env["fenced"])
+        self.assertEqual(env["blockers"], ["the gate is red"])
+
 
 class WritePatterns(unittest.TestCase):
     def test_gh_pr_create_is_not_a_tracker_write(self):
@@ -525,6 +547,19 @@ class LearningsField(unittest.TestCase):
         self.assertEqual(env["learnings"], [
             "the runner reads the block through ```relay-envelope```, not the tail",
             "the second learning still lands"])
+
+    def test_a_fence_on_a_line_of_its_own_inside_a_learning_ends_the_block(self):
+        """The shared grammar's known limit, pinned rather than fixed: the envelope body is
+        prose, so a learning that opens a code block on its own line closes the envelope there,
+        and everything after that closer is lost from the fenced body. The brief tells the
+        process to quote a fence inline instead. The fence lines themselves are skipped rather
+        than read as items, so a change to this behaviour must be a deliberate one."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: complete\nblockers:\nchanged_files:\n- a.py\n"
+            "learnings:\n- run this:\n```bash\ngit push\n```\n- second learning\n```\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["learnings"], ["run this:", "git push"])
 
 
 class FindingLines(unittest.TestCase):

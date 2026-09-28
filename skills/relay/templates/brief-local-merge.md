@@ -110,4 +110,5 @@ write it as plain prose with no colon led sub header line (`Cause:`, `Fix:`, `St
 line shaped that way is read as the start of a new field. A line starting with the word status is
 the most dangerous shape: it is read as replacing the `status:` you already declared above, even
 buried inside a sentence describing a past state such as "status: failed until I disabled
-caching."
+caching." A line that is only three backticks ends the block wherever it sits, so quote a code
+fence inline within a sentence rather than opening one on a line of its own.

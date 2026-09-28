@@ -273,6 +273,12 @@ def _list_after(block, key):
                 break
         elif KEY_LINE_RE.match(line):
             break
+        elif stripped.startswith("```"):
+            # A fence line: the closer of a block that reached the whole message scan because
+            # its opener carried no tag, or a code block a process opened inside a learning.
+            # It is punctuation, not an item, so it neither joins the list nor ends it
+            # (issue #111).
+            continue
         else:
             items.append(stripped.strip("`"))
     return items
