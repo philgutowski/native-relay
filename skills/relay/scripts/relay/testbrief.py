@@ -56,7 +56,6 @@ CHECK_INSTRUCTION = (
 NO_STOPPED_AREAS = "No area is stopped on this pass."
 STOPPED_AREAS_LEAD = "Skip these areas entirely; the loop has stopped testing them:"
 
-_FENCE_RE = contracts.fence_regex(contracts.TEST_REPORT_FENCE_TAG)
 _HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t#]*$", re.M)
 
 # The report's status words are the pass record's own (KTD12), so the parser and
@@ -173,6 +172,12 @@ def values(kind, url, commit, tour, cards=(), stopped_areas=()):
         "tour": brief.defang(str(tour)).strip(),
         "cards": _cards_block(cards),
         "report_tag": contracts.TEST_REPORT_FENCE_TAG,
+        # The example finding's `card`, as JSON: null on a tour, where the instruction says
+        # every finding's card is null, and a string on a check, so the example never
+        # contradicts the instruction and a check process sees the id written as a string
+        # (issue #118). A fixed example id rather than a real card's, since the example sits
+        # outside the data fence.
+        "card_example": "null" if kind == testloop.TOUR else "\"12\"",
     }
 
 
@@ -257,11 +262,9 @@ def read_final_message(transcript_path, backend="claude", log_path=None):
 
 
 def last_block(text):
-    """The body of the last `relay-test-report` fenced block in `text`, or None."""
-    matches = _FENCE_RE.findall(text or "")
-    if not matches:
-        return None
-    return matches[-1]
+    """The body of the last `relay-test-report` fenced block in `text`, or None, through the
+    reader every block Relay reads back shares (issue #118)."""
+    return contracts.last_fenced_block(text, contracts.TEST_REPORT_FENCE_TAG)
 
 
 def _strings(value):
@@ -311,7 +314,8 @@ def parse_text(text):
         approval_steps = []
     if not _strings(approval_steps):
         return Report(error="approval_steps must be an array of non empty strings")
-    return Report(status=status, reason=reason, findings=tuple(findings),
+    return Report(status=status, reason=reason,
+                  findings=tuple(testloop.with_string_card(finding) for finding in findings),
                   approval_steps=tuple(step.strip() for step in approval_steps))
 
 

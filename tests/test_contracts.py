@@ -208,5 +208,74 @@ class SlugRule(unittest.TestCase):
         self.assertEqual(path, "/h/.claude/projects/-r-x/abc.jsonl")
 
 
+class FenceReader(unittest.TestCase):
+    """`contracts.last_fenced_block`, the one reader for the test report, the filed block, and
+    the envelope (issues #111 and #118). It finds the last opener first and then the first
+    closer after it, so an earlier malformed block can never absorb the last one."""
+
+    TAG = "relay-test-report"
+
+    def read(self, text):
+        return contracts.last_fenced_block(text, self.TAG)
+
+    def test_a_well_formed_block_gives_its_body(self):
+        self.assertEqual(self.read("```relay-test-report\n{\"a\": 1}\n```\n"), "{\"a\": 1}\n")
+
+    def test_the_last_of_two_well_formed_blocks_wins(self):
+        text = "```relay-test-report\n{\"a\": 1}\n```\n\n```relay-test-report\n{\"a\": 2}\n```\n"
+        self.assertEqual(self.read(text), "{\"a\": 2}\n")
+
+    def test_an_unterminated_earlier_block_cannot_absorb_the_last_one(self):
+        """The old `findall` grammar paired the first opener with the last closer here, and
+        the body it gave ran through the second opener."""
+        text = "```relay-test-report\n{\"draft\":\n\nprose\n\n```relay-test-report\n{\"a\": 2}\n```\n"
+        self.assertEqual(self.read(text), "{\"a\": 2}\n")
+
+    def test_an_earlier_closer_followed_by_text_cannot_absorb_the_last_one(self):
+        text = "```relay-test-report\n{\"a\": 1}\n``` draft\n\n```relay-test-report\n{\"a\": 2}\n```\n"
+        self.assertEqual(self.read(text), "{\"a\": 2}\n")
+
+    def test_a_closer_indented_up_to_three_spaces_closes_the_block(self):
+        for indent in ("", " ", "  ", "   "):
+            with self.subTest(indent=repr(indent)):
+                text = "```relay-test-report\n{\"a\": 1}\n%s```\n\n```relay-test-report\n{\"a\": 2}\n```\n" % indent
+                self.assertEqual(self.read(text), "{\"a\": 2}\n")
+
+    def test_an_indented_block_inside_a_list_item_is_read(self):
+        """Code review on #111: a process that writes the block inside a list item indents the
+        opener and the closer with the rest."""
+        self.assertEqual(self.read("- Result:\n  ```relay-test-report\n  {\"a\": 1}\n  ```\n"),
+                         "  {\"a\": 1}\n")
+
+    def test_a_last_opener_with_no_closer_is_no_block(self):
+        self.assertIsNone(self.read("```relay-test-report\n{\"a\": 1}\n"))
+        self.assertIsNone(self.read("```relay-test-report\n{\"a\": 1}\n``` not a closer\n"))
+
+    def test_a_fence_inside_the_body_is_not_the_closer(self):
+        text = "```relay-test-report\n{\"a\": \"shows ```code```\"}\n```\n"
+        self.assertEqual(self.read(text), "{\"a\": \"shows ```code```\"}\n")
+
+    def test_the_tag_is_exact(self):
+        self.assertIsNone(self.read("```relay-test-reports\n{\"a\": 1}\n```\n"))
+        self.assertIsNone(self.read("```relay-envelope\n{\"a\": 1}\n```\n"))
+
+    def test_a_longer_opening_fence_and_a_list_marker_before_it_are_accepted(self):
+        """Code review on #118: the grammar before this task checked nothing ahead of the
+        opener's backticks, so a four backtick opener around a body that carries three, and an
+        opener written right after a list marker, both read; the reader keeps that."""
+        self.assertEqual(self.read("````relay-test-report\n{\"a\": \"```\"}\n````\n"),
+                         "{\"a\": \"```\"}\n")
+        self.assertEqual(self.read("- ```relay-test-report\n  {\"a\": 1}\n  ```\n"),
+                         "  {\"a\": 1}\n")
+
+    def test_carriage_returns_and_trailing_spaces_are_allowed_on_both_fences(self):
+        self.assertEqual(self.read("```relay-test-report \r\n{\"a\": 1}\r\n```  \r\n"),
+                         "{\"a\": 1}\r\n")
+
+    def test_empty_and_none_text_give_none(self):
+        self.assertIsNone(self.read(""))
+        self.assertIsNone(self.read(None))
+
+
 if __name__ == "__main__":
     unittest.main()

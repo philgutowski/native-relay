@@ -37,9 +37,9 @@ _GIT_C = re.compile(r"^git(?:\s+-C\s+\S+|\s+--git-dir=\S+|\s+--work-tree=\S+)+\s
 LAST_MESSAGE_CHARS = 200
 ARGUMENT_CHARS = 120
 
-# Issue #111: the envelope shares the fence grammar with the test report and the filed block,
-# so a triple backtick inside a blocker or learning line is body text, not the closer.
-FENCE_RE = contracts.fence_regex(contracts.ENVELOPE_FENCE_TAG)
+# Issue #111: the envelope shares the fence reader with the test report and the filed block,
+# `contracts.last_fenced_block`, so a triple backtick inside a blocker or learning line is
+# body text, not the closer, and an earlier malformed block cannot absorb the last (#118).
 STATUS_RE = re.compile(
     r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:\s*[`*]*(%s)\b" % (contracts.ENVELOPE_STATUS_KEY, "|".join(contracts.ENVELOPE_STATUSES)),
     re.M | re.I,
@@ -256,10 +256,15 @@ def _list_after(block, key):
     by a plain paragraph, which is one item per line. The paragraph case came from the first
     live run: the process wrote its blocker as prose under `blockers:` and the record read "no
     blocker text in the envelope" while the text sat one line below. The list ends at the next
-    `key:` line, or at the first blank line once something has been collected."""
-    match = re.search(r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:[ \t]*(.*)$" % re.escape(key), block, re.M)
-    if not match:
+    `key:` line, or at the first blank line once something has been collected. The last `key:`
+    line in the block is the one read, the same rule `parse_envelope` applies to the status,
+    so the whole message scan reads every field from the same, last, envelope when the text
+    holds a draft above it (code review on issue #118)."""
+    matches = list(re.finditer(r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:[ \t]*(.*)$" % re.escape(key),
+                               block, re.M))
+    if not matches:
         return []
+    match = matches[-1]
     inline = match.group(1).strip().strip("`*")
     if inline and inline.lower() not in ("none", "[]", "null", "n/a", "-"):
         return [inline]
@@ -287,18 +292,16 @@ def _list_after(block, key):
 def parse_envelope(text):
     """KTD8: fenced `relay-envelope` block first, else a line anchored scan of the whole text
     taking the last status match. Returns None when no status is found."""
-    fenced = FENCE_RE.findall(text or "")
-    block = fenced[-1] if fenced else None
-    if block is not None:
-        matches = STATUS_RE.findall(block)
-    else:
+    block = contracts.last_fenced_block(text, contracts.ENVELOPE_FENCE_TAG)
+    fenced = block is not None
+    if not fenced:
         block = text or ""
-        matches = STATUS_RE.findall(block)
+    matches = STATUS_RE.findall(block)
     if not matches:
         return None
     return {
         "status": matches[-1].lower(),
-        "fenced": bool(fenced),
+        "fenced": fenced,
         "blockers": _list_after(block, contracts.ENVELOPE_BLOCKERS_KEY),
         "changed_files": _list_after(block, contracts.ENVELOPE_CHANGED_FILES_KEY),
         "learnings": _list_after(block, contracts.ENVELOPE_LEARNINGS_KEY),

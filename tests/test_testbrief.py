@@ -10,6 +10,7 @@ import re
 import string
 import tempfile
 import unittest
+from unittest import mock
 
 import _paths
 from relay import brief, classify, contracts, testbrief, testloop
@@ -467,9 +468,80 @@ class ParseText(unittest.TestCase):
                                                 json.dumps({"status": "ran", "findings": []})))
         self.assertTrue(testbrief.parse_text(text).ok)
 
-    def test_the_fence_grammar_is_the_shared_one_from_contracts(self):
-        self.assertEqual(testbrief._FENCE_RE.pattern,
-                         contracts.fence_regex(contracts.TEST_REPORT_FENCE_TAG).pattern)
+    def test_the_fence_reader_is_the_shared_one_from_contracts(self):
+        """Issues #111 and #118: one reader for every block Relay reads back, so a fix to the
+        pairing of opener and closer reaches the report, the filed block, and the envelope."""
+        with mock.patch.object(contracts, "last_fenced_block", return_value="{}") as reader:
+            self.assertEqual(testbrief.last_block("anything"), "{}")
+        reader.assert_called_once_with("anything", contracts.TEST_REPORT_FENCE_TAG)
+
+    def test_an_unterminated_draft_block_cannot_absorb_the_valid_last_one(self):
+        """Issue #118: the old grammar paired the draft's opener with the good block's closer,
+        so the merged body was not JSON and every finding was discarded."""
+        good = {"status": "ran", "reason": "", "findings": [finding()]}
+        text = ("Draft:\n\n```%s\n{\"status\": \"ran\", \"findings\": [\n\nRedoing it.\n\n"
+                % contracts.TEST_REPORT_FENCE_TAG) + block(good)
+        report = testbrief.parse_text(text)
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(len(report.findings), 1)
+
+    def test_a_draft_block_with_an_indented_closer_cannot_absorb_the_valid_last_one(self):
+        """CommonMark lets a closer sit up to three spaces in; the draft's closer is accepted
+        and the last block is still read on its own."""
+        good = {"status": "ran", "reason": "", "findings": [finding()]}
+        text = ("```%s\n{\"status\": \"not_run\"}\n   ```\n\nCorrected:\n\n"
+                % contracts.TEST_REPORT_FENCE_TAG) + block(good)
+        report = testbrief.parse_text(text)
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.status, testloop.RAN)
+        self.assertEqual(len(report.findings), 1)
+
+    def test_a_draft_block_whose_closer_is_followed_by_text_cannot_absorb_the_valid_last_one(self):
+        good = {"status": "ran", "reason": "", "findings": [finding()]}
+        text = ("```%s\n{\"status\": \"not_run\"}\n``` (draft, ignore)\n\n"
+                % contracts.TEST_REPORT_FENCE_TAG) + block(good)
+        report = testbrief.parse_text(text)
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.status, testloop.RAN)
+        self.assertEqual(len(report.findings), 1)
+
+    def test_a_closer_indented_three_spaces_closes_the_last_block(self):
+        text = "```%s\n%s\n   ```\n" % (contracts.TEST_REPORT_FENCE_TAG,
+                                        json.dumps({"status": "ran", "findings": []}))
+        self.assertTrue(testbrief.parse_text(text).ok)
+
+    def test_a_numeric_card_id_is_accepted_and_stored_as_a_string(self):
+        """Issue #118: on a check pass a model writes the id it copied from `### Card 12` as
+        a number, and the whole report used to fail on it."""
+        report = testbrief.parse_text(block({"status": "ran", "reason": "", "findings": [
+            finding(card=12)]}))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.findings[0]["card"], "12")
+        self.assertIsInstance(report.findings[0]["card"], str)
+
+    def test_a_boolean_card_id_is_still_refused(self):
+        report = testbrief.parse_text(block({"status": "ran", "reason": "", "findings": [
+            finding(card=True)]}))
+        self.assertFalse(report.ok)
+        self.assertIn("card", report.error)
+
+    def test_the_templates_example_shows_the_card_id_as_a_string_on_a_check_and_null_on_a_tour(self):
+        """Code review on #118: the tour instruction says every finding's card is null, so
+        the example must not show an id there, and on a check it shows the id as a string."""
+        check = testbrief.render(testloop.CHECK, URL, COMMIT, TOUR, cards=CARDS)
+        self.assertIn('"card": "12"', check)
+        self.assertNotIn('"card": 12', check)
+        self.assertNotIn('"card": null', check)
+        tour = testbrief.render(testloop.TOUR, URL, COMMIT, TOUR)
+        self.assertIn('"card": null', tour)
+        self.assertNotIn('"card": "12"', tour)
+        for text in (check, tour):
+            self.assertTrue(testbrief.parse_text(text).ok)
+
+    def test_with_string_card_is_the_test_loops_one_rule(self):
+        self.assertEqual(testloop.with_string_card(finding(card=12))["card"], "12")
+        self.assertEqual(testloop.with_string_card(finding(card="T-1"))["card"], "T-1")
+        self.assertIsNone(testloop.with_string_card(finding(card=None))["card"])
 
 
 class FinalMessage(unittest.TestCase):

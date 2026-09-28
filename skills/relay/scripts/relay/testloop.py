@@ -103,7 +103,8 @@ def validate_finding(finding):
       observed    a string, the one field that carries text copied from the app
       done_when   a non empty array of non empty strings
       card        on a check pass, the id of the checked card it came from, a non empty
-                  string; absent or null otherwise
+                  string or an integer, since a model copies a numeric id as a number
+                  (issue #118); a boolean is refused; absent or null otherwise
 
     Keys beyond these are left alone."""
     if not isinstance(finding, dict):
@@ -141,9 +142,25 @@ def validate_finding(finding):
     if not _texts(finding.get("done_when")):
         problems.append("done_when must be a non empty array of strings")
     card = finding.get("card")
-    if card is not None and not _text(card):
-        problems.append("card must be a non empty string when present")
+    if card is not None and not _is_card_number(card) and not _text(card):
+        problems.append("card must be a non empty string or an integer when present")
     return problems
+
+
+def _is_card_number(card):
+    """True for a card id written as a JSON number: an integer, never a boolean, which JSON
+    spells apart but Python counts as an int."""
+    return isinstance(card, int) and not isinstance(card, bool)
+
+
+def with_string_card(finding):
+    """The finding with its `card` as a string. A model on a check pass copies the id from
+    the card heading as a number (issue #118); `validate_finding` accepts that, and the parser
+    passes every finding through here so every reader after it sees one type."""
+    card = finding.get("card")
+    if _is_card_number(card):
+        return dict(finding, card=str(card))
+    return finding
 
 
 def is_serious(finding):
