@@ -541,6 +541,11 @@ class ConfigDirectory(unittest.TestCase):
                                           "agent config directory in tools"),
             ".claude/.claude/x": ("x under the agent config directory under the agent config "
                                   "directory"),
+            # A glued suffix (code review): the head is not moved past a `file:line` colon, so
+            # the line number is not read as part of the head directory.
+            "a/.claude/b/c.py:12": "a/b/c.py under the agent config directory:12",
+            "in a/.claude/b/c.py, line 12": "in b/c.py under the agent config directory in a, line 12",
+            "(tools/.claude/x)": "(x under the agent config directory in tools)",
             "see -.claude/x": "see -.claude/x",     # not a form the scan catches either
             "foo.claude/bar": "foo.claude/bar",
         }
@@ -822,11 +827,14 @@ class RunTheProcess(unittest.TestCase):
                             timeout_seconds=30, popen=popen)
         self.assertEqual(launched, [])
         self.assertFalse(result.filed.ok)
-        self.assertIn("no filing process was launched", result.filed.error)
-        self.assertIn(".claude/tracker.md", result.filed.error)
+        self.assertTrue(result.filed.error.startswith("no filing process was launched: the "
+                                                      "rendered filing brief names "
+                                                      ".claude/tracker.md, "), result.filed.error)
         self.assertIn(brief.MENTION_RULE, result.filed.error)
         self.assertEqual(result.filed.entries, ())
-        self.assertEqual(result.launch_result.launch_error, result.filed.error)
+        # The launch error carries no lead clause, since the pass prefixes its own (code review).
+        self.assertEqual(filing.REFUSED_BRIEF_LEAD + result.launch_result.launch_error,
+                         result.filed.error)
         self.assertFalse(result.launch_result.timed_out)
         self.assertFalse(result.launch_result.lease_lost)
         self.assertEqual(result.launch_result.session_id, "pass-4")

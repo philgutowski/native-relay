@@ -202,6 +202,19 @@ class TestLoopConfig(unittest.TestCase):
                           self.refused('[test_loop]\n%s = ["Read", " "]\n' % key))
         self.assertEqual(self.load('[test_loop]\ndesign_note = " "\n').test_loop.design_note, " ")
 
+    def test_a_design_note_naming_the_agent_config_directory_is_refused_at_load(self):
+        """Issue #120, code review: the note reaches the Filing brief as written and the brief
+        is refused at launch, after a full tour; the sidecar names the key instead."""
+        message = self.refused('[test_loop]\ndesign_note = "Follow .claude/skills/design/SKILL.md."\n')
+        self.assertIn("test_loop.design_note must not name a path under the agent config "
+                      "directory", message)
+        self.assertIn("describe the location in words", message)
+        for note in ("Follow **.claude/skills/design/SKILL.md**.", "See [.claude/x](y)."):
+            self.assertIn("test_loop.design_note must not name", self.refused(
+                '[test_loop]\ndesign_note = "%s"\n' % note.replace('"', '\\"')))
+        self.assertEqual(self.load('[test_loop]\ndesign_note = "Follow the design skill."\n')
+                         .test_loop.design_note, "Follow the design skill.")
+
     def test_the_cap_defaults_are_the_rules_own(self):
         loop, settings = feeder.TestLoop(), testloop.Settings()
         for name in ("max_rounds", "max_hours", "max_cards_per_pass", "max_patches_per_area",

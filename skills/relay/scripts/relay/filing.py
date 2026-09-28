@@ -71,6 +71,11 @@ ATTENDED_LINE = ("Attended planning card: yes, file this the way the tracker ins
 # brief that carries the card.
 CONFIG_DIR_DESCRIPTION = "the agent config directory"
 
+# The characters after a path token that end its phrase, for `describe_paths`: closing quotes
+# and brackets, and the punctuation a sentence continues with. A colon is deliberately absent,
+# since `file:line` glues a suffix onto the path.
+_PHRASE_CLOSERS = set(")]}\"'`,;.")
+
 
 @dataclass(frozen=True)
 class Filed:
@@ -157,19 +162,24 @@ def describe_paths(text):
     scan catches is a path this rewrites (issue #120): the earlier private token pattern missed
     a path wrapped in markdown emphasis and left a nested config directory half described, and
     each reached the card and then scanned out every later brief quoting it. One span is
-    rewritten per pass, first the head the scan does not report (the directories before a
-    `/.claude/` segment, so `tools/.claude/x` reads "x under the agent config directory in
-    tools" rather than losing `tools`), and the rewrite repeats until the scan finds nothing,
-    since a nested segment's span lies inside its parent's and describing one can uncover the
-    next. A token that merely contains the letters, like `foo.claude/`, is not the path and is
-    left."""
+    rewritten per pass, and the rewrite repeats until the scan finds nothing, since a nested
+    segment's span lies inside its parent's and describing one can uncover the next. A token
+    that merely contains the letters, like `foo.claude/`, is not the path and is left.
+
+    The scan does not report the head before a `/.claude/` segment, and the description puts
+    the head last, so the head is pulled in only when the token ends the phrase (whitespace,
+    the end of the text, or closing punctuation follows): `tools/.claude/x` reads "x under the
+    agent config directory in tools", while `a/.claude/b.py:12` keeps its order as "a/b.py under
+    the agent config directory:12" rather than moving the line number into the head (code
+    review)."""
     text = str(text if text is not None else "")
     while True:
         spans = brief.path_spans(text)
         if not spans:
             return text
         start, end = spans[0]
-        if start > 0 and text[start - 1] == "/":
+        terminal = end >= len(text) or text[end].isspace() or text[end] in _PHRASE_CLOSERS
+        if terminal and start > 0 and text[start - 1] == "/":
             while start > 0 and text[start - 1] not in brief.PATH_TAIL_STOP:
                 start -= 1
         described = describe_file(text[start:end])
@@ -388,15 +398,19 @@ def confirm(entries, adapter, known=()):
     return Confirmation(filed=tuple(filed), commented=tuple(commented), notes=tuple(notes))
 
 
-def scan_error(hits):
+REFUSED_BRIEF_LEAD = "no filing process was launched: "
+
+
+def scan_refusal(hits):
     """The sentence for a rendered Filing brief the launch scan would refuse (issue #120). The
     brief is written and never sent: a literal config directory path in it would be copied onto
     the card, and every later Task brief quoting that card would then scan out at launch, so the
-    card would never be built."""
+    card would never be built. It is the `LaunchResult.launch_error`, which the pass prefixes
+    with its own "could not be launched" clause, and the `Filed.error` carries
+    `REFUSED_BRIEF_LEAD` in front of it instead, so neither reading doubles a clause."""
     paths = sorted({hit["path"] for hit in hits})
-    return ("no filing process was launched: the rendered filing brief names %s, and a card "
-            "carrying that path would scan out every later brief that quotes it (R41). %s"
-            % (", ".join(paths), brief.MENTION_RULE))
+    return ("the rendered filing brief names %s, and a card carrying that path would scan out "
+            "every later brief that quotes it (R41). %s" % (", ".join(paths), brief.MENTION_RULE))
 
 
 def run(manifest, findings, adapter, store, backend, process_id, labels=(), design_note="",
@@ -425,9 +439,9 @@ def run(manifest, findings, adapter, store, backend, process_id, labels=(), desi
 
     hits = brief.scan({}, text)
     if hits:
-        error = scan_error(hits)
-        return FilingResult(Filed(error=error), [], {},
-                            launch.LaunchResult(session_id=process_id, launch_error=error),
+        refusal = scan_refusal(hits)
+        return FilingResult(Filed(error=REFUSED_BRIEF_LEAD + refusal), [], {},
+                            launch.LaunchResult(session_id=process_id, launch_error=refusal),
                             brief_path, state.sha256_of(text))
 
     if timeout_seconds is None:

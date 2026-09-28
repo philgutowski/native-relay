@@ -266,8 +266,11 @@ class StopRules(LoopCase):
 
     def test_a_tour_whose_findings_all_went_to_open_cards_stops_on_open_findings(self):
         # Covers AE10 at the Feeder: commented, not filed, is no new card.
-        self.pass_script = [{"findings": [finding(), finding()],
-                             "commented": [{"id": "7", "finding": 1}, {"id": "8", "finding": 2}]}]
+        # Issue #120: three findings may comment on one card, and the pass entry names the
+        # card once, in block order.
+        self.pass_script = [{"findings": [finding(), finding(), finding()],
+                             "commented": [{"id": "7", "finding": 1}, {"id": "8", "finding": 2},
+                                           {"id": "7", "finding": 3}]}]
         self.plans = [{}]
         self.feed_loop()
         self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_OPEN_FINDINGS)

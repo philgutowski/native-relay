@@ -479,7 +479,16 @@ def _test_loop_problem(name, value, default, allowed):
     if isinstance(default, str):
         if not isinstance(value, str):
             return "must be a string"
-        if name == "design_note" or not value:
+        if name == "design_note":
+            # The note reaches the Filing brief as written, and `filing.run` refuses a brief
+            # the launch scan hits before anything launches (issue #120). Refusing the note here
+            # names the key at load, rather than failing every pass after a full tour.
+            if brief.path_spans(value):
+                return ("must not name a path under the agent config directory, since every "
+                        "filing brief carrying it would be refused at launch; describe the "
+                        "location in words")
+            return None
+        if not value:
             return None
         if not value.strip():
             return "must not be blank"
@@ -2182,8 +2191,11 @@ class Feeder:
                 areas = loop["checks"].setdefault(str(parent), [])
                 if entry.get("area") not in areas:
                     areas.append(entry.get("area"))
-        commented = [str(entry.get("id")) for entry in record.get("commented") or ()
-                     if isinstance(entry, dict) and entry.get("id") is not None]
+        # One id per card, in block order: several findings may comment on one open card
+        # (issue #120), and the pass record keeps the per finding pairing.
+        commented = list(dict.fromkeys(
+            str(entry.get("id")) for entry in record.get("commented") or ()
+            if isinstance(entry, dict) and entry.get("id") is not None))
         if kind == testloop.TOUR and status == testloop.RAN:
             loop["rounds"] += 1
         # An area is planned when its pass ran, and also when its planning card was confirmed
