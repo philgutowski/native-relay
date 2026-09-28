@@ -531,7 +531,8 @@ def read_mark(value, fallback_hours):
 def launched_this_cycle(record, before):
     """True when the run launched a process for this record: it carries a `started_at` the
     record read before the run did not (plan KTD9). A record the run refused before launch, or
-    never reached, keeps the old attempt's stamp."""
+    never reached, keeps the old attempt's stamp. The rule `limits.decide_after_run` applies;
+    the feeder needs it first, to choose which logs to read and to read a run scoped halt."""
     started = record.get("started_at")
     return started is not None and started != (before or {}).get("started_at")
 
@@ -1206,6 +1207,8 @@ class Feeder:
             # the earliest mark that holds that work, so it is bounded without a count of its
             # own, and it is no evidence either way about the whole cycle wait's row. A batch
             # that was taken and then all refused is a routing problem, and `idle` stops on it.
+            # `plan_cycle_start`'s own wait covers held Tasks only; a held fresh card is the
+            # feeder's, so the wait is taken from the same function over both.
             models = {model for _, model in launch.held}
             models |= {choose_model(card, routing, config)[0] for card in fresh
                        if card["id"] in held_fresh}
@@ -1317,7 +1320,7 @@ class Feeder:
                  % (self.state["idle_waits"], config.idle_waits_max))
         return self.wait(config.idle_wait_seconds, "idle")
 
-    def settle(self, manifest, cycle_ids, code=None, merge=(None, None), start=None):
+    def settle(self, manifest, cycle_ids, code, merge, start):
         """Read what the run did to this cycle's tasks, apply rules 2 and 3, and run the post
         cycle hook. `code` is the run's exit code, for the `cycle_result` event and the hook,
         and `merge` the default branch and its sha before the run, for the hook's merge range.
@@ -1333,7 +1336,6 @@ class Feeder:
         beside a rules stop is recorded and logged but never reaches the operator, and every later
         refusal stays quiet on the reasoning that the hold itself already did. Either way the
         hold is in the state file too, and blocks every later start until `release_hold`."""
-        start = start or CycleContext()
         data = self.deps.read_summary(manifest)
         after = {task["id"]: task for task in data.get("tasks", [])}
         mine = {task_id: after[task_id] for task_id in cycle_ids if task_id in after}
@@ -1401,9 +1403,14 @@ class Feeder:
                                               % (halt_task, data.get("halt_class")),
                                  "run_scoped_halt")
             # Its own log says the account's limit ended it, whatever the runner made of that.
+            # The run still stopped there, so a record it never reached is left uncounted, as
+            # the stop above leaves it: counting it would exclude a card for the account's limit.
             self.log("the run halted on %s with class %s, and its log confirms a usage limit: "
                      "read as the limit, not as a fault outside the task"
                      % (halt_task, data.get("halt_class")))
+            passed_over = frozenset(passed_over) | {
+                task_id for task_id, record in mine.items()
+                if not launched_this_cycle(record, start.before.get(task_id))}
         listed_on = manifestedit.task_models(self._read(self.paths.manifest))
         died_on = {task_id: record.get("model") or listed_on.get(task_id)
                    for task_id, record in mine.items()}
@@ -1589,13 +1596,16 @@ class Feeder:
         append onto a model that would refuse it in seconds."""
         model, note = choose_model(card, routing, self.config)
         notes = [note] if note else []
+        # One reading of the marks, so a mark that expires between two checks is not held by
+        # one and routed round by the other.
         table, now = self.config.model_fallback, self.deps.now()
-        if limits.is_held(model, marks, table, now):
+        active = limits.active_marks(marks, now)
+        if limits.is_held(model, active, table, now):
             return None, notes
-        if model in marks:
-            target = limits.resolve_fallback(model, table, set(marks))
+        if model in active:
+            target = limits.resolve_fallback(model, table, set(active))
             notes.append("card %s is routed to %s, marked until %s, appending it on %s" % (
-                card["id"], model, marks[model].until.isoformat(timespec="seconds"), target))
+                card["id"], model, active[model].until.isoformat(timespec="seconds"), target))
             model = target
         return model, notes
 

@@ -1315,6 +1315,29 @@ class LimitMachine(FeederCase):
         self.assertEqual(self.state()["halts"], {})
         self.assertIn("its log confirms a usage limit", self.log_text())
 
+    def test_a_run_scoped_halt_read_as_the_limit_counts_nothing_it_never_reached(self):
+        # The run stopped on 1, so 2's halted record is the old one: no halt of 2's own.
+        self.listing(("1", "fable"), ("2", "opus"),
+                     _2=dict(halted(5000), model="opus", started_at="old"))
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(), halts={"2": 1})))
+        self.adapter.ready_cards = []
+        self.run_record = {"run_status": "halted", "halt_task": "1",
+                           "halt_class": "unexpected_error"}
+        self.plans = [{"1": self.limit_halt(halt_class="unexpected_error"), "2": UNREACHED}]
+        self.assertEqual(self.feed(feeder.Config(model_fallback={"fable": "opus"}),
+                                   once=True), 0)
+        self.assertEqual(self.state()["halts"], {"2": 1})
+        self.assertEqual(manifestedit.excluded_ids(self.text()), set())
+        self.assertEqual(set(self.state()["exhausted"]), {"fable"})
+
+    def test_a_mark_that_expires_before_routing_routes_to_its_model(self):
+        # Read at the start of the Cycle, gone by the time a card is routed.
+        loop = feeder.Feeder(self.paths, feeder.Config(), self.deps(), self.base_env(),
+                             io.StringIO())
+        marks = {"sonnet": limits.Mark(since=self.clock - timedelta(hours=5), until=self.clock,
+                                       source=limits.MARK_FALLBACK_HOURS)}
+        self.assertEqual(loop.route(card(1), {"1": "sonnet"}, marks), ("sonnet", []))
+
     def test_a_run_scoped_halt_with_no_429_still_stops_the_feeder(self):
         self.adapter.ready_cards = [card(1)]
         self.write(self.paths.routing, "1 fable\n")
