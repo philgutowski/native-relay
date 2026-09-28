@@ -22,7 +22,7 @@ from unittest import mock
 import _paths
 import _repo
 from _fakes import FakeAdapter
-from relay import cli, feeder, manifest as mf, manifestedit
+from relay import cli, feeder, limits, manifest as mf, manifestedit
 from test_run import MANIFEST, RunCase
 
 HEAD = MANIFEST.split("[[tasks]]")[0]
@@ -772,13 +772,13 @@ class BlockedLimit(FeederCase):
 
     def test_the_result_line_is_found_under_a_torn_first_line(self):
         tail = LIMIT_LOG[7:]
-        self.assertEqual(feeder.result_event(tail)["api_error_status"], 429)
-        self.assertIsNone(feeder.result_event('{"type": "assistant"}\nnot json\n'))
+        self.assertEqual(limits.result_event(tail)["api_error_status"], 429)
+        self.assertIsNone(limits.result_event('{"type": "assistant"}\nnot json\n'))
         # The log holds every attempt; an earlier attempt's result is not this one's.
         earlier = json.dumps({"type": "result", "subtype": "success"}) + "\n"
         init = json.dumps({"type": "system", "subtype": "init"}) + "\n"
-        self.assertIsNone(feeder.result_event(earlier + init + '{"type": "assistant"}\n'))
-        self.assertEqual(feeder.result_event(earlier + init + LIMIT_LOG)["api_error_status"],
+        self.assertIsNone(limits.result_event(earlier + init + '{"type": "assistant"}\n'))
+        self.assertEqual(limits.result_event(earlier + init + LIMIT_LOG)["api_error_status"],
                          429)
         config = feeder.Config()
         task = {"class": "no_envelope", "wall_seconds": 4}

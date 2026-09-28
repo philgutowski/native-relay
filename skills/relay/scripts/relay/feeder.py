@@ -112,8 +112,9 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 
-from . import (adapters, brief, contracts, gitread, manifest as manifest_module, manifestedit,
-               run as run_module, state as state_module, summary as summary_module)
+from . import (adapters, brief, contracts, gitread, limits, manifest as manifest_module,
+               manifestedit, run as run_module, state as state_module,
+               summary as summary_module)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -142,11 +143,7 @@ UNREADABLE_WAITS_MAX = 2          # waits on a ready source that fails to read, 
 UNRANKED = 10 ** 9
 DRY_RUN_LINES = 12
 MODEL_LINE_RE = re.compile(r"^\*\*Model:\*\*\s*(\S+)", re.MULTILINE)
-# The HTTP status the CLI's `result` line carries as `api_error_status` when the account's
-# limit for the model is spent. Not `terminal_reason: api_error` alone: a model the account
-# cannot reach at all ends with that too, beside a 404.
-USAGE_LIMIT_STATUS = 429
-LOG_TAIL_BYTES = 64 * 1024        # the terminal `result` line is the log's last
+EVENTS_CHUNK_BYTES = 64 * 1024    # how far `end_offset` reads back per step for a newline
 
 # The events file's `event` words (issue #36). A watcher keys on these, so they are a contract:
 # add one if a new kind of moment needs it, never rename one.
@@ -509,29 +506,6 @@ def looks_like_usage_limit(dead, landed, config):
     return all(died_quickly(task, config) for task in dead)
 
 
-def result_event(log_text):
-    """The last attempt's `result` event in a task's stream-json stdout, or None when it has
-    none: the process was killed first, or the backend prints another format. The runner
-    appends every attempt of a task to one log, so the search stops at the last attempt's own
-    `init` line rather than reading an earlier attempt's result as this one's. A line that is
-    not JSON, a torn first line of a tail above all, is passed over."""
-    for line in reversed((log_text or "").splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "result":
-            return event
-        if event.get("type") == "system" and event.get("subtype") == "init":
-            return None
-    return None
-
-
 def blocked_by_usage_limit(task, config, log_text, confirmed_only=False):
     """Issue #39. A blocked record that reads as a usage limit death: no envelope, and a process
     that died inside `quick_death_seconds`, which also means it had no time to write anything a
@@ -545,10 +519,10 @@ def blocked_by_usage_limit(task, config, log_text, confirmed_only=False):
     where the time rule alone is not enough evidence to wait or hold on (issue #52)."""
     if task.get("class") != contracts.HALT_NO_ENVELOPE or not died_quickly(task, config):
         return False
-    event = result_event(log_text)
+    event = limits.result_event(log_text)
     if event is None:
         return not confirmed_only
-    return event.get("api_error_status") == USAGE_LIMIT_STATUS
+    return event.get("api_error_status") == limits.USAGE_LIMIT_STATUS
 
 
 def resolve_fallback(model, table, unavailable):
@@ -1650,7 +1624,7 @@ class Feeder:
         models = self._models(fresh)
         return [task for task in fresh
                 if blocked_by_usage_limit(
-                    task, self.config, self._log_tail(task.get("log_path")),
+                    task, self.config, limits.log_tail(task.get("log_path")),
                     confirmed_only=models.get(task["id"]) not in self.config.model_fallback)]
 
     def report_blocked(self, task):
@@ -1726,20 +1700,6 @@ class Feeder:
             self.log("%s is queued for a retry at the operator's request" % task_id)
         self.save_state()
         return None
-
-    @staticmethod
-    def _log_tail(path):
-        """The end of a task's stdout log, or "" when there is none to read. The tail is
-        enough: the `result` event is the last line a finished process prints."""
-        if not path:
-            return ""
-        try:
-            with open(path, "rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                handle.seek(max(0, handle.tell() - LOG_TAIL_BYTES))
-                return handle.read().decode("utf-8", errors="replace")
-        except OSError:
-            return ""
 
     # The post cycle hook (issue #37).
     def default_head(self, manifest, branch=None):
@@ -2342,7 +2302,7 @@ def end_offset(paths):
         with open(paths.events, "rb") as handle:
             position = handle.seek(0, os.SEEK_END)
             while position > 0:
-                start = max(0, position - LOG_TAIL_BYTES)
+                start = max(0, position - EVENTS_CHUNK_BYTES)
                 handle.seek(start)
                 newline = handle.read(position - start).rfind(b"\n")
                 if newline >= 0:

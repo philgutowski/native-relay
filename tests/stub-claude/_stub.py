@@ -13,6 +13,12 @@ Entries are consumed in numeric order of <n>, shared across every binary pointed
 queue directory. A fixture or stream path is absolute or relative to the queue directory. With
 no queue, `main()` calls `write_evidence` with an empty entry and writes nothing further.
 
+Two optional entry keys shape the stdout the way the real CLI ends a process at its limit:
+  "init": true          print a `system` line with subtype `init` before anything else the entry
+                        supplies, which is where a reader finds the last attempt's start
+  "result_lines": [...] print these in place of the closing `result` line; each is a JSON object
+                        or a raw string, and an empty list prints no `result` line at all
+
 Other knobs, read by `main()` itself:
   RELAY_STUB_SLEEP=<seconds>       overrides the entry's sleep (U6 timeout tests)
   RELAY_STUB_CHILD=1               spawns one sleeping child so a group kill test has an orphan
@@ -38,6 +44,16 @@ def ensure_relay_on_path():
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
+
+
+def emit_lines(lines):
+    """An entry's own closing lines: a JSON object is printed as JSON, a string as it is, so a
+    test can stage a line no JSON encoder would write."""
+    for line in lines:
+        if isinstance(line, str):
+            print(line, flush=True)
+        else:
+            emit(line)
 
 
 def maybe_spawn_child():
@@ -155,6 +171,8 @@ def main(session_id, write_evidence, backend=None):
             emit({"type": "system", "subtype": "stub_queue_spent"})
             return 97
         entry = load_entry(entry_dir)
+    if entry.get("init"):
+        emit({"type": "system", "subtype": "init", "session_id": session_id})
 
     maybe_sleep(entry)
     write_evidence(entry, queue)
@@ -165,5 +183,8 @@ def main(session_id, write_evidence, backend=None):
         if code is not None:
             return code
 
-    emit({"type": "result", "subtype": "stub_done", "session_id": session_id})
+    if "result_lines" in entry:
+        emit_lines(entry["result_lines"])
+    else:
+        emit({"type": "result", "subtype": "stub_done", "session_id": session_id})
     return int(entry.get("exit", 0))

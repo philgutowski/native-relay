@@ -51,8 +51,9 @@ outcome rules a limit out; no `result` line leaves the time rule to decide, as i
 and it is truncated only on a backend reassignment. A retried task's log therefore ends with
 its newest attempt but also holds the older ones. A retry that died without printing a `result`
 line of its own would have the previous attempt's successful `result` read as its own, and the
-limit ruled out. `feeder.result_event` walks back from the end and stops at the last attempt's
-`{"type": "system", "subtype": "init"}` line.
+limit ruled out. `limits.result_event` (in `feeder.py` until the usage limit plan's U1 moved it)
+walks back from the end and stops at the last attempt's `{"type": "system", "subtype": "init"}`
+line.
 
 **A retry refused before launch keeps the old attempt's timings.** Pre flight and the R48
 stranded branch refusal both raise before the launch upsert, so the record goes halted with the
@@ -99,3 +100,23 @@ something landed is reported blocked, and one on a model with no `models.fallbac
 read as a limit at all; both are follow up work. A queued retry holds its room in the batch,
 but the dead model is never marked on the wait path, so fresh cards still fill any room the
 retries leave.
+
+## Follow up: the usage limit plan's U1, the shared reader
+
+`limits.read_death` now answers confirmed, refuted, or unconfirmed for a death, and returns the
+CLI's reset time beside a confirmed reading. Three things about that reset were not where they
+looked.
+
+- The reset comes from a `rate_limit_event` line whose `rate_limit_info.status` is `rejected`.
+  Key on that field alone. The fixtures from real runs carry `"overageStatus": "rejected"` beside
+  `"status": "allowed"` on an account with overage off, on a turn that ran normally, so a match
+  on the word rejected anywhere in the event reads every healthy run as a limit.
+- A `rate_limit_event` with status `allowed_warning` can sit above the last attempt's `init`
+  line. It belongs to no attempt, and the same `init` bound that guards the `result` line
+  guards it.
+- Two limits can be rejected in one attempt, a session's and a week's. The reader takes the
+  later reset, since the model is back only when both have lifted.
+
+The `init` bound has one hole the reader cannot close from the log. An attempt that prints
+nothing, a CLI that fails to start for one, leaves no `init` line of its own, so the walk runs
+into the attempt before it and reads that attempt's `result` as this one's.
