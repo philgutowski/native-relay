@@ -19,7 +19,8 @@ from datetime import datetime
 
 from . import (adapters, audit as audit_module, brief as brief_module, contracts, gitread,
                feeder as feeder_module, manifest as manifest_module, notify, pair as pair_module,
-               progress, run as run_module, state, summary, tail as tail_module, verify)
+               progress, run as run_module, state, summary, tail as tail_module,
+               testloop, testpass, verify)
 
 EXIT_OK = run_module.EXIT_OK
 EXIT_CONFIG = run_module.EXIT_CONFIG
@@ -221,6 +222,34 @@ def build_parser():
                             "reads only")
     feed_verb.add_argument("--json", action="store_true", dest="as_json",
                            help="with --status, print one JSON object")
+
+    # The browser test loop's one pass (browser test loop plan, U5, R24). The manifest comes
+    # first because `--cards` takes every argument after it.
+    test_verb = verbs.add_parser("test", help="run one browser test pass under the feeder "
+                                              "sidecar's [test_loop]: a full tour, or a check "
+                                              "of named landed cards; filing or report only")
+    test_verb.add_argument("manifest")
+    what = test_verb.add_mutually_exclusive_group(required=True)
+    what.add_argument("--tour", action="store_true",
+                      help="a full tour of every area the tour document lists")
+    what.add_argument("--cards", nargs="+", metavar="ID",
+                      help="a check of these landed cards and nothing else")
+    test_verb.add_argument("--report-only", action="store_true", dest="report_only",
+                           help="write every finding to the findings file beside the manifest "
+                                "and launch no filing process; the tracker is untouched")
+    test_verb.add_argument("--stopped-area", action="append", default=[], metavar="NAME",
+                           dest="stopped_areas",
+                           help="an area the loop has stopped testing, as the tour document's "
+                                "heading spells it; repeat the flag for more than one")
+    test_verb.add_argument("--plan-area", action="append", default=[], metavar="NAME",
+                           dest="plan_areas",
+                           help="an area at the patch cap: file one attended planning card for "
+                                "it, outside the per pass cap; repeat the flag for more than one")
+    test_verb.add_argument("--budget", type=int, metavar="N",
+                           help="the cards left in the loop's budget; default is the sidecar's "
+                                "max_cards_total")
+    test_verb.add_argument("--model", metavar="NAME",
+                           help="the model the test process runs on; default is the sidecar's")
     return parser
 
 
@@ -1216,6 +1245,48 @@ def _detach_feeder(args, paths, config, env, out):
     return EXIT_OK
 
 
+def cmd_test(args, env, out, launch_kwargs=None, prepare_kwargs=None):
+    """One browser test pass (browser test loop plan, U5). Exit codes keep the contract every
+    verb has: 0 the pass ran, 1 the manifest, the sidecar, or the command line is wrong and
+    nothing was launched, 2 the pass is recorded as not run or failed, 3 another runner holds
+    the lease. The pass record's path is the last line printed on 0 and 2.
+
+    A feeder manifest may list no tasks, so it loads with the feeder allowance the read only
+    verbs use; the sidecar is required, since the loop is switched on there and nowhere else.
+    `launch_kwargs` and `prepare_kwargs` are the suite's way in; an operator never passes them.
+    """
+    manifest, failure = _load(args.manifest, out, feeder_ok=True)
+    if failure:
+        return failure
+    paths = feeder_module.paths_for(args.manifest)
+    if not os.path.isfile(paths.config):
+        out.write("no feeder sidecar sits beside %s, so no [test_loop] table switches the loop "
+                  "on; relay test needs %s\n" % (args.manifest, paths.config))
+        return EXIT_CONFIG
+    result = manifest_module.validate(manifest, check_environment=True, env=env,
+                                      check_branches=False, feeder_supplies_tasks=True)
+    if not result.ok:
+        for error in result.errors:
+            out.write("error: %s\n" % error)
+        out.write("refusing to test under an invalid manifest; fix it and run validate again\n")
+        return EXIT_CONFIG
+    try:
+        config = feeder_module.load_config(paths.config)
+    except feeder_module.ConfigError as exc:
+        out.write("%s\n" % exc)
+        return EXIT_CONFIG
+    request = testpass.Request(
+        kind=testloop.CHECK if args.cards else testloop.TOUR,
+        cards=tuple(args.cards or ()), report_only=args.report_only,
+        stopped_areas=tuple(args.stopped_areas), plan_areas=tuple(args.plan_areas),
+        budget=args.budget, model=args.model)
+    outcome = testpass.run(manifest, config, request, env, out=out, home=env.get("HOME"),
+                           launch_kwargs=launch_kwargs, prepare_kwargs=prepare_kwargs)
+    if outcome.message:
+        out.write("%s\n" % outcome.message)
+    return outcome.exit_code
+
+
 def _choose_dispatch_policy(out, input_fn=input, stdin=None):
     """Ask only a real terminal operator.  EOF and every noninteractive path are serial."""
     source = sys.stdin if stdin is None else stdin
@@ -1245,6 +1316,7 @@ VERBS = {
     "pair": cmd_pair,
     "dispatch": cmd_dispatch,
     "feed": cmd_feed,
+    "test": cmd_test,
 }
 
 
