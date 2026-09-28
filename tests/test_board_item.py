@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import _paths
 import _repo
 from _fakes import FakeAdapter
-from relay import adapters, audit, closeout, contracts, state, summary
+from relay import adapters, audit, closeout, contracts, filing, state, summary
 from relay.adapters import github as gh_adapter
 
 
@@ -196,10 +196,12 @@ class BoardLag(unittest.TestCase):
         self.assertEqual(adapters.board_lag(FakeAdapter(), "T-1"), (None, None))
 
     def test_the_read_adds_no_public_method(self):
+        # The interface plus the Filing pair (browser test loop plan, U4), the same surface
+        # `test_adapters.SharedContract` asserts for every adapter.
         public = {attr for attr in dir(_adapter(TwoTruths({}, {})))
                   if not attr.startswith("_")
                   and callable(getattr(_adapter(TwoTruths({}, {})), attr))}
-        self.assertEqual(public, set(adapters.INTERFACE))
+        self.assertEqual(public, set(adapters.INTERFACE) | set(filing.ADAPTER_METHODS))
 
 
 class OpenIssueStatus(unittest.TestCase):
