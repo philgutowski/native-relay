@@ -151,6 +151,12 @@ class SelectFindings(unittest.TestCase):
         self.assertEqual(titles(chosen.over_budget), ["Finding 3", "Finding 4", "Finding 5"])
         self.assertEqual(chosen.over_cap, ())
 
+    def test_a_tie_between_the_cap_and_the_budget_names_the_budget(self):
+        chosen = testloop.select_findings(numbered(["high"] * 12), cap=10, budget_left=10)
+        self.assertEqual(len(chosen.to_file), 10)
+        self.assertEqual(len(chosen.over_budget), 2)
+        self.assertEqual(chosen.over_cap, ())
+
     def test_outcomes_follow_report_order(self):
         findings = [finding("medium", title="a"), finding("low", title="b"),
                     finding("high", area="Billing", title="c"), finding("high", title="d")]
@@ -217,6 +223,15 @@ class GenerationFor(unittest.TestCase):
         filed = dict(FILED, B={"generation": generation, "area": "Search"})
         self.assertEqual(testloop.cards_to_check(["B"], filed), ())
 
+    def test_a_filed_record_with_no_readable_generation_reads_as_the_last(self):
+        for record in ({"area": "Search"}, {"generation": None}, {"generation": "1"},
+                       {"generation": True}, {"generation": 7}, "1"):
+            with self.subTest(record=record):
+                filed = {"7": record}
+                self.assertEqual(testloop.cards_to_check(["7"], filed), ())
+                self.assertEqual(testloop.generation_for(testloop.CHECK, "7", ["7"], filed),
+                                 testloop.LAST_GENERATION)
+
     def test_an_unknown_pass_kind_is_refused(self):
         with self.assertRaises(ValueError):
             testloop.generation_for("sweep", None, (), FILED)
@@ -245,6 +260,12 @@ class AreaPatches(unittest.TestCase):
         checks = {"1": ["Billing"], "3": [], "9": ["Search"], "7": ["Billing"]}
         patches = testloop.area_patches(self.FILED, checks, cap=3)
         self.assertEqual(patches.counts, {"Billing": 1})
+
+    def test_a_cap_that_is_not_a_positive_integer_is_refused(self):
+        for cap in (0, -1, True, "3", None):
+            with self.subTest(cap=cap):
+                with self.assertRaises(ValueError):
+                    testloop.area_patches(self.FILED, {"1": ["Search"]}, cap=cap)
 
 
 def tour(findings=(), new_cards=0, status=testloop.RAN):
@@ -294,6 +315,28 @@ class ShouldStop(unittest.TestCase):
                          testloop.STOP_BUDGET)
         self.assertEqual(self.stop(tour(numbered(["high"] * 5), new_cards=2), cards=filed),
                          testloop.STOP_BUDGET)
+
+    def test_a_spent_budget_names_the_budget_not_open_findings(self):
+        findings = numbered(["high", "high"])
+        chosen = testloop.select_findings(findings, cap=10, budget_left=0)
+        self.assertEqual(chosen.to_file, ())
+        self.assertEqual(self.stop(tour(findings, new_cards=0), cards=30),
+                         testloop.STOP_BUDGET)
+
+    def test_a_clean_tour_names_clean_even_with_the_budget_spent(self):
+        self.assertEqual(self.stop(tour(numbered(["low"])), cards=30), testloop.STOP_CLEAN)
+
+    def test_an_entry_that_is_not_a_finding_is_not_serious(self):
+        self.assertEqual(self.stop(tour(["stray", ["high"], numbered(["low"])[0]])),
+                         testloop.STOP_CLEAN)
+        self.assertEqual(self.stop(tour(["stray"] + numbered(["high"]), new_cards=1)), None)
+
+    def test_an_unknown_kind_or_status_is_refused(self):
+        for result in (testloop.PassResult(kind="Tour", status=testloop.RAN),
+                       testloop.PassResult(kind=testloop.TOUR, status="Ran")):
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    self.stop(result, rounds=9)
 
     def test_the_round_cap_stops_at_round_six_not_five(self):
         busy = tour(numbered(["high"]), new_cards=1)

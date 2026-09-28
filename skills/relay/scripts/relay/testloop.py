@@ -41,7 +41,7 @@ LAST_GENERATION = 2
 
 # What `select_findings` did with each finding, in the order the report gave them.
 FILE = "file"
-OUTCOME_LOW = "low"
+OUTCOME_LOW = LOW
 OVER_CAP = "over_cap"
 OVER_BUDGET = "over_budget"
 DROPPED = "dropped"
@@ -55,12 +55,16 @@ STOP_BUDGET = "budget"
 STOP_REPORT_ONLY = "report_only"
 
 _RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
+_KINDS = (TOUR, CHECK)
+_STATUSES = (RAN, NOT_RUN, FAILED)
 
 
 @dataclass(frozen=True)
 class Settings:
-    """The loop values the rules read, with the plan's defaults. The sidecar's `[test_loop]`
-    table carries every one of these names, so it can be passed in place of this."""
+    """The loop's caps, with the plan's defaults. The sidecar's `[test_loop]` table carries
+    every one of these names, so it can be passed in place of this. `should_stop` reads the
+    round, clock, and card budget caps; the caller hands `max_cards_per_pass` to
+    `select_findings` and `max_patches_per_area` to `area_patches`."""
     max_rounds: int = 6
     max_hours: int = 24
     max_cards_per_pass: int = 10
@@ -137,8 +141,14 @@ def validate_finding(finding):
 
 
 def is_serious(finding):
-    """True for a finding of a severity that becomes a card."""
-    return finding.get("severity") in FILED_SEVERITIES
+    """True for a finding of a severity that becomes a card. Anything that is not a finding
+    object, an invalid entry a report carried among them, is not serious."""
+    return isinstance(finding, dict) and finding.get("severity") in FILED_SEVERITIES
+
+
+def _positive(name, value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("%s must be a positive integer, not %r" % (name, value))
 
 
 @dataclass(frozen=True)
@@ -161,10 +171,10 @@ def select_findings(findings, cap, budget_left, stopped_areas=()):
     whatever its severity. A low goes to the lows whatever the room. The serious findings are
     ordered highest severity first, keeping report order within a severity, and the first
     min(`cap`, `budget_left`) are filed. The rest are past the loop's budget when the budget is
-    the tighter bound, and over the per pass cap otherwise. A finding with a severity outside
+    as tight as the cap or tighter, since the loop stops on its budget after this pass, and
+    over the per pass cap otherwise. A finding with a severity outside
     the known three raises ValueError, since the caller passes only validated findings."""
-    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
-        raise ValueError("the per pass cap must be a positive integer, not %r" % (cap,))
+    _positive("the per pass cap", cap)
     if isinstance(budget_left, bool) or not isinstance(budget_left, int):
         raise ValueError("the loop budget left must be an integer, not %r" % (budget_left,))
     budget_left = max(0, budget_left)
@@ -178,7 +188,7 @@ def select_findings(findings, cap, budget_left, stopped_areas=()):
                              % (index + 1, severity, ", ".join(SEVERITIES)))
         if finding.get("area") in stopped:
             outcomes[index] = DROPPED
-        elif severity == LOW:
+        elif not is_serious(finding):
             outcomes[index] = OUTCOME_LOW
         else:
             serious.append(index)
@@ -199,9 +209,17 @@ def select_findings(findings, cap, budget_left, stopped_areas=()):
 
 def _generation(card, filed):
     """The generation the loop recorded for `card`, or None for a card the loop did not file.
-    `filed` is {card id: record}, each record carrying `generation`."""
+    `filed` is {card id: record}, each record carrying `generation`. A record whose generation
+    is missing or unreadable reads as the last, so a damaged state file can only stop checks,
+    never let the loop fan out (R18)."""
     record = filed.get(str(card))
-    return None if record is None else record.get("generation")
+    if record is None:
+        return None
+    generation = record.get("generation") if isinstance(record, dict) else None
+    if (isinstance(generation, bool) or not isinstance(generation, int)
+            or not 1 <= generation <= LAST_GENERATION):
+        return LAST_GENERATION
+    return generation
 
 
 def cards_to_check(landed, filed):
@@ -223,7 +241,7 @@ def generation_for(kind, card, sent, filed):
     if kind == TOUR:
         return 1
     if kind != CHECK:
-        raise ValueError("pass kind must be %s or %s, not %r" % (TOUR, CHECK, kind))
+        raise ValueError("pass kind must be one of %s, not %r" % (", ".join(_KINDS), kind))
     if card is None or str(card) not in {str(item) for item in sent}:
         return LAST_GENERATION
     parent = _generation(card, filed)
@@ -245,6 +263,7 @@ def area_patches(filed, checks, cap):
     record}, each record carrying `area`; `checks` is {card id: areas}, the areas each landed
     card's check filed in. A card the loop did not file patches nothing, and a card counts
     once however many findings its check filed in its area."""
+    _positive("the patch cap", cap)
     counts = {}
     for card, areas in checks.items():
         record = filed.get(str(card))
@@ -275,22 +294,31 @@ def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
     the loop's start and the present, in one frame; `cards_filed` the loop's new cards so far,
     this pass's included.
 
-    A tour that ran decides first on what it found: a report only tour stops; a tour with no
-    high or medium finding of any outcome stops clean; a tour whose high and medium findings
-    produced no new card, all commented onto open cards or dropped for stopped areas, stops on
-    open findings rather than clean; and the round cap stops a tour at `max_rounds`. A check
-    pass never stops on what it found. At any pass, one that did not run among them, the card
-    budget and the clock stop the loop."""
-    if result.status == RAN and result.kind == TOUR:
-        if report_only:
-            return STOP_REPORT_ONLY
-        if not any(is_serious(finding) for finding in result.findings):
-            return STOP_CLEAN
-        if result.new_cards == 0:
-            return STOP_OPEN_FINDINGS
+    In order: a report only tour that ran stops; a tour that ran with no high or medium finding
+    of any outcome stops clean; the card budget stops any pass, one that did not run among
+    them, once `max_cards_total` is reached, and so names the budget rather than open findings
+    for a tour whose findings it kept from filing; a tour that ran whose high and medium
+    findings produced no new card, all commented onto open cards or dropped for stopped areas,
+    stops on open findings rather than clean; the round cap stops a tour that ran at
+    `max_rounds`; and the clock stops any pass. A check pass never stops on what it found. A
+    pass kind or status outside the known words raises ValueError rather than reading as a
+    pass that did not run."""
+    if result.kind not in _KINDS:
+        raise ValueError("pass kind must be one of %s, not %r"
+                         % (", ".join(_KINDS), result.kind))
+    if result.status not in _STATUSES:
+        raise ValueError("pass status must be one of %s, not %r"
+                         % (", ".join(_STATUSES), result.status))
+    toured = result.status == RAN and result.kind == TOUR
+    if toured and report_only:
+        return STOP_REPORT_ONLY
+    if toured and not any(is_serious(finding) for finding in result.findings):
+        return STOP_CLEAN
     if cards_filed >= settings.max_cards_total:
         return STOP_BUDGET
-    if result.status == RAN and result.kind == TOUR and rounds >= settings.max_rounds:
+    if toured and result.new_cards == 0:
+        return STOP_OPEN_FINDINGS
+    if toured and rounds >= settings.max_rounds:
         return STOP_ROUNDS
     if now - started_at >= timedelta(hours=settings.max_hours):
         return STOP_CLOCK
