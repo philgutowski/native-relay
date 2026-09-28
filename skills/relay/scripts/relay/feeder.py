@@ -48,7 +48,9 @@ Three rules carry it, each for a failure that would otherwise cost a day:
     queued for a retry after the wait. That wait is still a reading of timing, and
     `limit_waits` counts it. Past `limit_waits_max` in a row the feeder leaves with exit 2 and
     reports the blocked ones. A Cycle where something landed, a death was slow, or nothing
-    died clears the count.
+    died clears the count. The count survives a restart, since a restart is no evidence about
+    the account; leaving on it clears it, and so does `feed --clear-limits`, which empties the
+    marks too.
 
     Every mark, move, and hold is one `limit` event in the events file.
 
@@ -109,8 +111,11 @@ EXIT_HALTED = 2
 EXIT_LEASE = 3
 EXIT_INTERRUPTED = 130
 
-# The state counts that mean "this many times in a row", reset when a feeder starts.
-STREAKS = ("limit_waits", "idle_waits", "unreadable_waits")
+# The state counts about the queue that mean "this many times in a row", reset when a feeder
+# starts. The third such count, `limit_waits`, is about the account, so it is handed to the next
+# feeder and cleared only by evidence: a Cycle that breaks the row, the leave on
+# `limit_waits_exhausted`, or `feed --clear-limits` (usage limit plan, KTD8, R9).
+QUEUE_STREAKS = ("idle_waits", "unreadable_waits")
 
 # A task in one of these statuses is one the next run will not launch, so it holds no room in
 # the batch. `skipped` is here because a skip costs no session: the runner rechecks the card at
@@ -886,9 +891,12 @@ def new_state():
     # `retry_blocked` is {id: the blocked record's started_at} for each blocked task the next
     # run is to relaunch. The stamp is how a retry the run never reached is told from one that
     # ran: every launch restamps it. `hold` is None, or the record a held post cycle hook left
-    # (issue #53), which only `release_hold` clears.
+    # (issue #53), which only `release_hold` clears. `last_held` is {id: model} for the Tasks the
+    # last Cycle held, kept for `feed --status` alone: held is derived from the marks and the
+    # fallback table each time the machine asks, and nothing reads this back.
     return {"halts": {}, "limit_waits": 0, "idle_waits": 0, "unreadable_waits": 0, "cycles": 0,
-            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}, "hold": None}
+            "reported": {}, "refused": {}, "exhausted": {}, "retry_blocked": {}, "hold": None,
+            "last_held": {}}
 
 
 def _torn_line(path):
@@ -907,10 +915,11 @@ def _torn_line(path):
 
 class Feeder:
     def __init__(self, paths, config, deps, env, out, dry_run=False, once=False,
-                 retry_blocked=()):
+                 retry_blocked=(), clear_limits=False):
         self.paths, self.config, self.deps = paths, config, deps
         self.env, self.out = env, out
         self.dry_run, self.once = dry_run, once
+        self.clear_limits = clear_limits          # `feed --clear-limits --restart`
         self.requested = tuple(retry_blocked)     # `feed --retry-blocked ID`, taken once
         self.name = os.path.basename(os.path.splitext(paths.manifest)[0])
         self.state = self._load_state()
@@ -1005,15 +1014,20 @@ class Feeder:
             return self.leave(self.stop(EXIT_CONFIG, "stopping: %s" % exc, "state_unreadable"))
         self.recording = True
         if not self.once:
-            # The "in a row" counts belong to one feeder's life. A stop, a restart, or an
+            # The queue's "in a row" counts belong to one feeder's life. A stop, a restart, or an
             # interrupt would otherwise hand a partial count to the next feeder. `--once` keeps
-            # them, since a feeder driven a cycle at a time by cron has no other life.
-            for key in STREAKS:
+            # them, since a feeder driven a cycle at a time by cron has no other life. The usage
+            # limit row is not among them: a restart is no evidence the account came back.
+            for key in QUEUE_STREAKS:
                 self.state[key] = 0
+        if self.clear_limits:
+            # `feed --clear-limits --restart`: cleared here, under the lock, so the feeder that
+            # just left cannot save its marks back over the clearing.
+            self.log(cleared_sentence(clear_limit_state(self.state)))
         # A scanned out card is named at every process start, not only the first one for the
         # life of the state file (issue #58): `reported` otherwise carries `scan_skip:<id>`
         # forward for ever, and an operator who missed the first line never sees another. Unlike
-        # STREAKS this is not guarded by `not self.once`: a `--once` cron start is as much a
+        # QUEUE_STREAKS this is not guarded by `not self.once`: a `--once` cron start is as much a
         # start as a long lived process is, and the mechanism paragraph names it explicitly. A
         # tight `--once` cron line against a persistently dirty card therefore renotifies every
         # tick rather than once; that repetition is the tradeoff this issue asks for, naming the
@@ -1158,6 +1172,12 @@ class Feeder:
                               len(launch.running), scanned, held)
         held_fresh = [card["id"] for card in fresh
                       if card["id"] in held and card["id"] not in scanned]
+        if not self.dry_run:
+            # A held card is work the mark holds back as much as a held Task is, so `--status`
+            # names it beside them, on the model it is routed to.
+            self.state.setdefault("last_held", {}).update(
+                {card["id"]: choose_model(card, routing, config)[0] for card in fresh
+                 if card["id"] in held_fresh})
         entries = []
         for card in batch:
             model, note = routes[card["id"]]
@@ -1434,7 +1454,9 @@ class Feeder:
         self.write_marks(decision.marks, decision.notify, died)
         marks = dict(facts.marks, **decision.marks)
         refused = self.write_moves(decision.moves, marks)
-        self.announce_holds(list(decision.holds) + refused, marks)
+        holds = list(decision.holds) + refused
+        self.announce_holds(holds, marks)
+        self.state.setdefault("last_held", {}).update(holds)
         for task_id in decision.retry:
             self.queue_retry(mine[task_id])
         if decision.retry:
@@ -1588,6 +1610,7 @@ class Feeder:
         if not self.dry_run:
             self.announce_holds(held, marks)
             self.held_seen = set(held)
+            self.state["last_held"] = {task_id: model for task_id, model in held}
         return Launch(running=running, retry=retry, defer=defer, held=tuple(held), queue=queue)
 
     def route(self, card, routing, marks):
@@ -2125,6 +2148,42 @@ def release_hold(paths, now=datetime.now):
     return hold, None
 
 
+def clear_limit_state(state):
+    """Empty the marks and zero the usage limit row in `state`, in place (R13). Returns (the
+    marks cleared, {model: the stored entry}; the row it stood at). The held snapshot goes too,
+    since nothing is held once no model is marked. The retry queue stays: a queued retry held on
+    a marked model is launched at the next Cycle once the mark is gone. `halts`, `refused`, and
+    `reported` are not the limit's, and stay as well."""
+    marks, streak = dict(state.get("exhausted") or {}), state.get("limit_waits", 0)
+    state["exhausted"], state["limit_waits"], state["last_held"] = {}, 0, {}
+    return marks, streak
+
+
+def cleared_sentence(cleared):
+    """The log line and the verb's answer for what `clear_limit_state` returned."""
+    marks, streak = cleared
+    return ("the usage limits were cleared by the operator: marks on %s, usage limit waits at %s"
+            % (", ".join(sorted(marks)) or "no model", streak))
+
+
+def clear_limits(paths, now=datetime.now):
+    """`feed --clear-limits` with no feeder alive: clear the marks and the row in the state
+    file. Returns (what `clear_limit_state` returned, or None when there is no state file; None,
+    or the reason the clearing could not be logged). The caller holds the feeder lock, as for
+    `release_hold`, whose shape this follows: ConfigError on a state file that cannot be read,
+    OSError when it cannot be written and nothing was cleared, and a log failure only reported."""
+    if not os.path.exists(paths.state):
+        return None, None
+    state = read_state(paths)
+    cleared = clear_limit_state(state)
+    write_state(paths, state)
+    try:
+        append_log(paths, log_line(now(), cleared_sentence(cleared)))
+    except OSError as exc:
+        return cleared, str(exc)
+    return cleared, None
+
+
 def liveness(paths, state, hostname=None):
     """{"running": True or False, "pid": ..., "detail": sentence} for this manifest's feeder.
 
@@ -2162,17 +2221,85 @@ def liveness(paths, state, hostname=None):
                       "went down" % pid}
 
 
-def status_report(paths, hostname=None):
+def status_marks(state, paths, now):
+    """{model: {since, until, source, expired}} for each mark in the state file (R12). A mark an
+    older feeder wrote as a bare time reads as `read_mark` reads it, which is the one case that
+    needs the sidecar's `fallback_hours`, so only then is the sidecar read. One that cannot be
+    read, like any sidecar problem, only costs that mark its exact expiry: the default stands.
+    A mark that cannot be read at all is shown with no times and source `unreadable`, since the
+    feeder drops it next Cycle."""
+    exhausted = state.get("exhausted") or {}
+    hours = Config().fallback_hours
+    if any(isinstance(value, str) for value in exhausted.values()):
+        try:
+            hours = load_config(paths.config).fallback_hours
+        except (ConfigError, OSError):
+            pass
+    marks = {}
+    for model, value in exhausted.items():
+        mark = read_mark(value, hours)
+        if mark is None:
+            marks[model] = {"since": None, "until": None, "source": "unreadable", "expired": True}
+        else:
+            marks[model] = dict(mark_record(mark), expired=mark.until <= now)
+    return marks
+
+
+def status_held(state, marks):
+    """{id: model} for the Tasks and cards the last Cycle held, less any whose model has no live
+    mark left: the snapshot is only rewritten by a Cycle, so after the feeder leaves it would
+    otherwise go on naming work a mark that has since expired no longer holds."""
+    return {task_id: model for task_id, model in (state.get("last_held") or {}).items()
+            if not (marks.get(model) or {"expired": True})["expired"]}
+
+
+def status_report(paths, hostname=None, now=datetime.now):
     """What `feed --status --json` prints: the liveness answer beside what the state file holds
-    about the feeder, its last cycle, and its last event. Raises ConfigError on an unreadable
-    state file."""
+    about the feeder, its last cycle, its last event, and the usage limit state: the marks, the
+    Tasks and cards the last Cycle held, the queued retries, and the row of usage limit waits.
+    Raises ConfigError on an unreadable state file."""
     state = read_state(paths)
+    marks = status_marks(state, paths, now())
     report = {"manifest": paths.manifest, "state_path": paths.state, "events_path": paths.events,
               "process": state.get("process"), "cycles": state.get("cycles", 0),
               "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event"),
-              "hold": state.get("hold") or None}
+              "hold": state.get("hold") or None, "marks": marks,
+              "held": status_held(state, marks),
+              "retry_blocked": sorted(state.get("retry_blocked") or {}, key=natural_key),
+              "limit_waits": state.get("limit_waits", 0)}
     report.update(liveness(paths, state, hostname=hostname))
     return report
+
+
+def limit_lines(report):
+    """The usage limit lines of `feed --status`, none when nothing is marked, held, queued, or
+    counted: one per mark with its expiry and where that came from, then the held work, the
+    row, and the queued retries."""
+    lines = []
+    for model, mark in sorted((report.get("marks") or {}).items()):
+        if mark["source"] == "unreadable":
+            lines.append("usage limit mark: %s, unreadable, dropped at the next cycle" % model)
+            continue
+        source = ("the reset the CLI printed" if mark["source"] == limits.MARK_CLI
+                  else "fallback_hours after the death at %s" % mark["since"])
+        line = "usage limit mark: %s until %s, from %s" % (model, mark["until"], source)
+        if mark.get("expired"):
+            line += ", expired, dropped at the next cycle"
+        lines.append(line)
+    held = report.get("held") or {}
+    if held:
+        lines.append("held by a usage limit: %s" % ", ".join(
+            "%s on %s" % (task_id, held[task_id]) for task_id in sorted(held, key=natural_key)))
+    if report.get("limit_waits"):
+        lines.append("usage limit waits in a row: %s" % report["limit_waits"])
+    if lines:
+        # Not for the retry queue alone, which `--clear-limits` leaves where it is. A live
+        # feeder refuses the bare flag, so the hint names the form it takes.
+        lines.append("clear them with feed %s --clear-limits%s once the limit is over"
+                     % (report["manifest"], " --restart" if report.get("running") else ""))
+    if report.get("retry_blocked"):
+        lines.append("queued retries: %s" % _ids(report["retry_blocked"]))
+    return lines
 
 
 def _ids(values):
@@ -2195,11 +2322,12 @@ def feeder_line(report, with_hold=True):
 
 
 def status_lines(report):
-    """`feed --status` for a person: the feeder line, a set hold in full, then the last cycle
-    and the last event."""
+    """`feed --status` for a person: the feeder line, a set hold in full, the usage limit state,
+    then the last cycle and the last event."""
     lines = [feeder_line(report, with_hold=False), "manifest: %s" % report["manifest"]]
     if report.get("hold"):
         lines.append("hold: " + hold_sentence(report["manifest"], report["hold"]))
+    lines += limit_lines(report)
     process = report.get("process") or {}
     if process.get("runner_tree"):
         lines.append("runner tree: %s" % process["runner_tree"])

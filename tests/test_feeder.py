@@ -1438,8 +1438,8 @@ class Exits(FeederCase):
         self.assertEqual(self.feed(feeder.Config(idle_waits_max=3)), 0)
         self.assertEqual(self.sleeps, [1800] * 6)
 
-    def test_a_feeder_that_leaves_on_the_stop_file_hands_no_partial_count_to_the_next(self):
-        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+    def stop_after_the_first_wait(self):
+        """Deps whose first sleep drops the stop file, so a feeder waits once and leaves."""
         original = self.deps
 
         def deps():
@@ -1448,12 +1448,81 @@ class Exits(FeederCase):
                                            feeder.request_stop(self.paths))
             return built
         self.deps = deps
+        return original
+
+    QUICK_DEATHS = {"1": halted(8), "2": halted(8), "3": halted(8)}
+
+    def test_a_feeder_that_leaves_on_the_stop_file_hands_its_usage_limit_count_to_the_next(self):
+        """KTD8. The usage limit row is about the account, and a restart is no evidence the
+        account came back, so the next feeder takes the row where the last one left it."""
+        self.plans = [dict(self.QUICK_DEATHS), {}]
+        original = self.stop_after_the_first_wait()
+        self.assertEqual(self.feed(feeder.Config(limit_waits_max=1)), 0)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.state()["limit_waits"], 1)
+        os.unlink(self.paths.stop)
+        self.deps = original
+        self.plans = [dict(self.QUICK_DEATHS), {}]
+        # One more waited Cycle is past the maximum of one only because the count was handed on.
+        self.assertEqual(self.feed(feeder.Config(limit_waits_max=1)), 2)
+        self.assertEqual(self.sleeps, [1800])
+        self.assertEqual(self.events()[-1]["reason"], "limit_waits_exhausted")
+
+    def test_a_feeder_that_waited_once_starts_again_with_the_streak_at_one(self):
+        """Covers AE6. Logs with no result line, every Task halting in seconds, nothing landing:
+        the feeder waits `usage_limit` and the streak reads 1, and after a restart it still
+        reads 1."""
+        self.plans = [dict(self.QUICK_DEATHS), {}]
+        original = self.stop_after_the_first_wait()
+        self.feed()
+        self.assertEqual([event["reason"] for event in self.events("waiting")], ["usage_limit"])
+        self.assertEqual(self.state()["limit_waits"], 1)
+        os.unlink(self.paths.stop)
+        self.deps = original
+        seen = []
+        self.before_run = lambda: seen.append(self.state()["limit_waits"])
+        self.plans = [{}]
+        self.feed()
+        self.assertEqual(seen, [1])
+
+    def test_a_feeder_that_left_on_limit_waits_exhausted_starts_again_at_zero(self):
+        """R9. The leave told a person, so the row is cleared then and the next feeder has the
+        whole allowance again."""
+        self.plans = [dict(self.QUICK_DEATHS), {}]
+        self.assertEqual(self.feed(feeder.Config(limit_waits_max=0)), 2)
+        self.assertEqual(self.events()[-1]["reason"], "limit_waits_exhausted")
+        self.assertEqual(self.state()["limit_waits"], 0)
+        seen = []
+        self.before_run = lambda: seen.append(self.state()["limit_waits"])
+        self.plans = [dict(self.QUICK_DEATHS), {}]
+        original = self.stop_after_the_first_wait()
+        self.assertEqual(self.feed(feeder.Config(limit_waits_max=1)), 0)
+        self.deps = original
+        self.assertEqual(seen, [0])
+        self.assertEqual(self.state()["limit_waits"], 1)
+
+    def test_a_feeder_that_leaves_on_the_stop_file_hands_no_partial_queue_count_to_the_next(self):
+        # The row of unreadable reads is about the queue, not the account, and still starts at
+        # zero with each feeder.
+        self.adapter.ready_reason = "gh exited 1: HTTP 502"
+        original = self.stop_after_the_first_wait()
         self.assertEqual(self.feed(), 0)                   # one failed read, then the stop file
         self.assertEqual(self.sleeps, [1800])
         os.unlink(self.paths.stop)
         self.deps = original
         self.assertEqual(self.feed(), 1)                   # three of its own, not two
         self.assertEqual(self.sleeps, [1800, 1800, 1800])
+
+    def test_a_start_zeroes_the_queue_counts_and_keeps_the_usage_limit_count(self):
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), idle_waits=2, unreadable_waits=1, limit_waits=3)))
+        self.lease = [True]
+        self.stop_after_the_first_wait()
+        self.assertEqual(self.feed(), 0)
+        self.assertEqual(self.runs, [])
+        state = self.state()
+        self.assertEqual((state["idle_waits"], state["unreadable_waits"], state["limit_waits"]),
+                         (0, 0, 3))
 
     def test_once_keeps_the_streak_counts_between_cycles(self):
         self.adapter.ready_reason = "gh exited 1: HTTP 502"
@@ -2734,6 +2803,227 @@ class PostCycle(FeederCase):
         self.assertEqual(done.returncode, 4)
         self.assertEqual(os.path.realpath(done.stdout.strip()), os.path.realpath(self.repo))
         self.assertEqual(done.stderr, "warn")
+
+
+class LimitVisibility(FeederCase):
+    """U5 of the usage limit plan (R12, R13): `feed --status` shows the usage limit state, and
+    `feed --clear-limits` clears it by name."""
+    CLI_MARK = {"since": "2026-09-19T08:40:00", "until": "2026-09-19T09:04:00", "source": "cli"}
+
+    def call(self, *flags, deps=None):
+        args = cli.build_parser().parse_args(["feed", self.manifest_path] + list(flags))
+        out = io.StringIO()
+        code = cli.cmd_feed(args, self.base_env(), out, deps=deps or self.deps())
+        return code, out.getvalue()
+
+    def limited_state(self, **extra):
+        """A state file a usage limit left: a mark, a held Task, a queued retry, a row of two,
+        and the halts, refusals, and reports that are not the limit's."""
+        state = dict(feeder.new_state(), exhausted={"fable": dict(self.CLI_MARK)},
+                     last_held={"3": "fable"}, limit_waits=2, halts={"2": 1},
+                     refused={"4": "sonnet"}, reported={"blocked:5": "5 blocked"},
+                     retry_blocked={"3": "run 1"})
+        state.update(extra)
+        self.write(self.paths.state, json.dumps(state))
+        return state
+
+    def test_clear_limits_with_no_feeder_alive_clears_the_marks_and_the_row_only(self):
+        before = self.limited_state()
+        code, text = self.call("--clear-limits")
+        self.assertEqual(code, 0, text)
+        self.assertIn("the usage limits were cleared by the operator: marks on fable, usage "
+                      "limit waits at 2", text)
+        self.assertIn("the usage limits were cleared by the operator", self.log_text())
+        state = self.state()
+        self.assertEqual((state["exhausted"], state["limit_waits"], state["last_held"]),
+                         ({}, 0, {}))
+        for key in ("halts", "refused", "reported", "retry_blocked"):
+            self.assertEqual(state[key], before[key], key)
+        # It starts nothing.
+        self.assertEqual(self.runs, [])
+        self.assertFalse(os.path.exists(self.paths.events))
+
+    def test_clear_limits_with_no_state_file_says_so_and_writes_none(self):
+        code, text = self.call("--clear-limits")
+        self.assertEqual(code, 0, text)
+        self.assertIn("nothing to clear", text)
+        self.assertFalse(os.path.exists(self.paths.state))
+
+    def test_clear_limits_beside_a_live_feeder_refuses_and_changes_nothing(self):
+        self.limited_state()
+        with open(self.paths.state, encoding="utf-8") as handle:
+            before = handle.read()
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--clear-limits")
+        finally:
+            held.close()
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("nothing cleared", text)
+        self.assertIn("--clear-limits --restart", text)
+        with open(self.paths.state, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), before)
+        self.assertFalse(os.path.exists(self.paths.stop))
+
+    def test_clear_limits_with_restart_clears_as_the_new_feeder_takes_over(self):
+        # fable is marked with no fallback, so card 2, routed there, would be held. The old
+        # feeder leaves at the stop file, the new one clears under the lock, and 2 runs on fable.
+        self.limited_state(last_held={}, retry_blocked={})
+        self.write(self.paths.routing, "2 fable\n")
+        held = feeder.acquire_lock(self.paths)
+        deps = self.deps()
+        deps.sleep = lambda seconds: held.close()
+        self.plans = [{}]
+        code, text = self.call("--clear-limits", "--restart", "--once", deps=deps)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.ran_on[0]["2"], "fable")
+        state = self.state()
+        self.assertEqual((state["exhausted"], state["limit_waits"], state["halts"]),
+                         ({}, 0, {"2": 1}))
+        self.assertIn("the old feeder is gone, starting", self.log_text())
+        self.assertIn("the usage limits were cleared by the operator: marks on fable",
+                      self.log_text())
+
+    def test_clear_limits_refuses_a_flag_it_would_drop(self):
+        self.limited_state()
+        for flags, said in (
+                (("--clear-limits", "--once"),
+                 "--clear-limits starts nothing unless --restart or --pin is given; drop --once"),
+                (("--clear-limits", "--detach"), "drop --detach"),
+                (("--clear-limits", "--release"), "drop --release"),
+                (("--clear-limits", "--restart", "--dry-run"),
+                 "clears as the new feeder takes over; drop --dry-run"),
+                (("--status", "--clear-limits"), "only read; drop --clear-limits")):
+            code, text = self.call(*flags)
+            self.assertEqual(code, cli.EXIT_CONFIG, flags)
+            self.assertIn(said, text)
+        self.assertEqual(self.state()["exhausted"], {"fable": self.CLI_MARK})
+        self.assertEqual(self.runs, [])
+
+    def test_a_detached_restart_passes_the_flag_to_its_child(self):
+        with mock.patch.object(feeder, "checkout_warning", return_value=None), \
+                mock.patch.object(cli.subprocess, "Popen") as popen:
+            popen.return_value.pid = 4242
+            code, text = self.call("--clear-limits", "--restart", "--detach")
+        self.assertEqual(code, 0, text)
+        command = popen.call_args.args[0]
+        self.assertIn("--clear-limits", command)
+        self.assertIn("--restart", command)
+
+    def test_status_shows_a_mark_from_the_cli_and_its_held_task(self):
+        self.limited_state()
+        code, text = self.call("--status")
+        self.assertEqual(code, 0, text)
+        self.assertIn("usage limit mark: fable until 2026-09-19T09:04:00, from the reset the "
+                      "CLI printed", text)
+        self.assertIn("held by a usage limit: 3 on fable", text)
+        self.assertIn("usage limit waits in a row: 2", text)
+        self.assertIn("queued retries: [3]", text)
+        self.assertNotIn("expired", text)
+        code, text = self.call("--status", "--json")
+        report = json.loads(text)
+        self.assertEqual(report["marks"], {"fable": dict(self.CLI_MARK, expired=False)})
+        self.assertEqual(report["held"], {"3": "fable"})
+        self.assertEqual(report["retry_blocked"], ["3"])
+        self.assertEqual(report["limit_waits"], 2)
+
+    def test_status_shows_a_mark_a_feeder_timed_from_fallback_hours(self):
+        # 2 blocks on fable with a 429 and no reset time beside a landing, and fable has no
+        # fallback: fable is marked for five hours from the death, and 2 is queued and held.
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.plans = [{"2": BlockedLimit.blocked(self, 4)}]
+        self.feed(feeder.Config(default_model="sonnet"))
+        code, text = self.call("--status")
+        self.assertIn("usage limit mark: fable until 2026-09-19T13:50:00, from fallback_hours "
+                      "after the death at 2026-09-19T08:50:00", text)
+        self.assertIn("held by a usage limit: 2 on fable", text)
+        report = json.loads(self.call("--status", "--json")[1])
+        self.assertEqual(report["marks"]["fable"]["source"], "fallback_hours")
+        self.assertEqual(report["marks"]["fable"]["until"], "2026-09-19T13:50:00")
+        self.assertEqual(report["held"], {"2": "fable"})
+        # Past the expiry, a feeder not yet round to drop it shows it as expired.
+        self.clock = datetime(2026, 9, 19, 14, 0)
+        code, text = self.call("--status")
+        self.assertIn("usage limit mark: fable until 2026-09-19T13:50:00", text)
+        self.assertIn("expired, dropped at the next cycle", text)
+
+    def test_status_reads_a_bare_time_mark_an_older_feeder_wrote(self):
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"opus": "2026-09-19T08:00:00"})))
+        report = json.loads(self.call("--status", "--json")[1])
+        self.assertEqual(report["marks"]["opus"]["until"], "2026-09-19T13:00:00")
+        self.assertEqual(report["marks"]["opus"]["source"], "fallback_hours")
+
+    def test_a_pinned_takeover_carries_the_flag_to_the_extract(self):
+        # `--pin` takes over as `--restart` does, so the pair is not refused.
+        proc = mock.MagicMock(stdout=[], returncode=0)
+        proc.__enter__.return_value = proc
+        with mock.patch.object(feeder, "checkout_warning", return_value="edits reach cycles"), \
+                mock.patch.object(cli, "_pin_plan", return_value=SimpleNamespace()), \
+                mock.patch.object(cli, "_pin_line", return_value="the extract"), \
+                mock.patch.object(feeder, "pin_extract", return_value="/extract"), \
+                mock.patch.object(cli.subprocess, "Popen", return_value=proc) as popen:
+            code, text = self.call("--clear-limits", "--pin")
+        self.assertEqual(code, 0, text)
+        command = popen.call_args.args[0]
+        self.assertIn("--clear-limits", command)
+        self.assertIn("--restart", command)
+
+    def test_status_beside_a_live_feeder_names_the_restart_form_of_the_flag(self):
+        self.limited_state(process={"pid": os.getpid(), "hostname": feeder.socket.gethostname(),
+                                    "started_at": "2026-09-19T08:00:00", "cycle": 1})
+        held = feeder.acquire_lock(self.paths)
+        try:
+            code, text = self.call("--status")
+        finally:
+            held.close()
+        self.assertIn("feeder: running", text)
+        self.assertIn("clear them with feed %s --clear-limits --restart once the limit is over"
+                      % self.manifest_path, text)
+        code, text = self.call("--status")
+        self.assertIn("clear them with feed %s --clear-limits once the limit is over"
+                      % self.manifest_path, text)
+
+    def test_status_names_a_held_card_beside_the_held_tasks(self):
+        # fable is marked with no fallback: card 2, routed there, is held and never appended.
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"fable": dict(self.CLI_MARK)})))
+        self.adapter.ready_cards = [card(1), card(2)]
+        self.write(self.paths.routing, "2 fable\n")
+        self.plans = [{}]
+        self.feed(feeder.Config(default_model="sonnet"), once=True)
+        self.assertNotIn("2", self.listed())
+        report = json.loads(self.call("--status", "--json")[1])
+        self.assertEqual(report["held"], {"2": "fable"})
+
+    def test_status_drops_a_held_task_whose_mark_has_expired(self):
+        # The snapshot is only rewritten by a Cycle, and no feeder has cycled since.
+        self.limited_state()
+        self.clock = datetime(2026, 9, 19, 9, 30)
+        code, text = self.call("--status")
+        self.assertIn("usage limit mark: fable until 2026-09-19T09:04:00", text)
+        self.assertNotIn("held by a usage limit", text)
+        self.assertEqual(json.loads(self.call("--status", "--json")[1])["held"], {})
+
+    def test_status_survives_a_sidecar_it_cannot_open(self):
+        os.mkdir(self.paths.config)
+        self.write(self.paths.state, json.dumps(dict(
+            feeder.new_state(), exhausted={"opus": "2026-09-19T08:00:00"})))
+        code, text = self.call("--status", "--json")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(json.loads(text)["marks"]["opus"]["until"], "2026-09-19T13:00:00")
+
+    def test_status_with_no_marks_prints_no_limit_lines(self):
+        self.plans = [{}]
+        self.feed()
+        code, text = self.call("--status")
+        self.assertEqual(code, 0, text)
+        for said in ("usage limit", "held by", "queued retries", "--clear-limits"):
+            self.assertNotIn(said, text)
+        report = json.loads(self.call("--status", "--json")[1])
+        self.assertEqual((report["marks"], report["held"], report["retry_blocked"],
+                          report["limit_waits"]), ({}, {}, [], 0))
 
 
 class RealRunner(FeederCase):
