@@ -148,12 +148,21 @@ class PassCase(unittest.TestCase):
                 "role": "assistant", "content": [{"type": "text", "text": text}]}}) + "\n")
         return path
 
-    def queue_entry(self, fixture, git_sh=None, sleep=0):
+    def queue_entry(self, fixture, git_sh=None, sleep=0, stream=None):
+        """One stub entry. `fixture` is the transcript the stub writes under HOME; None writes
+        none, which is how a test stands in for a CLI whose transcript landed somewhere the
+        runner does not look (issue #113). `stream` is echoed to stdout, so it lands in the
+        run's own stdout log."""
         self.entry += 1
         entry_dir = os.path.join(self.queue, str(self.entry))
         os.makedirs(entry_dir)
+        entry = {"exit": 0, "sleep": sleep}
+        if fixture:
+            entry["fixture"] = fixture
+        if stream:
+            entry["stream"] = stream
         with open(os.path.join(entry_dir, "entry.json"), "w") as handle:
-            json.dump({"fixture": fixture, "exit": 0, "sleep": sleep}, handle)
+            json.dump(entry, handle)
         if git_sh:
             with open(os.path.join(entry_dir, "git.sh"), "w") as handle:
                 handle.write(git_sh)
@@ -395,6 +404,67 @@ class TourAndFiling(PassCase):
         self.assertEqual(outcome.record["status"], testloop.RAN)
         self.assertEqual(outcome.record["filed"], [])
         self.assertIn(contracts.FILED_FENCE_TAG, "\n".join(outcome.record["notes"]))
+
+
+class ReadFromTheLog(PassCase):
+    """Issue #113. A CLI running under `CLAUDE_CONFIG_DIR` writes its transcript under that
+    directory's projects folder, where neither the runner's prediction nor its glob looks, while
+    the stdout log holds the same final message under stream-json. The stub stands in for that
+    with an entry that writes no fixture and echoes the transcript lines as its stream."""
+
+    def log_only(self, text, name, git_sh=None):
+        self.queue_entry(None, git_sh=git_sh, stream=self.transcript(text, name))
+
+    def test_a_test_report_in_the_stdout_log_alone_is_read_and_the_record_names_the_log(self):
+        self.log_only(report_text([finding(1), finding(2, area="Invoices")]), "test-1")
+        outcome, _ = self.run_pass(testpass.Request(report_only=True))
+        record = outcome.record
+        self.assertEqual(outcome.exit_code, testpass.EXIT_OK, record["reason"])
+        self.assertEqual(record["status"], testloop.RAN)
+        self.assertFalse(os.path.exists(record["transcripts"]["test"]))
+        self.assertEqual(record["read_from"]["test"],
+                         self.store().path("logs", "pass-1.test.stdout.log"))
+        self.assertEqual([item["title"][:9] for item in record["findings"]],
+                         ["Finding 1", "Finding 2"])
+        with open(self.paths().findings) as handle:
+            self.assertIn("Finding 2: the invoices page", handle.read())
+
+    def test_a_filed_block_in_the_stdout_log_alone_is_read_and_the_cards_are_confirmed(self):
+        self.test_process([finding(1), finding(2, area="Invoices")])
+        self.log_only(filed_text([{"finding": 1, "action": "filed", "id": "T-2"},
+                                  {"finding": 2, "action": "filed", "id": "T-3"}]),
+                      "filing-2", git_sh=filing_sh(["- [ ] T-2 Finding 1", "- [ ] T-3 Finding 2"]))
+        outcome, _ = self.run_pass()
+        record = outcome.record
+        self.assertEqual(record["status"], testloop.RAN, record["reason"])
+        self.assertEqual([entry["id"] for entry in record["filed"]], ["T-2", "T-3"])
+        self.assertFalse(os.path.exists(record["transcripts"]["filing"]))
+        self.assertEqual(record["read_from"]["filing"],
+                         self.store().path("logs", "pass-1.filing.stdout.log"))
+        self.assertEqual(record["read_from"]["test"], record["transcripts"]["test"])
+        self.assertTrue(os.path.exists(record["transcripts"]["test"]))
+        self.assertEqual([note for note in record["notes"] if "could not be read" in note], [])
+
+    def test_a_process_with_no_assistant_record_anywhere_is_the_one_no_transcript_failure(self):
+        self.queue_entry(None)
+        outcome, _ = self.run_pass(testpass.Request(report_only=True))
+        record = outcome.record
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(record["status"], testloop.FAILED)
+        self.assertIn("left no transcript to read", record["reason"])
+        self.assertEqual(record["read_from"], {"test": None, "filing": None})
+        self.assertFalse(os.path.exists(self.paths().findings))
+        self.assert_checkout_clean()
+
+    def test_a_transcript_at_the_predicted_path_is_still_the_file_named(self):
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1"])
+        outcome, _ = self.run_pass()
+        record = outcome.record
+        self.assertEqual(record["status"], testloop.RAN, record["reason"])
+        self.assertEqual(record["read_from"], record["transcripts"])
+        self.assertTrue(all(os.path.exists(path) for path in record["read_from"].values()))
 
 
 class ReportOnly(PassCase):

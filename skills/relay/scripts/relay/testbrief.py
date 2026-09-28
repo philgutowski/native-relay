@@ -24,7 +24,7 @@ import json
 import os
 import re
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import backends, brief, contracts, testloop
 
@@ -76,6 +76,10 @@ class Report:
     findings: tuple = ()
     approval_steps: tuple = ()
     error: str | None = None
+    # The file the final message was read from: the transcript, or the process's stdout log
+    # when the reader fell back to it (issue #113). None when neither held an assistant
+    # record, which is the one case a pass may call "no transcript to read".
+    source: str | None = None
 
     @property
     def ok(self):
@@ -192,10 +196,25 @@ def render(kind, url, commit, tour, cards=(), stopped_areas=()):
 
 def final_message(transcript_path, backend="claude", log_path=None):
     """The full text of the last assistant message in a process's transcript, or None when
-    there is none. Read through the backend's normalizer, the same lines `classify` reads, and
-    joined the same way, but kept whole: this is the reader for any block that can be longer
-    than the digest's tail. A sidechain message is not the process's own final word and is
-    skipped, as `classify` skips it."""
+    there is none. `read_final_message` with the source dropped."""
+    return read_final_message(transcript_path, backend=backend, log_path=log_path)[0]
+
+
+def read_final_message(transcript_path, backend="claude", log_path=None):
+    """The full text of the last assistant message in a process's transcript, and the file it
+    was read from, as `(text, source)`; `(None, None)` when there is none. Read through the
+    backend's normalizer, the same lines `classify` reads, and joined the same way, but kept
+    whole: this is the reader for any block that can be longer than the digest's tail. A
+    sidechain message is not the process's own final word and is skipped, as `classify` skips
+    it.
+
+    The normalizer decides where the lines come from. When the transcript is not at the path
+    the runner predicted, the claude one reads the run's own stdout log instead, which holds
+    the same assistant records under stream-json (issue #113: a CLI running under
+    `CLAUDE_CONFIG_DIR` writes its transcript under that directory's projects folder, and both
+    the prediction and the glob miss it). `source` is then the log; otherwise it is the
+    transcript. A caller that refuses to parse until the transcript exists at the predicted
+    path bypasses that fallback, so no caller should."""
     module = backends.build(backend)
     evidence = module.normalize_transcript(transcript_path, log_path=log_path)
     last_text = None
@@ -210,7 +229,9 @@ def final_message(transcript_path, backend="claude", log_path=None):
                  if isinstance(block, dict) and block.get("type") == "text"]
         if texts:
             last_text = "\n".join(texts)
-    return last_text
+    if last_text is None:
+        return None, None
+    return last_text, evidence.source or transcript_path
 
 
 def last_block(text):
@@ -272,10 +293,15 @@ def parse_text(text):
                   approval_steps=tuple(step.strip() for step in approval_steps))
 
 
+NO_FINAL_MESSAGE = "no final message in the transcript or the stdout log"
+
+
 def parse(transcript_path, backend="claude", log_path=None):
-    """Read the Test report from the process's transcript: the full final message, then
-    `parse_text`. A transcript with no assistant message at all is an error like any other."""
-    text = final_message(transcript_path, backend=backend, log_path=log_path)
+    """Read the Test report from the process's transcript, or from its stdout log when the
+    transcript is absent: the full final message, then `parse_text`. The report's `source`
+    names the file read. A process that left no assistant record in either file is an error
+    like any other, with `source` None so a caller can tell it from a bad block."""
+    text, source = read_final_message(transcript_path, backend=backend, log_path=log_path)
     if text is None:
-        return Report(error="the transcript holds no final message")
-    return parse_text(text)
+        return Report(error=NO_FINAL_MESSAGE)
+    return replace(parse_text(text), source=source)

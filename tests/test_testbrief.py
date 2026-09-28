@@ -328,6 +328,25 @@ class ParseFromTheTranscript(unittest.TestCase):
         report = testbrief.parse(os.path.join(TRANSCRIPTS, "does-not-exist.jsonl"))
         self.assertFalse(report.ok)
         self.assertIn("no final message", report.error)
+        self.assertIsNone(report.source)
+
+    def test_the_report_names_the_transcript_it_was_read_from(self):
+        report = testbrief.parse(fixture("test_report.jsonl"))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.source, fixture("test_report.jsonl"))
+
+    def test_a_missing_transcript_falls_back_to_the_stdout_log_and_names_it(self):
+        """Issue #113: the log holds the same assistant records under stream-json, so the
+        report is read from it when the transcript is not where the runner predicted."""
+        missing = os.path.join(TRANSCRIPTS, "does-not-exist.jsonl")
+        report = testbrief.parse(missing, log_path=fixture("test_report.jsonl"))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.source, fixture("test_report.jsonl"))
+        text, source = testbrief.read_final_message(missing, log_path=fixture("test_report.jsonl"))
+        self.assertIsNotNone(testbrief.last_block(text))
+        self.assertEqual(source, fixture("test_report.jsonl"))
+        self.assertEqual(testbrief.read_final_message(missing, log_path=missing + ".log"),
+                         (None, None))
 
 
 class ApprovalSteps(unittest.TestCase):

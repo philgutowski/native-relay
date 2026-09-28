@@ -213,6 +213,18 @@ class ParseFromTheTranscript(unittest.TestCase):
         filed = filing.parse(os.path.join(TRANSCRIPTS, "does-not-exist.jsonl"))
         self.assertFalse(filed.ok)
         self.assertIn("no final message", filed.error)
+        self.assertIsNone(filed.source)
+
+    def test_a_missing_transcript_falls_back_to_the_stdout_log_and_names_it(self):
+        """Issue #113: the same reader the Test pass uses, so the filed block is read from the
+        stdout log when the transcript is not where the runner predicted."""
+        log = self.write([block([{"finding": 1, "action": "filed", "id": "7"}])])
+        filed = filing.parse(os.path.join(TRANSCRIPTS, "does-not-exist.jsonl"), log_path=log)
+        self.assertTrue(filed.ok, filed.error)
+        self.assertEqual([entry["id"] for entry in filed.entries], ["7"])
+        self.assertEqual(filed.source, log)
+        present = filing.parse(log)
+        self.assertEqual(present.source, log)
 
     def test_a_test_report_transcript_carries_no_filed_block(self):
         filed = filing.parse(os.path.join(TRANSCRIPTS, "test_report.jsonl"))
