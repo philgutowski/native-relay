@@ -98,12 +98,13 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.parse
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 
 from . import (adapters, brief, contracts, gitread, limits, manifest as manifest_module,
                manifestedit, run as run_module, state as state_module,
-               summary as summary_module)
+               summary as summary_module, testloop)
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -261,11 +262,13 @@ class TestLoop:
     model: str = ""
     effort: str = ""
     timeout_minutes: int = 60
-    max_rounds: int = 6
-    max_hours: int = 24
-    max_cards_per_pass: int = 10
-    max_patches_per_area: int = 3
-    max_cards_total: int = 30
+    # The caps take their defaults from `testloop.Settings`, so the rules and the sidecar
+    # can never disagree on one.
+    max_rounds: int = testloop.Settings.max_rounds
+    max_hours: int = testloop.Settings.max_hours
+    max_cards_per_pass: int = testloop.Settings.max_cards_per_pass
+    max_patches_per_area: int = testloop.Settings.max_patches_per_area
+    max_cards_total: int = testloop.Settings.max_cards_total
     labels: tuple = ()                # the labels every filed card carries (R13)
     allowed_tools: tuple = ("Bash", "Read", "Grep", "Glob")
     design_model: str = ""
@@ -419,7 +422,11 @@ def load_config(path):
         problems.append("ready.jql must be a string")
     values["ready_command"] = tuple(command)
     values["ready_source"] = {key: ready[key] for key in ("labels", "jql") if key in ready}
-    values["test_loop"] = _load_test_loop(loop_values, problems)
+    # `allowed_models` is a tuple here only when it was valid or left at its default.
+    allowed = values.get("allowed_models", Config.allowed_models)
+    values["test_loop"] = _load_test_loop(loop_values,
+                                          allowed if isinstance(allowed, tuple) else None,
+                                          problems)
     if not problems:
         config = Config(**values)
         if config.default_model not in config.allowed_models:
@@ -437,59 +444,73 @@ def load_config(path):
         elif config.post_cycle_hold and config.post_cycle_mode == HOOK_DETACHED:
             # A detached hook is never waited on, so there is no exit code to hold on.
             problems.append("hooks.post_cycle_hold needs post_cycle_mode = \"%s\"" % HOOK_BLOCKING)
-        # Checked against the allowed set like models.default, so a typo in a loop model is
-        # refused at load rather than found by the first pass that launches on it.
-        for key in ("model", "design_model"):
-            model = getattr(config.test_loop, key)
-            if model and model not in config.allowed_models:
-                problems.append("test_loop.%s %r is not in models.allowed" % (key, model))
     if problems:
         raise ConfigError("%s: %s" % (path, "; ".join(problems)))
     return config
 
 
-def _load_test_loop(values, problems):
+def _test_loop_problem(name, value, default, allowed):
+    """What is wrong with one `[test_loop]` value, or None. An empty string is the unset value
+    and passes here; `_load_test_loop` asks for the keys an enabled loop needs."""
+    if isinstance(default, bool):
+        return None if isinstance(value, bool) else "must be true or false"
+    if isinstance(default, int):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            return "must be a positive integer"
+        return None
+    if isinstance(default, str):
+        if not isinstance(value, str):
+            return "must be a string"
+        if name == "design_note" or not value:
+            return None
+        if not value.strip():
+            return "must not be blank"
+        if name in ("model", "design_model") and allowed is not None and value not in allowed:
+            # Checked like models.default, so a typo is refused at load, not at the first pass.
+            return "%r is not in models.allowed" % value
+        if name == "tour":
+            parts = os.path.normpath(value).split(os.sep)
+            if os.path.isabs(value) or value.startswith("~") or parts[0] == os.pardir:
+                return "must be a path relative to the target repository, inside it"
+        if name == "url":
+            split = urllib.parse.urlsplit(value)
+            if split.scheme not in ("http", "https") or not split.netloc:
+                return "must be an http or https URL with a host"
+        return None
+    if not _is_strings(value):
+        return "must be an array of strings%s" % (
+            " (an argument list, never a shell string)" if name == "prepare" else "")
+    if name == "prepare":
+        return "must start with the program to run" if value and not value[0].strip() else None
+    if any(not item.strip() for item in value):
+        return "must not hold a blank string"
+    if name == "allowed_tools" and not value:
+        # An empty allow list is no allow list at launch, which is no bound on the Test process.
+        return "must name at least one tool"
+    return None
+
+
+def _load_test_loop(values, allowed, problems):
     """The `[test_loop]` table's values as a TestLoop, appending every problem to `problems`,
-    each one naming its `test_loop.` key. No values gives the default, so a sidecar without the
-    table loads exactly as it did before the loop existed (AE8)."""
+    each one naming its `test_loop.` key. `allowed` is the models a loop model may name, or None
+    when `models.allowed` is itself wrong and already named. No values gives the default, so a
+    sidecar without the table loads exactly as it did before the loop existed (AE8)."""
     defaults, loaded = TestLoop(), {}
     for spec in fields(TestLoop):
         if spec.name not in values:
             continue
-        key, value, default = "test_loop." + spec.name, values[spec.name], getattr(
-            defaults, spec.name)
-        if isinstance(default, bool):
-            if not isinstance(value, bool):
-                problems.append("%s must be true or false" % key)
-                continue
-        elif isinstance(default, int):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                problems.append("%s must be a positive integer" % key)
-                continue
-        elif isinstance(default, str):
-            if not isinstance(value, str):
-                problems.append("%s must be a string" % key)
-                continue
-        elif not _is_strings(value):
-            problems.append("%s must be an array of strings%s" % (
-                key, " (an argument list, never a shell string)"
-                if spec.name == "prepare" else ""))
-            continue
+        value = values[spec.name]
+        problem = _test_loop_problem(spec.name, value, getattr(defaults, spec.name), allowed)
+        if problem:
+            problems.append("test_loop.%s %s" % (spec.name, problem))
         else:
-            value = tuple(value)
-        loaded[spec.name] = value
-    if os.path.isabs(loaded.get("tour", "")):
-        problems.append("test_loop.tour must be a path relative to the target repository")
-    if "allowed_tools" in loaded and not loaded["allowed_tools"]:
-        # An empty allow list is no allow list at launch, which is no bound on the Test process.
-        problems.append("test_loop.allowed_tools must name at least one tool")
+            loaded[spec.name] = tuple(value) if isinstance(value, list) else value
     loop = TestLoop(**loaded)
     if loop.enabled:
         for need in _TEST_LOOP_NEEDS:
             if need in values and need not in loaded:
                 continue              # given in the wrong shape, and already named for it
-            given = getattr(loop, need)
-            if not (given.strip() if isinstance(given, str) else given):
+            if not getattr(loop, need):
                 problems.append("test_loop.enabled needs test_loop.%s" % need)
     return loop
 

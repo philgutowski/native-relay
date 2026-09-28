@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 import _paths
-from relay import feeder
+from relay import feeder, testloop
 
 FULL = """\
 [models]
@@ -109,7 +109,7 @@ class TestLoopConfig(unittest.TestCase):
         self.assertNotIn("test_loop.url", message)
 
     def test_enabled_with_nothing_names_every_missing_key(self):
-        message = self.refused("[test_loop]\nenabled = true\nprepare = []\nurl = \" \"\n")
+        message = self.refused("[test_loop]\nenabled = true\nprepare = []\nurl = \"\"\n")
         for need in ("tour", "url", "prepare"):
             self.assertIn("test_loop.enabled needs test_loop.%s" % need, message)
 
@@ -164,9 +164,35 @@ class TestLoopConfig(unittest.TestCase):
             message = self.refused("[test_loop]\n%s = 3\n" % key)
             self.assertIn("test_loop.%s must be a string" % key, message)
 
-    def test_an_absolute_tour_is_refused(self):
-        message = self.refused(ON.replace('"docs/tour.md"', '"/tmp/tour.md"'))
-        self.assertIn("test_loop.tour must be a path relative to the target repository", message)
+    def test_a_tour_outside_the_target_repository_is_refused(self):
+        for bad in ("/tmp/tour.md", "../other/tour.md", "docs/../../tour.md", "~/tour.md"):
+            message = self.refused(ON.replace('"docs/tour.md"', '"%s"' % bad))
+            self.assertIn("test_loop.tour must be a path relative to the target repository",
+                          message)
+        self.assertEqual(self.load(ON.replace('"docs/tour.md"', '"docs/../tour.md"'))
+                         .test_loop.tour, "docs/../tour.md")
+
+    def test_a_url_without_an_http_scheme_and_host_is_refused(self):
+        for bad in ("localhost:5173", "http//x", "file:///tmp/app.html", "https://"):
+            message = self.refused(ON.replace('"http://127.0.0.1:5173"', '"%s"' % bad))
+            self.assertIn("test_loop.url must be an http or https URL with a host", message)
+
+    def test_blank_strings_are_refused_where_they_would_mean_nothing(self):
+        for key in ("model", "effort", "design_model", "tour", "url"):
+            self.assertIn("test_loop.%s must not be blank" % key,
+                          self.refused('[test_loop]\n%s = " "\n' % key))
+        self.assertIn("test_loop.prepare must start with the program to run",
+                      self.refused('[test_loop]\nprepare = ["", "--restart"]\n'))
+        for key in ("labels", "allowed_tools"):
+            self.assertIn("test_loop.%s must not hold a blank string" % key,
+                          self.refused('[test_loop]\n%s = ["Read", " "]\n' % key))
+        self.assertEqual(self.load('[test_loop]\ndesign_note = " "\n').test_loop.design_note, " ")
+
+    def test_the_cap_defaults_are_the_rules_own(self):
+        loop, settings = feeder.TestLoop(), testloop.Settings()
+        for name in ("max_rounds", "max_hours", "max_cards_per_pass", "max_patches_per_area",
+                     "max_cards_total"):
+            self.assertEqual(getattr(loop, name), getattr(settings, name))
 
     def test_test_loop_that_is_not_a_table_is_refused(self):
         message = self.refused("test_loop = true\n")
@@ -174,11 +200,17 @@ class TestLoopConfig(unittest.TestCase):
 
     def test_loop_problems_are_named_with_the_other_sidecar_problems(self):
         message = self.refused("[feeder]\nbatch = 0\n[test_loop]\nmax_rounds = 0\n"
-                               'labels = "loop"\n')
+                               'labels = "loop"\nmodel = "haiku"\n')
         for expected in ("batch must be a positive integer",
                          "test_loop.max_rounds must be a positive integer",
-                         "test_loop.labels must be an array of strings"):
+                         "test_loop.labels must be an array of strings",
+                         "test_loop.model 'haiku' is not in models.allowed"):
             self.assertIn(expected, message)
+
+    def test_a_wrong_models_allowed_is_named_once_and_skips_the_loop_model_check(self):
+        message = self.refused('[models]\nallowed = "opus"\n[test_loop]\nmodel = "haiku"\n')
+        self.assertIn("allowed_models must be an array of strings", message)
+        self.assertNotIn("test_loop.model", message)
 
 
 if __name__ == "__main__":
