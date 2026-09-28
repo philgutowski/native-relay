@@ -53,8 +53,14 @@ def fence_regex(tag):
     anchored to a line start so a triple backtick inside the body, which a JSON string copied
     from a page can carry, does not end the block early and turn a whole report into a parse
     error. A body of JSON cannot hold a literal newline inside a string, so a line that is only
-    a fence is never body text."""
-    return re.compile(r"```%s[ \t]*\r?\n(.*?)^```[ \t]*\r?$" % re.escape(tag), re.S | re.M)
+    a fence is never body text. The closer may be indented and may run longer than three
+    backticks, since a process that writes the block inside a list item indents the closer with
+    the rest, and Markdown lets a closer match a longer opener; a line that is only whitespace
+    and backticks is still never body text. The envelope (issue #111) reads through this too, and
+    its body is prose, so there a line that is only a fence inside a learning does end the block
+    early; the Task brief tells the process to quote a fence inline rather than on a line of
+    its own."""
+    return re.compile(r"```%s[ \t]*\r?\n(.*?)^[ \t]*```+[ \t]*\r?$" % re.escape(tag), re.S | re.M)
 
 
 # CLI contracts, observed on CLI_VERSION_TESTED and documented nowhere.

@@ -37,7 +37,9 @@ _GIT_C = re.compile(r"^git(?:\s+-C\s+\S+|\s+--git-dir=\S+|\s+--work-tree=\S+)+\s
 LAST_MESSAGE_CHARS = 200
 ARGUMENT_CHARS = 120
 
-FENCE_RE = re.compile(r"```%s[ \t]*\n(.*?)```" % re.escape(contracts.ENVELOPE_FENCE_TAG), re.S)
+# Issue #111: the envelope shares the fence grammar with the test report and the filed block,
+# so a triple backtick inside a blocker or learning line is body text, not the closer.
+FENCE_RE = contracts.fence_regex(contracts.ENVELOPE_FENCE_TAG)
 STATUS_RE = re.compile(
     r"^[ \t]*(?:[-*]\s*)?[`*]*%s[`*]*\s*:\s*[`*]*(%s)\b" % (contracts.ENVELOPE_STATUS_KEY, "|".join(contracts.ENVELOPE_STATUSES)),
     re.M | re.I,
@@ -271,6 +273,12 @@ def _list_after(block, key):
                 break
         elif KEY_LINE_RE.match(line):
             break
+        elif stripped.startswith("```"):
+            # A fence line: the closer of a block that reached the whole message scan because
+            # its opener carried no tag, or a code block a process opened inside a learning.
+            # It is punctuation, not an item, so it neither joins the list nor ends it
+            # (issue #111).
+            continue
         else:
             items.append(stripped.strip("`"))
     return items
