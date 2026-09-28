@@ -542,7 +542,193 @@ rather than the bare `idle` a genuinely empty queue waits under, and a `--once` 
 the same cycle carries the cards on its `leaving` event instead of losing them to the generic
 `once`.
 
-## 12. Exit codes of a run
+## 12. The browser test loop
+
+Skip this unless the target is a web app and you want the feeder to test it after each landing.
+The loop is a feeder feature, off unless the sidecar's `[test_loop]` table switches it on. It
+runs a Test pass after each cycle that landed cards and a full tour at its start and each time
+the queue drains, files what it finds as cards on the manifest's own tracker, builds them like
+any other card, retests the fixes, and stops on a rule the feeder checks in code.
+`docs/examples/browser-test-loop/` has a sidecar, a tour document template, a driver, and a
+walk through to copy.
+
+A loop needs four things the rest of this document does not ask for. The manifest runs on the
+`claude` backend, since the Test and Filing processes run on `claude` only in this build. A
+markdown tracker pairs only with `[shipping] push = false`, because the adapter reads the tracker
+at the remote when the manifest pushes and the loop never pushes, so every filing would read as
+unconfirmed. The checkout is clean and on its default branch when a pass starts, as it is for a
+run. And the app has a tour document, a `prepare` command, and a browser driver of its own, all
+in its repository.
+
+The table, with its defaults:
+
+```toml
+[test_loop]
+enabled = false               # nothing below is read until this is true
+report_only = false           # findings to <stem>.findings.md, one tour, then stop
+tour = ""                     # required: the tour document, relative to the target repo
+url = ""                      # required: where prepare serves the app, http or https
+prepare = []                  # required: an argument list, never a shell string
+prepare_timeout_seconds = 600
+model = ""                    # empty: the [models] default
+effort = ""                   # empty: the [models] effort
+timeout_minutes = 60          # one Test process
+max_rounds = 6
+max_hours = 24
+max_cards_per_pass = 10
+max_patches_per_area = 3
+max_cards_total = 30
+labels = []                   # every filed card carries these
+allowed_tools = ["Bash", "Read", "Grep", "Glob"]
+design_model = ""             # empty: design cards route like any other
+design_note = ""
+```
+
+- **`enabled`** switches the loop on. A sidecar without the table, or with `enabled = false`,
+  runs exactly as it did before the loop existed: no pass, no `test_loop` state key, no loop
+  events. `enabled = true` without `tour`, `url`, or `prepare` is refused, naming the key.
+- **`report_only`** writes every finding, whatever its severity, to `<stem>.findings.md` beside
+  the manifest and launches no Filing process, so the tracker is untouched. A report only loop
+  runs one full tour and stops with the reason `report_only`. `relay test --report-only` is the
+  same switch for one hand run.
+- **`tour`** is the tour document, a path inside the target repository. Every markdown heading
+  in it is an area, and a finding names its area exactly as the heading spells it; a finding
+  naming anything else is recorded as invalid and never filed. So keep the opening text free of
+  headings, and name there the driver, the signed in session's storage state file, and how to
+  tell the sign in page. List each area's approval steps under its heading.
+- **`url`** is where the app under test is served. The Test process is told the app is there
+  and already serves the tested commit, and it never starts, stops, or moves it.
+- **`prepare`** moves the app to the commit a pass tests and confirms it. It runs in the target
+  repository, in its own process group, with `RELAY_TEST_COMMIT` (the default branch's sha)
+  and `RELAY_TEST_URL` in its environment, under the lease heartbeat. Exit 0 means the app at
+  `url` now serves that commit; anything else, or running past `prepare_timeout_seconds`, which
+  ends its whole group, records the pass as `not_run` with the command's last output line, and
+  nothing is filed. Serve the app from a worktree of its own, outside the checkout the runner
+  merges into, and have `prepare` compare the commit the app reports with `RELAY_TEST_COMMIT`
+  before it exits 0, since a server that looks current can be serving code from before the last
+  merge. A launched process cannot stop a server, so moving and restarting it lives only here.
+- **`prepare` serves the app with its outbound integrations stubbed.** Mail, payments,
+  webhooks, and every other call that leaves the app go to a local stub while the loop runs. The
+  Test brief already tells the Test process never to approve, send, submit, post, or confirm
+  anything that writes outside the app, and to test a feature that ends in an external write up
+  to its approval step and no further. The stub is the second line of defense, so the brief's
+  rule is never the only thing between a tour and a real customer.
+- **`model`** and **`effort`** are the Test process's, the `[models]` values when empty. The
+  model must be in `models.allowed`. While it is marked by a usage limit a pass runs on its
+  `[models] fallback`, and when every model on that chain is held the pass waits for the next
+  pass point. The Filing process runs on the manifest's `[closeout] model` under its closeout
+  timeout.
+- **`timeout_minutes`** bounds one Test process; past it the pass is `failed`.
+- **`max_rounds`** caps full tours that ran, **`max_hours`** caps the loop's clock from its
+  first pass, and **`max_cards_total`** caps the cards the whole loop files. Each stops the loop
+  with its own reason, below.
+- **`max_cards_per_pass`** caps the cards one pass files. The high and medium findings past it,
+  or past what is left of `max_cards_total`, are named in the pass record as over the cap or
+  over the budget, and never filed.
+- **`max_patches_per_area`** is how many times an area's loop cards may land and have their
+  check file in the same area again. At the cap the loop stops testing that area, and the next
+  pass files one planning card for it labelled `attended`, outside the per pass cap, for a
+  person to plan.
+- **`labels`** are put on every card the loop files. The ready source must admit a card carrying
+  them, or the loop files cards nothing builds: on GitHub, without a ready command, every
+  `[ready] labels` value must also be in `test_loop.labels`, and `relay test` refuses the sidecar
+  when one is missing. Under a Jira query or a ready command, check it by hand; after each pass
+  the feeder makes one ready read and notifies once, naming every confirmed card the ready source
+  did not return, and does not tour again for it. Keep `attended` in `[deny] labels`, so a
+  planning card is never appended.
+- **`allowed_tools`** is the Test process's allow list, and must name at least one tool. Its
+  deny list is the manifest's, the runner's own, and `Bash(gh *)`, so a tour cannot reach the
+  tracker by any route. The Test process holds no tracker write tool; only the Filing process
+  files.
+- **`design_model`** and **`design_note`**. A finding that changes what a user sees is filed as
+  a design card, with `design_note` added to its body. The feeder routes a design card the loop
+  filed to `design_model`, which must be in `models.allowed`: after the routing file and before a
+  `**Model:** name` body line, so it holds where the ready source returns empty bodies.
+
+A key the feeder does not know is refused, as everywhere in the sidecar. So are a `prepare`
+written as a string, an integer below one, `labels` or `allowed_tools` that is not an array of
+strings, a `tour` that is absolute or leaves the repository, and a `url` that is not http or
+https with a host.
+
+**When a pass runs.** At the first cycle of a loop with no tour that ran, a full tour before the
+ready read. After a cycle that landed cards, once it has settled and its `post_cycle` hook has
+run, a check of the landed cards that are not the last generation. In an idle cycle, before
+leaving on a true empty queue, a full tour; when it filed a card the ready source returns, the
+feeder goes round to build it instead of leaving. A check that is `not_run`, or that never
+started because the loop model was held, the post cycle hook held, or the cycle's own rules
+stopped the feeder, keeps its cards for the next check. A check that `failed` does not: its
+cards are never checked, since a card the pass refuses to read would otherwise fail every check
+after it. A pass that is `not_run` or `failed` counts as no round, is logged, and is notified
+once per kind and status until a pass of that kind runs.
+
+**Generations.** A card filed by a tour, or by checking a card the loop did not file, is
+generation 1. A card filed by checking a generation 1 card is generation 2, the last: its fix
+lands on the gate alone and is never checked for new cards. That is what stops a check from
+feeding itself.
+
+**Two filed cards touching one file never share a batch.** The feeder holds a filed card out of
+a batch while another card the loop filed with the same cause file is in that batch or listed
+and unsettled, and logs it once. Cards the loop did not file are batched as before.
+
+**How the loop stops.** After each pass the feeder asks these in this order, and the first
+that holds is the stop, with its own reason word, written to the state file's stop record, the
+`test_loop_stopped` event, one notice, and `feed --status`. So a tour that both reaches
+`max_rounds` and brings the loop to `max_cards_total` stops on `budget`, not `round_cap`.
+
+- `report_only`: a report only loop ran its one full tour.
+- `clean`: a full tour found nothing above low. A check pass with only lows never stops the
+  loop.
+- `budget`: the loop has filed `max_cards_total` cards. This is also asked before a pass starts.
+- `open_findings`: a full tour's high and medium findings produced no new card, each going to an
+  open card it was commented onto, a stopped area, or a claim the tracker never confirmed. This
+  is not a clean stop.
+- `round_cap`: `max_rounds` full tours ran.
+- `clock_cap`: `max_hours` have passed since the loop started. This is also asked before a pass
+  starts, so it stops the loop at the next pass point.
+
+A stopped loop starts no further pass, and the feeder goes on building the cards already filed
+under its ordinary rules. The loop's stop does not end the feeder.
+
+**The sign in.** The Test process never types a credential. The operator signs the app in once,
+in a headed browser the driver opens, and the driver writes a browser storage state file that
+every headless visit loads. Keep that file outside the repository: the Test process runs in a
+fresh detached worktree that would not carry an ignored file, and a session never belongs in
+git. The tour document names its path. A missing file, or a visit that lands on the sign in
+page, is a `not_run` report, and signing in again is the operator's step.
+
+**What a pass writes**, all beside the manifest:
+
+| File | What it is |
+|---|---|
+| `<stem>.test/pass-<n>.json` | the pass record: kind, commit, cards checked, status and reason, every finding with its outcome, the confirmed filed and commented ids with each one's area, design flag, and cause file, the over cap, over budget, dropped, low, invalid, and planning findings, the approval steps reached, notes, both transcript paths, and timings |
+| `<stem>.lows.md` | every low finding, appended per pass; lows never reach the tracker |
+| `<stem>.findings.md` | report only mode's findings, appended per pass |
+
+A pass also writes its briefs and logs under the state directory, and the feeder records the loop
+under one state file key, `test_loop`: the start time, the rounds, one entry per pass, the filed
+cards with their generation, area, design flag, and cause file, the patch counts, the stopped
+areas, and the stop record. Every pass writes one `test_pass` event carrying its transcript
+paths, and the stop writes one `test_loop_stopped`. `feed <manifest> --status` prints the loop's
+state: on or off, report only, round and cap, hours used and cap, cards filed per pass, the
+generation counts, the stopped areas, and the stop reason.
+
+**One pass by hand.** `relay test` runs one pass without a feeder, under the same sidecar:
+
+```bash
+python3 skills/relay/scripts/relay_cli.py test <manifest> --tour --report-only
+python3 skills/relay/scripts/relay_cli.py test <manifest> --cards 41 42
+```
+
+`--tour` or `--cards ID...` is required. `--report-only` forces report only mode for this pass,
+`--stopped-area NAME` skips an area and `--plan-area NAME` files its attended planning card,
+each repeatable and each a heading of the tour document, `--budget N` is the cards left in the
+loop's budget (the sidecar's `max_cards_total` by default), and `--model NAME` picks the Test
+process's model. It prints the pass record's path last. Exit codes: 0 the pass ran, 1 the
+manifest, the sidecar, or the command line is wrong and nothing was launched, 2 the pass is
+recorded as not run or failed, 3 another runner holds the lease. Run a report only tour by hand
+before the first feeder with the loop on, and read the findings file and the pass record.
+
+## 13. Exit codes of a run
 
 Exit codes: 0 the run reached the end of the manifest, 1 the manifest or environment is wrong,
 2 the run halted, 3 another runner holds the lease.

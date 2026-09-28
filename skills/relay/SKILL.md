@@ -661,6 +661,25 @@ warning,
 naming the tree it runs from, at launch and in its log: that is the signal to relaunch it with
 `--pin` before trusting the next cycle.
 
+When the target is a web app and the operator wants the feeder to test it after each landing,
+that is the browser test loop, the sidecar's `[test_loop]` table. Section 12 of
+`docs/manifest-authoring.md` has every key with its default and the stop reasons, and
+`docs/examples/browser-test-loop/` has a sidecar, a tour document template, and a driver to copy.
+Ask the operator, rather than guessing, for the tour document's path in their repository, the
+url, and the `prepare` argument list that moves their app's own worktree to `RELAY_TEST_COMMIT`,
+confirms the app serves it, and serves it with its outbound integrations pointed at local
+fakes, so mail, payments, and webhooks never leave the machine. The ready
+source must admit a card carrying the loop's `labels`: on GitHub every `[ready] labels` value
+goes in `test_loop.labels` too, and `attended` stays in `[deny] labels`. The operator signs the
+app in once with their driver's headed mode, writing a storage state file outside the
+repository; never ask for a credential and never type one. The loop needs the `claude` backend,
+and a markdown tracker only under `shipping.push = false`. Before the first feeder with the loop
+on, have the operator run one report only tour by hand and read what it wrote:
+
+```bash
+python3 <runner> test <manifest> --tour --report-only
+```
+
 ## What this skill never does
 
 Never merge, push, or move a card yourself. Never edit a manifest's qualifying sentences, the

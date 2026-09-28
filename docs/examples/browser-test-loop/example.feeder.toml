@@ -1,0 +1,59 @@
+# Feeder sidecar for `relay feed example.toml`, with the browser test loop switched on.
+#
+# Copy it beside your manifest and rename it to the manifest's stem: for `queue.toml` the
+# feeder reads `queue.feeder.toml`. The manifest itself is an ordinary feeder manifest, written
+# the way docs/manifest-authoring.md sections 1 to 11 say, on the `claude` backend, since the
+# Test and Filing processes run on `claude` only in this build. README.md beside this file walks
+# through the rest.
+#
+# Only [ready], [deny], and [test_loop] are set here. Every other table takes its defaults,
+# which docs/examples/feeder/manifest-github-projects.feeder.toml lists. A key the feeder does
+# not know is an error, not ignored.
+
+[ready]
+# GitHub: open issues carrying every one of these labels. Every label named here must also be
+# in test_loop.labels below, or a card the loop files would never reach the ready source, and
+# `relay test` refuses the pairing rather than file cards nothing builds.
+labels = ["ready"]
+
+[deny]
+# The loop files one planning card labelled `attended` for an area that took three patches and
+# still fails. It is a person's card, so the feeder must never append it.
+labels = ["attended"]
+
+[test_loop]
+# Off unless this is true. A sidecar with no [test_loop] table runs exactly as it did before
+# the loop existed.
+enabled = true
+# True writes every finding to `<stem>.findings.md` beside the manifest instead of the tracker,
+# and the loop runs one full tour and stops. The default is false.
+report_only = false
+
+# The three keys an enabled loop cannot run without, and none has a default.
+tour = "docs/tour.md"                          # the tour document, relative to the target repo
+url = "http://127.0.0.1:8765"                  # where `prepare` serves the app under test
+prepare = ["python3", "tools/prepare_app.py"]  # an argument list, never a shell string
+prepare_timeout_seconds = 600                  # prepare is ended whole after this; not_run
+
+# The Test process. Empty model and effort mean the [models] default and effort.
+model = ""
+effort = ""
+timeout_minutes = 60                           # one Test process, then the pass is failed
+allowed_tools = ["Bash", "Read", "Grep", "Glob"]
+
+# The caps, each enforced in code, never in a prompt.
+max_rounds = 6               # full tours; the loop stops after the sixth
+max_hours = 24               # from the loop's first pass
+max_cards_per_pass = 10      # findings past it go to the pass record, not the tracker
+max_cards_total = 30         # cards the whole loop may file
+max_patches_per_area = 3     # patches an area takes before it gets one attended planning card
+
+# What every filed card carries. It must hold every [ready] label, and a label of its own lets
+# a person find the loop's cards on the board. The default is empty.
+labels = ["ready", "test-loop"]
+
+# A finding that changes what a user sees is filed as a design card. With design_model set it
+# builds on that model, unless the routing file names another; design_note is added to its body.
+# Both default to empty, which routes a design card like any other.
+design_model = "fable"
+design_note = "Follow the project's design skill and its design document before changing any page."
