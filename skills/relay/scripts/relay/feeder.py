@@ -1406,10 +1406,12 @@ class Feeder:
                     for task_id, record in mine.items()
                     if record.get("status") in (STATUS_HALTED, STATUS_BLOCKED)
                     and launched_this_cycle(record, start.before.get(task_id))}
+        halt_task = data.get("halt_task")
+        halted_on_limit = (data.get("run_status") == contracts.RUN_HALTED
+                           and readings.get(halt_task, (None, None))[0] == limits.CONFIRMED)
         if (data.get("run_status") == contracts.RUN_HALTED
                 and data.get("halt_class") in contracts.RUN_SCOPED_HALT_CLASSES):
-            halt_task = data.get("halt_task")
-            if readings.get(halt_task, (None, None))[0] != limits.CONFIRMED:
+            if not halted_on_limit:
                 # The remote moved, the lease was lost, or the runner itself failed. None of
                 # that is the task's doing, so counting it would exclude an innocent card on the
                 # next cycle and then the card after it. The original script had this cascade.
@@ -1423,11 +1425,14 @@ class Feeder:
                                               % (halt_task, data.get("halt_class")),
                                  "run_scoped_halt")
             # Its own log says the account's limit ended it, whatever the runner made of that.
-            # The run still stopped there, so a record it never reached is left uncounted, as
-            # the stop above leaves it: counting it would exclude a card for the account's limit.
             self.log("the run halted on %s with class %s, and its log confirms a usage limit: "
                      "read as the limit, not as a fault outside the task"
                      % (halt_task, data.get("halt_class")))
+        if halted_on_limit:
+            # The run stopped on the account's limit, under whatever class, so a halted record
+            # it never reached is the old attempt's: counting it would exclude a card for the
+            # limit. A halt that is not the limit still counts what it left, so a card the run
+            # refuses every Cycle is still excluded and a person told (R3).
             passed_over = frozenset(passed_over) | {
                 task_id for task_id, record in mine.items()
                 if not launched_this_cycle(record, start.before.get(task_id))}
