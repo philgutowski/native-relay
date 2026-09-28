@@ -35,6 +35,11 @@ DEFAULT_LEASE_WAIT_MINUTES = 1440
 RETRY_ALL = object()
 
 
+DEFER_HELP = ("leave this listed task alone for this run: it is not launched, and its record, "
+              "branch, and card stay as they are; repeat the flag for more than one; an id also "
+              "given to --retry-blocked is deferred")
+
+
 def retry_blocked_value(raw):
     """`run --retry-blocked` as the runner takes it: False when absent, True for every blocked
     record, else the frozenset of ids named. A bare flag beside named ids still means every
@@ -90,6 +95,8 @@ def build_parser():
                           metavar="ID",
                           help="retry tasks whose records read blocked; name an id to retry "
                                "only that task, and repeat the flag for more than one")
+    # R10, KTD6. The mirror of `--retry-blocked`, and always named: there is no bare form.
+    run_verb.add_argument("--defer", action="append", metavar="ID", default=[], help=DEFER_HELP)
     run_verb.add_argument("--detach", action="store_true",
                           help="start the run in its own session, logging to the state "
                                "directory, and return at once")
@@ -143,6 +150,8 @@ def build_parser():
     dispatch_verb.add_argument("target", help="a pair file, or a mixed manifest")
     dispatch_verb.add_argument("--retry-blocked", action="store_true",
                                help="retry tasks whose records read blocked")
+    dispatch_verb.add_argument("--defer", action="append", metavar="ID", default=[],
+                               help=DEFER_HELP)
     dispatch_verb.add_argument("--policy", choices=("serial", "parallel"),
                                help="run policy; default is an interactive serial-default choice, or serial without a TTY")
     dispatch_verb.add_argument("--detach", action="store_true",
@@ -319,26 +328,32 @@ def cmd_run(args, env, out):
         out.write("refusing to run an invalid manifest; fix it and run validate again\n")
         return EXIT_CONFIG
     retry_blocked = retry_blocked_value(args.retry_blocked)
-    if isinstance(retry_blocked, frozenset):
-        # A mistyped id would retry nothing and say nothing, which is the one outcome the
-        # operator asked for this flag to avoid.
-        unknown = sorted(retry_blocked - {task.id for task in manifest.tasks})
-        if unknown:
-            out.write("--retry-blocked names %s, not a task in this manifest\n"
-                      % ", ".join(unknown))
-            return EXIT_CONFIG
+    # A mistyped id would retry nothing and say nothing, which is the one outcome the operator
+    # asked for this flag to avoid.
+    if isinstance(retry_blocked, frozenset) and _unlisted("--retry-blocked", retry_blocked,
+                                                          manifest, out):
+        return EXIT_CONFIG
+    defer = frozenset(args.defer)
+    if _unlisted("--defer", defer, manifest, out):
+        return EXIT_CONFIG
+    if defer and manifest.execution.mode == "triple":
+        # Refused here as well as in `run_triple`, so a detached run is refused in the
+        # operator's shell rather than in a log nobody is reading.
+        out.write("%s\n" % run_module.TRIPLE_DEFER_REFUSAL)
+        return EXIT_CONFIG
     adapter, failure = _adapter_for(manifest, env, out)
     if failure:
         return failure
     if getattr(args, "detach", False) or getattr(args, "follow", False):
         # `--follow` implies `--detach`: a foreground run is already in the foreground, so there
         # would be nothing to follow.
-        return _detach(args, manifest, env, out)
+        return _detach(args, manifest, env, out, defer=defer)
     run_kwargs = {
         "adapter": adapter,
         "home": env.get("HOME"),
         "base_env": env,
         "retry_blocked": retry_blocked,
+        "defer": defer,
         "wait_for_lease_seconds": _wait_seconds(args),
         "stream": lambda line: out.write(line + "\n"),
         "notifier": notify.build(getattr(args, "notify", False)),
@@ -354,13 +369,23 @@ def cmd_run(args, env, out):
     return outcome.exit_code
 
 
+def _unlisted(flag, ids, manifest, out):
+    """Whether `ids` names a task the manifest does not list, saying which when it does. The
+    caller refuses with the config exit before the lease. A mistyped `--defer` id would defer
+    nothing and launch the very task it was meant to hold."""
+    unknown = sorted(ids - {task.id for task in manifest.tasks})
+    if unknown:
+        out.write("%s names %s, not a task in this manifest\n" % (flag, ", ".join(unknown)))
+    return bool(unknown)
+
+
 def _wait_seconds(args):
     minutes = getattr(args, "wait_for_lease", None)
     return minutes * 60 if minutes else None
 
 
 def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_minutes=None,
-                   verb="run", policy=None):
+                   verb="run", policy=None, defer=frozenset()):
     """The argv for a detached runner.
 
     `-u` is load-bearing. The child's stdout is `runner.log`, and a block buffered Python writes
@@ -379,6 +404,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     """
     command = [sys.executable, "-u", entry, verb, manifest_path]
     command += run_module.retry_blocked_argv(retry_blocked)
+    command += run_module.defer_argv(defer)
     if notify_on:
         command.append("--notify")
     if wait_minutes:
@@ -390,7 +416,7 @@ def detach_command(entry, manifest_path, retry_blocked, notify_on=False, wait_mi
     return command
 
 
-def _detach(args, manifest, env, out, verb="run"):
+def _detach(args, manifest, env, out, verb="run", defer=frozenset()):
     """Start the same `run` in its own session and return, or follow it when asked. `setsid` does
     not exist on macOS, so the /relay skill had to improvise a wrapper on the first Cratekit run;
     `start_new_session` is the portable form. `caffeinate -i` keeps a Mac awake for the run when
@@ -402,7 +428,7 @@ def _detach(args, manifest, env, out, verb="run"):
                              retry_blocked_value(args.retry_blocked),
                              notify_on=getattr(args, "notify", False),
                              wait_minutes=getattr(args, "wait_for_lease", None),
-                             verb=verb, policy=getattr(args, "policy", None))
+                             verb=verb, policy=getattr(args, "policy", None), defer=defer)
     if shutil.which("caffeinate"):
         command = ["caffeinate", "-i"] + command
     following = getattr(args, "follow", False)
@@ -789,6 +815,9 @@ def cmd_dispatch(args, env, out):
     manifest, failure = _load_dispatch_target(args.target, env, out)
     if failure:
         return failure
+    defer = frozenset(args.defer)
+    if _unlisted("--defer", defer, manifest, out):
+        return EXIT_CONFIG
     adapter, failure = _adapter_for(manifest, env, out)
     if failure:
         return failure
@@ -799,10 +828,10 @@ def cmd_dispatch(args, env, out):
     args.policy = policy
     if getattr(args, "detach", False) or getattr(args, "follow", False):
         args.manifest = args.target
-        return _detach(args, manifest, env, out, verb="dispatch")
+        return _detach(args, manifest, env, out, verb="dispatch", defer=defer)
     outcome = run_module.dispatch(manifest, adapter=adapter, home=env.get("HOME"), base_env=env,
                                   retry_blocked=args.retry_blocked,
-                                  policy=policy,
+                                  policy=policy, defer=defer,
                                   wait_for_lease_seconds=_wait_seconds(args),
                                   stream=lambda line: out.write(line + "\n"),
                                   notifier=notify.build(getattr(args, "notify", False)))

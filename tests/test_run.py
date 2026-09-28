@@ -3409,3 +3409,185 @@ class TripleCoordinator(RunCase):
         self.assertEqual([(records[task.id]["card_in_review_by_run"], records[task.id]["status"],
                            records[task.id]["halt_class"]) for task in manifest.tasks],
                          [(True, contracts.STATUS_HALTED, contracts.HALT_RUNNER_CRASHED)] * 3)
+
+
+class Defer(RunCase):
+    """U3 of the usage limit plan (R10, KTD6): `run --defer ID` passes over one listed task for
+    one run and leaves its record, branch, and card exactly as they were."""
+
+    def raw_record(self, task_id):
+        """The record as the state file holds it, so a comparison is byte for byte."""
+        record = self.store().get(task_id)
+        return None if record is None else json.dumps(record, sort_keys=True)
+
+    def untaken_entries(self):
+        """Stub entries no process has claimed. Empty after a run means every launch was one the
+        test queued for, so a deferred task that launched would leave the next one unclaimed."""
+        return sorted(name for name in os.listdir(self.queue) if name.isdigit()
+                      and not os.path.exists(os.path.join(self.queue, name, ".taken")))
+
+    def halt_t2(self):
+        """T-1 lands and T-2 halts on a dirty tree, then the operator cleans the tree by hand and
+        leaves the record halted, the state a Feeder holding T-2's model would defer."""
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.queue_entry("success.jsonl", DIRTY_AND_HANG_SH)
+        first = self.go(timeout_overrides={"task_seconds": 2})
+        self.assertEqual(first.exit_code, runner.EXIT_HALTED)
+        os.remove(os.path.join(self.repo, "src_half.py"))
+        self.assertTrue(gitread.is_clean(self.repo))
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_HALTED)
+
+    def test_a_deferred_halted_record_is_not_launched_and_is_unchanged(self):
+        self.halt_t2()
+        before = self.raw_record("T-2")
+        tracker_before = self.tracker_at_remote()
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        said = []
+        outcome = self.go(defer=frozenset({"T-2"}), stream=said.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+        self.assertNotIn("relay/T-2", self.relay_branches())
+        self.assertIn("T-2 deferred by --defer; left as it was for this run", said)
+        # The task after it still launched, and it was the only launch: T-2's card line is as
+        # it was, and T-3's is closed.
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        t2_line = [line for line in tracker_before.splitlines() if " T-2 " in line]
+        self.assertEqual([line for line in self.tracker_at_remote().splitlines()
+                          if " T-2 " in line], t2_line)
+        self.assertEqual(self.untaken_entries(), [])
+
+        # The next run without the flag launches the halted task as it would have.
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        outcome = self.go()
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
+
+    def test_a_deferred_task_with_no_record_is_not_launched_and_still_has_none(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        outcome = self.go(defer=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        self.assertIn("- [ ] T-2 Wire the run loop", self.tracker_at_remote())
+
+    def test_a_blocked_record_named_in_both_flags_is_deferred(self):
+        """Without `--defer` this retry reaches R48's stranded branch refusal and halts, which is
+        what `RetryBlocked` pins. Deferred, nothing about T-2 is touched."""
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_blocked("T-2")
+        self.closeout_blocked("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        self.go()
+        before = self.raw_record("T-2")
+        self.assertIn("relay/T-2", self.relay_branches())
+        outcome = self.go(retry_blocked=frozenset({"T-2"}), defer=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+        self.assertIn("relay/T-2", self.relay_branches())
+
+    def test_two_ids_defer_two_tasks(self):
+        self.task_success("T-2")
+        self.closeout_landed("T-2")
+        outcome = self.go(defer=frozenset({"T-1", "T-3"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertIsNone(self.store().get("T-1"))
+        self.assertIsNone(self.store().get("T-3"))
+        self.assertEqual(self.store().get("T-2")["status"], contracts.STATUS_LANDED)
+
+    def test_a_run_with_every_task_deferred_completes_with_exit_zero(self):
+        outcome = self.go(defer=frozenset({"T-1", "T-2", "T-3"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().records(), {})
+        self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
+        self.assertIsNone(self.store().lease())
+
+    def test_the_run_end_audit_writes_nothing_to_a_deferred_record(self):
+        """The audit clears `card_in_review_by_run` on a record whose card it finds out of review.
+        Deferred, the record keeps the flag: this run leaves it exactly as it was."""
+        self.halt_t2()
+        self.store().upsert("T-2", card_in_review_by_run=True)
+        before = self.raw_record("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        outcome = self.go(defer=frozenset({"T-2"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+
+    def go_dispatch(self, **kwargs):
+        kwargs.setdefault("base_env", self.base_env())
+        kwargs.setdefault("home", self.home)
+        kwargs.setdefault("stream", lambda line: None)
+        kwargs.setdefault("launch_kwargs", {"sigkill_grace_seconds": 2, "heartbeat_interval": 0})
+        return runner.dispatch(self.manifest, **kwargs)
+
+    def test_a_dispatch_leaves_a_deferred_halted_record_alone_and_runs_the_rest(self):
+        self.halt_t2()
+        before = self.raw_record("T-2")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        read = []
+        adapter = adapters.build(self.manifest, env=self.base_env())
+        real_read = adapter.read
+        adapter.read = lambda task_id: read.append(task_id) or real_read(task_id)
+        said = []
+        outcome = self.go_dispatch(defer=frozenset({"T-2"}), policy="serial", adapter=adapter,
+                                   stream=said.append)
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.raw_record("T-2"), before)
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        self.assertNotIn("T-2", read, "dispatch read the deferred task's card")
+        self.assertNotIn("T-2", self.store().read()["schedule"]["task_ids"])
+        self.assertIn("T-2 deferred by --defer; left as it was for this run", said)
+
+    def test_a_parallel_dispatch_with_every_task_deferred_completes(self):
+        outcome = self.go_dispatch(defer=frozenset({"T-1", "T-2", "T-3"}), policy="parallel")
+        self.assertEqual(outcome.exit_code, runner.EXIT_OK, outcome.message)
+        self.assertEqual(self.store().records(), {})
+        self.assertEqual(self.store().terminal()["run_status"], contracts.RUN_COMPLETED)
+
+    def test_a_landed_task_named_in_defer_is_not_announced(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.go(defer=frozenset({"T-2", "T-3"}))
+        self.assertEqual(self.store().get("T-1")["status"], contracts.STATUS_LANDED)
+        said = []
+        self.go(defer=frozenset({"T-1", "T-2", "T-3"}), stream=said.append)
+        self.assertFalse(any(line.startswith("T-1 deferred") for line in said), said)
+        self.assertIn("T-2 deferred by --defer; left as it was for this run", said)
+
+    def test_defer_argv_names_each_id_and_is_empty_for_none(self):
+        self.assertEqual(runner.defer_argv(frozenset({"T-3", "T-1"})),
+                         ["--defer", "T-1", "--defer", "T-3"])
+        self.assertEqual(runner.defer_argv(frozenset()), [])
+
+    def triple(self):
+        return replace(self.manifest, execution=mf.Execution("triple"))
+
+    def test_defer_on_a_triple_manifest_refuses_before_the_lease(self):
+        from unittest import mock
+        with mock.patch.object(runner, "_acquire") as acquire:
+            outcome = runner.run_triple(self.triple(), adapter=object(), home=self.home,
+                                        base_env=self.base_env(), stream=None,
+                                        defer=frozenset({"T-1"}))
+        self.assertEqual(outcome.exit_code, runner.EXIT_CONFIG)
+        self.assertEqual(outcome.message, runner.TRIPLE_DEFER_REFUSAL)
+        acquire.assert_not_called()
+        self.assertIsNone(self.store().read())
+
+    def test_a_triple_manifest_without_the_flag_reaches_the_lease_as_before(self):
+        from unittest import mock
+        with mock.patch.object(runner, "_acquire",
+                               return_value=state.AcquireResult(state.LOCKED)) as acquire:
+            outcome = runner.run_triple(self.triple(), adapter=object(), home=self.home,
+                                        base_env=self.base_env(), stream=None)
+        self.assertEqual(outcome.exit_code, runner.EXIT_LEASE)
+        acquire.assert_called_once()

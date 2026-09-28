@@ -466,6 +466,119 @@ reason = "mechanical work, a good use of the grok account"
         self.assertEqual(argv[-2:], ["--policy", "parallel"])
 
 
+class DeferFlag(CliCase):
+    """U3 of the usage limit plan (R10, KTD6): `run --defer ID` at the command line. The run
+    level behaviour is pinned by `test_run.Defer`; these pin the flag, its refusals, and its
+    passage to a detached child."""
+
+    def make_triple(self):
+        with open(self.manifest_path) as handle:
+            text = handle.read()
+        with open(self.manifest_path, "w") as handle:
+            handle.write(text.replace('[permissions]',
+                                      '[execution]\nmode = "triple"\n\n[permissions]', 1))
+
+    def test_the_flag_is_repeatable_and_absent_is_empty(self):
+        parse = cli.build_parser().parse_args
+        self.assertEqual(parse(["run", "m.toml"]).defer, [])
+        self.assertEqual(parse(["run", "m.toml", "--defer", "T-1", "--defer", "T-3"]).defer,
+                         ["T-1", "T-3"])
+        self.assertEqual(parse(["dispatch", "m.toml", "--defer", "T-2"]).defer, ["T-2"])
+
+    def test_run_help_shows_the_flag_and_says_it_wins_over_retry_blocked(self):
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["run", "--help"])
+        help_text = printed.getvalue()
+        self.assertIn("--defer ID", help_text)
+        self.assertIn("--retry-blocked is deferred", " ".join(help_text.split()))
+
+    def test_an_id_the_manifest_does_not_list_refuses_before_the_lease(self):
+        code, out = self.call("run", self.manifest_path, "--defer", "T-9")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn("--defer names T-9, not a task in this manifest", out)
+        self.assertIsNone(self.store().read())
+
+    def test_the_ids_reach_the_runner_as_a_frozenset(self):
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.run_module, "run", return_value=outcome) as run:
+            code, out = self.call("run", self.manifest_path, "--defer", "T-1", "--defer", "T-3")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertEqual(run.call_args.kwargs["defer"], frozenset({"T-1", "T-3"}))
+
+    def test_a_deferred_task_is_left_alone_by_a_real_run(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        code, out = self.call("run", self.manifest_path, "--defer", "T-2")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("T-2 deferred by --defer", out)
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+
+    def test_defer_on_a_triple_manifest_refuses_before_the_lease(self):
+        self.make_triple()
+        with mock.patch.object(cli.manifest_module, "validate",
+                               return_value=manifest_module.ValidationResult()):
+            with mock.patch.object(cli, "_adapter_for", return_value=(SimpleNamespace(), None)):
+                with mock.patch.object(cli.run_module, "run_triple") as run_triple:
+                    code, out = self.call("run", self.manifest_path, "--defer", "T-1")
+                    detached_code, detached_out = self.call("run", self.manifest_path,
+                                                            "--defer", "T-1", "--detach")
+        self.assertEqual(code, cli.EXIT_CONFIG)
+        self.assertIn(cli.run_module.TRIPLE_DEFER_REFUSAL, out)
+        self.assertEqual(detached_code, cli.EXIT_CONFIG)
+        self.assertNotIn("runner detached", detached_out)
+        run_triple.assert_not_called()
+        self.assertIsNone(self.store().read())
+
+    def test_a_triple_manifest_without_the_flag_routes_as_before(self):
+        self.make_triple()
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.manifest_module, "validate",
+                               return_value=manifest_module.ValidationResult()):
+            with mock.patch.object(cli, "_adapter_for", return_value=(SimpleNamespace(), None)):
+                with mock.patch.object(cli.run_module, "run_triple",
+                                       return_value=outcome) as run_triple:
+                    code, out = self.call("run", self.manifest_path)
+        self.assertEqual(code, cli.EXIT_OK, out)
+        run_triple.assert_called_once()
+        self.assertEqual(run_triple.call_args.kwargs["defer"], frozenset())
+
+    def test_detach_command_carries_each_id_and_nothing_when_absent(self):
+        argv = cli.detach_command("/e", "/m", False, defer=frozenset({"T-3", "T-1"}))
+        self.assertEqual(argv[5:], ["--defer", "T-1", "--defer", "T-3"])
+        self.assertNotIn("--defer", cli.detach_command("/e", "/m", False))
+
+    def test_a_detached_run_passes_the_flag_to_its_child(self):
+        self.task_success("T-1")
+        self.closeout_landed("T-1")
+        self.task_success("T-3")
+        self.closeout_landed("T-3")
+        code, out = self.call("run", self.manifest_path, "--defer", "T-2", "--detach")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertIn("runner detached: pid", out)
+        terminal = self.wait_for_terminal()
+        self.assertIsNotNone(terminal, "the detached run never wrote a terminal record")
+        self.assertEqual(terminal["run_status"], contracts.RUN_COMPLETED)
+        self.assertIsNone(self.store().get("T-2"))
+        self.assertEqual(self.store().get("T-3")["status"], contracts.STATUS_LANDED)
+        with open(self.store().path("runner.log")) as handle:
+            self.assertIn("T-2 deferred by --defer", handle.read())
+
+    def test_dispatch_refuses_an_unlisted_id_and_passes_a_listed_one(self):
+        outcome = cli.run_module.RunOutcome(cli.EXIT_OK)
+        with mock.patch.object(cli.run_module, "dispatch", return_value=outcome) as dispatch:
+            code, out = self.call("dispatch", self.manifest_path, "--defer", "T-9")
+            self.assertEqual(code, cli.EXIT_CONFIG)
+            self.assertIn("--defer names T-9, not a task in this manifest", out)
+            dispatch.assert_not_called()
+            code, out = self.call("dispatch", self.manifest_path, "--defer", "T-2")
+        self.assertEqual(code, cli.EXIT_OK, out)
+        self.assertEqual(dispatch.call_args.kwargs["defer"], frozenset({"T-2"}))
+
+
 class FollowedRun(CliCase):
     """U3: `run --follow` launches the runner, follows it from the launch, and reports."""
 
