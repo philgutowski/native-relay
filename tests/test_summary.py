@@ -706,6 +706,67 @@ class ContinuedPastChecks(CauseLineTable):
         self.assertEqual(kinds, [("stranded_branch", "T-2")])
 
 
+class LimitPassedOverChecks(CauseLineTable):
+    """Usage limit plan, R11: the Tasks a serial run did not launch on a model that reported its
+    usage limit reach the summary as data and as one check by hand per model."""
+
+    def test_the_tasks_passed_over_and_their_model_are_named_in_json_and_text(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=[
+            {"task": "T-2", "model": "fable"}, {"task": "T-3", "model": "fable"},
+            {"task": "T-5", "model": "opus"}])
+        data = self.summarise([])
+        self.assertEqual(data["limit_passed_over"], [
+            {"task": "T-2", "model": "fable"}, {"task": "T-3", "model": "fable"},
+            {"task": "T-5", "model": "opus"}])
+        checks = [(check["kind"], check["model"], check["tasks"])
+                  for check in data["pending_checks"]]
+        self.assertEqual(checks, [("limit_passed_over", "fable", ["T-2", "T-3"]),
+                                  ("limit_passed_over", "opus", ["T-5"])])
+        text = summary.render(data)
+        self.assertIn("  fable reported its usage limit, so this run did not launch T-2, T-3 on "
+                      "it. A later run will launch them.", text)
+        self.assertIn("  opus reported its usage limit, so this run did not launch T-5 on it. "
+                      "A later run will launch it.", text)
+        self.assertEqual(json.loads(json.dumps(data))["limit_passed_over"],
+                         data["limit_passed_over"])
+
+    def test_a_blocked_task_passed_over_is_told_apart(self):
+        """A blocked record ran only because it was named in --retry-blocked; a later run without
+        the flag leaves it alone, so the line cannot promise a launch for it alone."""
+        self.store.upsert("T-2", status=contracts.STATUS_BLOCKED,
+                          halt_class=contracts.HALT_NO_ENVELOPE, branch=None, findings=[])
+        self.store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=[
+            {"task": "T-2", "model": "fable"}, {"task": "T-3", "model": "fable"}])
+        check, = self.summarise(["T-2", "T-3"])["pending_checks"]
+        self.assertEqual(check["text"],
+                         "fable reported its usage limit, so this run did not launch T-2, T-3 on "
+                         "it. A later run will launch them. T-2 is blocked, so name it in "
+                         "--retry-blocked.")
+
+    def test_a_malformed_entry_does_not_stop_the_summary(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED, limit_passed_over=[{"model": "fable"}])
+        check, = self.summarise([])["pending_checks"]
+        self.assertEqual(check["model"], "fable")
+
+    def test_a_run_that_passed_nothing_over_prints_nothing_about_it(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        data = self.summarise([])
+        self.assertEqual(data["limit_passed_over"], [])
+        self.assertEqual(data["pending_checks"], [])
+        self.assertNotIn("usage limit", summary.render(data))
+
+    def test_a_terminal_record_written_before_the_key_reads_empty(self):
+        self.store.write_terminal(contracts.RUN_COMPLETED)
+        self.store._mutate(lambda raw: raw["terminal"].pop("limit_passed_over"))
+        self.assertEqual(self.summarise([])["limit_passed_over"], [])
+
+    def test_the_halted_line_stays_last(self):
+        self.store.write_terminal(contracts.RUN_HALTED, "T-4", contracts.HALT_GATE_REFUSED,
+                                  limit_passed_over=[{"task": "T-2", "model": "fable"}])
+        kinds = [check["kind"] for check in self.summarise([])["pending_checks"]]
+        self.assertEqual(kinds, ["limit_passed_over", "halted"])
+
+
 class CardAuditChecks(CauseLineTable):
     """Stale cards, R8: the run end audit reaches the summary as data, as checks by hand, and
     as one count line, with each finding's sentence copied as `audit.build` wrote it."""
