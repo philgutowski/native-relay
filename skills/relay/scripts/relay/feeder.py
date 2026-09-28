@@ -247,6 +247,36 @@ def listed_ids(paths):
 
 
 @dataclass(frozen=True)
+class TestLoop:
+    """The sidecar's `[test_loop]` table (browser test loop plan, U2). Off unless `enabled`, and
+    with no table at all it is this default, so a Config without the loop is today's Config
+    (R1, AE8). An empty `model` or `effort` means the `[models]` value, read through
+    `Config.test_model` and `Config.test_effort`; an empty `design_model` means none."""
+    enabled: bool = False
+    report_only: bool = False
+    tour: str = ""                    # a path relative to the target repository
+    url: str = ""
+    prepare: tuple = ()               # an argument list, never a shell string (KTD7)
+    prepare_timeout_seconds: int = 600
+    model: str = ""
+    effort: str = ""
+    timeout_minutes: int = 60
+    max_rounds: int = 6
+    max_hours: int = 24
+    max_cards_per_pass: int = 10
+    max_patches_per_area: int = 3
+    max_cards_total: int = 30
+    labels: tuple = ()                # the labels every filed card carries (R13)
+    allowed_tools: tuple = ("Bash", "Read", "Grep", "Glob")
+    design_model: str = ""
+    design_note: str = ""
+
+
+# The `[test_loop]` keys a loop that is on cannot run without (KTD7).
+_TEST_LOOP_NEEDS = ("tour", "url", "prepare")
+
+
+@dataclass(frozen=True)
 class Config:
     """The sidecar's settings. Every default is the value the Cratekit script ran on."""
     batch: int = 3
@@ -272,6 +302,17 @@ class Config:
     post_cycle_timeout_seconds: int = 3600
     model_fallback: dict = field(default_factory=dict)   # empty: no per model fallback
     fallback_hours: int = 5
+    test_loop: TestLoop = field(default_factory=TestLoop)
+
+    @property
+    def test_model(self):
+        """The model a Test process runs on: the loop's own, else the `[models]` default."""
+        return self.test_loop.model or self.default_model
+
+    @property
+    def test_effort(self):
+        """The effort a Test process runs at: the loop's own, else the `[models]` effort."""
+        return self.test_loop.effort or self.default_effort
 
 
 # Sidecar table and key -> Config field. A key outside this map is an error, because a typo
@@ -289,6 +330,8 @@ _SCHEMA = {
     "hooks": {"pre_cycle": "pre_cycle_command", "post_cycle": "post_cycle_command",
               "post_cycle_mode": "post_cycle_mode", "post_cycle_hold": "post_cycle_hold",
               "post_cycle_timeout_seconds": "post_cycle_timeout_seconds"},
+    # Read into `TestLoop` by `_load_test_loop`, never into a Config field of its own.
+    "test_loop": {spec.name: spec.name for spec in fields(TestLoop)},
 }
 _READY_KEYS = ("labels", "jql", "command")
 # The integer settings where zero means something: no idle waits, leave on the first empty cycle.
@@ -308,7 +351,7 @@ def load_config(path):
             raw = tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError("%s is not valid TOML: %s" % (path, exc))
-    problems, values = [], {}
+    problems, values, loop_values = [], {}, {}
     for table, body in raw.items():
         if table == "ready":
             continue
@@ -318,6 +361,8 @@ def load_config(path):
         for key, value in body.items():
             if key not in _SCHEMA[table]:
                 problems.append("%s.%s is not a feeder setting" % (table, key))
+            elif table == "test_loop":
+                loop_values[key] = value
             else:
                 values[_SCHEMA[table][key]] = value
     ready = raw.get("ready", {})
@@ -374,6 +419,7 @@ def load_config(path):
         problems.append("ready.jql must be a string")
     values["ready_command"] = tuple(command)
     values["ready_source"] = {key: ready[key] for key in ("labels", "jql") if key in ready}
+    values["test_loop"] = _load_test_loop(loop_values, problems)
     if not problems:
         config = Config(**values)
         if config.default_model not in config.allowed_models:
@@ -391,9 +437,61 @@ def load_config(path):
         elif config.post_cycle_hold and config.post_cycle_mode == HOOK_DETACHED:
             # A detached hook is never waited on, so there is no exit code to hold on.
             problems.append("hooks.post_cycle_hold needs post_cycle_mode = \"%s\"" % HOOK_BLOCKING)
+        # Checked against the allowed set like models.default, so a typo in a loop model is
+        # refused at load rather than found by the first pass that launches on it.
+        for key in ("model", "design_model"):
+            model = getattr(config.test_loop, key)
+            if model and model not in config.allowed_models:
+                problems.append("test_loop.%s %r is not in models.allowed" % (key, model))
     if problems:
         raise ConfigError("%s: %s" % (path, "; ".join(problems)))
     return config
+
+
+def _load_test_loop(values, problems):
+    """The `[test_loop]` table's values as a TestLoop, appending every problem to `problems`,
+    each one naming its `test_loop.` key. No values gives the default, so a sidecar without the
+    table loads exactly as it did before the loop existed (AE8)."""
+    defaults, loaded = TestLoop(), {}
+    for spec in fields(TestLoop):
+        if spec.name not in values:
+            continue
+        key, value, default = "test_loop." + spec.name, values[spec.name], getattr(
+            defaults, spec.name)
+        if isinstance(default, bool):
+            if not isinstance(value, bool):
+                problems.append("%s must be true or false" % key)
+                continue
+        elif isinstance(default, int):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                problems.append("%s must be a positive integer" % key)
+                continue
+        elif isinstance(default, str):
+            if not isinstance(value, str):
+                problems.append("%s must be a string" % key)
+                continue
+        elif not _is_strings(value):
+            problems.append("%s must be an array of strings%s" % (
+                key, " (an argument list, never a shell string)"
+                if spec.name == "prepare" else ""))
+            continue
+        else:
+            value = tuple(value)
+        loaded[spec.name] = value
+    if os.path.isabs(loaded.get("tour", "")):
+        problems.append("test_loop.tour must be a path relative to the target repository")
+    if "allowed_tools" in loaded and not loaded["allowed_tools"]:
+        # An empty allow list is no allow list at launch, which is no bound on the Test process.
+        problems.append("test_loop.allowed_tools must name at least one tool")
+    loop = TestLoop(**loaded)
+    if loop.enabled:
+        for need in _TEST_LOOP_NEEDS:
+            if need in values and need not in loaded:
+                continue              # given in the wrong shape, and already named for it
+            given = getattr(loop, need)
+            if not (given.strip() if isinstance(given, str) else given):
+                problems.append("test_loop.enabled needs test_loop.%s" % need)
+    return loop
 
 
 # Pure helpers: text in, data out. Each is tested on its own.
