@@ -566,12 +566,17 @@ def read_routing(text, allowed):
     return chosen, notes
 
 
-def choose_model(card, routing, config):
-    """(model, note). The routing file wins, then a `**Model:** name` line in the card's body,
-    then the default. The body line is card text, which the manifest's `editors` sentence
-    already says who may write, and the allowed set bounds what it can ask for."""
+def choose_model(card, routing, config, design=frozenset()):
+    """(model, note). The routing file wins, then the sidecar's `[test_loop] design_model` for a
+    card in `design`, the ids the browser test loop filed as design cards (KTD11), then a
+    `**Model:** name` line in the card's body, then the default. The design rule sits above the
+    body line so it holds where the ready source returns empty bodies. The body line is card
+    text, which the manifest's `editors` sentence already says who may write, and the allowed
+    set bounds what it can ask for."""
     if card["id"] in routing:
         return routing[card["id"]], None
+    if card["id"] in design and config.test_loop.design_model:
+        return config.test_loop.design_model, None
     asked = MODEL_LINE_RE.search(card.get("description") or "")
     if asked:
         if asked.group(1) in config.allowed_models:
@@ -626,20 +631,62 @@ def scanned_ids(cards):
     return reasons
 
 
-def select(cards, listed, config, rank, unsettled_count, scanned, held=()):
-    """(fresh, batch). Fresh is every ready card a session may take that the manifest does not
-    list yet, in order file order and then by id, including one the R41 scan would refuse.
-    `scanned` is `scanned_ids`'s result, and the batch is the head of the ones outside it, as
-    long as the room left: the batch size minus the tasks the next run will already launch. A
-    card the scan refuses holds no room, so the next clean card in order fills its slot instead.
-    Nor does a card in `held`, one routed to a model held back by a usage limit (issue #52)."""
+def cause_file(filed, card_id):
+    """The cause file the browser test loop recorded for a card it filed, or None for a card it
+    did not file or recorded no file for. `filed` is the state file's `test_loop.filed`."""
+    record = filed.get(str(card_id)) if isinstance(filed, dict) else None
+    value = record.get("cause_file") if isinstance(record, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def design_ids(filed):
+    """The ids of the cards the browser test loop filed as design cards (R14)."""
+    if not isinstance(filed, dict):
+        return frozenset()
+    return frozenset(str(card_id) for card_id, record in filed.items()
+                     if isinstance(record, dict) and record.get("design") is True)
+
+
+def select(cards, listed, config, rank, unsettled_count, scanned, held=(), filed=None,
+           unsettled=()):
+    """(fresh, batch, same_file). Fresh is every ready card a session may take that the manifest
+    does not list yet, in order file order and then by id, including one the R41 scan would
+    refuse. `scanned` is `scanned_ids`'s result, and the batch is the head of the ones outside
+    it, as long as the room left: the batch size minus the tasks the next run will already
+    launch. A card the scan refuses holds no room, so the next clean card in order fills its slot
+    instead. Nor does a card in `held`, one routed to a model held back by a usage limit (issue
+    #52).
+
+    Nor does a card the browser test loop filed whose cause file is the cause file of another
+    card it filed that is already in this batch or listed in `unsettled`, the ids the next run
+    will still launch, defer, or retry (R13, KTD11). `filed` is the loop's filed map. Two fixes
+    to one file built in one batch would each merge over the other; held, the second is taken
+    once the first settles. `same_file` is {held id: the id it waits on}. A card the loop did
+    not file neither holds nor is held."""
     fresh = [card for card in cards
              if card["id"] not in listed and card["id"] not in config.denied_ids
              and not any(label in config.denied_labels for label in card.get("labels") or ())]
     fresh.sort(key=lambda card: (rank.get(card["id"], UNRANKED), natural_key(card["id"])))
     room = max(0, config.batch - unsettled_count)
     eligible = [card for card in fresh if card["id"] not in scanned and card["id"] not in held]
-    return fresh, eligible[:room]
+    filed = filed or {}
+    taken = {}
+    for task_id in unsettled:
+        path = cause_file(filed, task_id)
+        if path is not None:
+            taken.setdefault(path, str(task_id))
+    batch, same_file = [], {}
+    for card in eligible:
+        if len(batch) >= room:
+            break
+        path = cause_file(filed, card["id"])
+        if path is not None and path in taken:
+            same_file[card["id"]] = taken[path]
+            continue
+        batch.append(card)
+        if path is not None:
+            taken[path] = card["id"]
+    return fresh, batch, same_file
 
 
 def mark_record(mark):
@@ -1182,6 +1229,9 @@ class Feeder:
         # (id, model) for each Task this process last saw held, so a hold is one `limit` event
         # when it begins and not one more at every Cycle it lasts through.
         self.held_seen = set()
+        # (id, the id it waits on) for each filed card this process last saw held out of a batch
+        # by the same file rule, so each hold is logged once when it begins.
+        self.same_file_seen = set()
 
     # Reporting.
     def log(self, message):
@@ -1412,20 +1462,26 @@ class Feeder:
         cards, readable = self.ready_cards(manifest)
         scanned = scanned_ids(cards)
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
+        filed = self.loop_filed()
+        design = design_ids(filed)
         # Routed once per cycle: the held set, the batch, and the dry run all read this.
-        routes = {card["id"]: self.route(card, routing, marks) for card in cards
+        routes = {card["id"]: self.route(card, routing, marks, design) for card in cards
                   if card["id"] not in listed}
         held = {card_id for card_id, (model, _) in routes.items() if model is None}
-        fresh, batch = select(cards, set(listed), config, read_order(self._read(self.paths.order)),
-                              len(launch.running), scanned, held)
+        # Everything the next run will still launch, defer, or retry, for the same file rule.
+        unsettled = set(launch.running) | set(launch.defer) | set(launch.queue)
+        fresh, batch, same_file = select(
+            cards, set(listed), config, read_order(self._read(self.paths.order)),
+            len(launch.running), scanned, held, filed=filed, unsettled=unsettled)
         held_fresh = [card["id"] for card in fresh
                       if card["id"] in held and card["id"] not in scanned]
         if not self.dry_run:
             # A held card is work the mark holds back as much as a held Task is, so `--status`
             # names it beside them, on the model it is routed to.
             self.state.setdefault("last_held", {}).update(
-                {card["id"]: choose_model(card, routing, config)[0] for card in fresh
+                {card["id"]: choose_model(card, routing, config, design)[0] for card in fresh
                  if card["id"] in held_fresh})
+            self.announce_same_file(same_file, filed)
         entries = []
         for card in batch:
             model, note = routes[card["id"]]
@@ -1450,7 +1506,12 @@ class Feeder:
                     self.out.write("   would skip %s: %s\n" % (card["id"], reason))
                 elif card["id"] in held:
                     self.out.write("   would hold %s on %s until its mark expires: %s\n" % (
-                        card["id"], choose_model(card, routing, config)[0], card["title"][:90]))
+                        card["id"], choose_model(card, routing, config, design)[0],
+                        card["title"][:90]))
+                elif card["id"] in same_file:
+                    self.out.write("   would hold %s until %s settles, both fix %s: %s\n" % (
+                        card["id"], same_file[card["id"]], cause_file(filed, card["id"]),
+                        card["title"][:90]))
                 else:
                     self.out.write("   would offer %s on %s: %s\n" % (
                         card["id"], routes[card["id"]][0], card["title"][:90]))
@@ -1478,7 +1539,7 @@ class Feeder:
             # `plan_cycle_start`'s own wait covers held Tasks only; a held fresh card is the
             # feeder's, so the wait is taken from the same function over both.
             models = {model for _, model in launch.held}
-            models |= {choose_model(card, routing, config)[0] for card in fresh
+            models |= {choose_model(card, routing, config, design)[0] for card in fresh
                        if card["id"] in held_fresh}
             seconds = limits.hold_wait(models, marks, config.model_fallback, deps.now(),
                                        config.limit_wait_seconds) or config.limit_wait_seconds
@@ -1883,11 +1944,12 @@ class Feeder:
             self.state["last_held"] = {task_id: model for task_id, model in held}
         return Launch(running=running, retry=retry, defer=defer, held=tuple(held), queue=queue)
 
-    def route(self, card, routing, marks):
+    def route(self, card, routing, marks, design=frozenset()):
         """(model, [notes]): `choose_model`, then its fallback while that model is marked. The
         model is None for a card routed to a held model, one `select` leaves out rather than
-        append onto a model that would refuse it in seconds."""
-        model, note = choose_model(card, routing, self.config)
+        append onto a model that would refuse it in seconds. `design` is `design_ids` of the
+        loop's filed map, so a filed design card is routed to the design model (KTD11)."""
+        model, note = choose_model(card, routing, self.config, design)
         notes = [note] if note else []
         # One reading of the marks, so a mark that expires between two checks is not held by
         # one and routed round by the other.
@@ -1921,6 +1983,23 @@ class Feeder:
     def loop_stopped(self):
         loop = self.state.get("test_loop")
         return isinstance(loop, dict) and bool(loop.get("stop"))
+
+    def loop_filed(self):
+        """The loop's filed map, {} for a Feeder whose state holds no loop. Read whether the loop
+        is on, stopped, or since switched off, since the cards it filed are still built under
+        its routing and batching rules (R20)."""
+        loop = self.state.get("test_loop")
+        filed = loop.get("filed") if isinstance(loop, dict) else None
+        return filed if isinstance(filed, dict) else {}
+
+    def announce_same_file(self, same_file, filed):
+        """Log each card newly held out of a batch by the same file rule, once (R13)."""
+        seen = set(same_file.items())
+        for card_id, waits_on in sorted(seen - self.same_file_seen,
+                                        key=lambda pair: natural_key(pair[0])):
+            self.log("holding %s out of this batch until %s settles: the test loop filed both "
+                     "with the cause file %s" % (card_id, waits_on, cause_file(filed, card_id)))
+        self.same_file_seen = seen
 
     @staticmethod
     def loop_started_at(loop):
@@ -2491,20 +2570,23 @@ def ready_queue(manifest, env, deps=None):
     except (OSError, ValueError) as exc:
         return None, "the routing file could not be read: %s" % exc
     try:
-        refused = read_state(paths).get("refused") or {}
+        state = read_state(paths)
     except ConfigError as exc:
         # The feeder itself stops on this file, so the queue figure has nothing to stand on.
         return None, str(exc)
+    refused = state.get("refused") or {}
     if not isinstance(refused, dict):
         return None, "%s holds a refused set that is not a JSON object" % paths.state
+    loop = state.get("test_loop")
+    design = design_ids(loop.get("filed") if isinstance(loop, dict) else None)
     listed = {task.id for task in manifest.tasks}
     scanned = scanned_ids(cards)
-    fresh, _ = select(cards, listed, config, {}, 0, scanned)
+    fresh, _, _ = select(cards, listed, config, {}, 0, scanned)
     queue = []
     for card in fresh:
         if card["id"] in scanned:
             continue
-        model, _ = choose_model(card, routing, config)
+        model, _ = choose_model(card, routing, config, design)
         if refused.get(card["id"]) != model:
             queue.append((card["id"], model))
     return queue, None
@@ -2804,22 +2886,97 @@ def status_held(state, marks):
             if not (marks.get(model) or {"expired": True})["expired"]}
 
 
+def status_loop(state, paths, now):
+    """The browser test loop as `feed --status` shows it (R26), or None when the sidecar does
+    not switch it on, so a Feeder without the loop shows what it shows today. The caps are the
+    sidecar's. A sidecar that cannot be read shows the loop only when the state file holds one,
+    against the default caps, and says so in `sidecar_problem`."""
+    loop = state.get("test_loop")
+    loop = loop if isinstance(loop, dict) else None
+    try:
+        settings, problem = load_config(paths.config).test_loop, None
+    except (ConfigError, OSError) as exc:
+        settings, problem = TestLoop(), str(exc)
+    if (problem is None and not settings.enabled) or (problem is not None and loop is None):
+        return None
+    loop = loop or {}
+    hours = None
+    started = loop.get("started_at")
+    if isinstance(started, str):
+        try:
+            hours = round((now - datetime.fromisoformat(started)).total_seconds() / 3600, 1)
+        except (TypeError, ValueError):
+            pass
+    passes = [{"pass": entry.get("pass"), "kind": entry.get("kind"),
+               "status": entry.get("status"), "filed": len(entry.get("filed") or ())}
+              for entry in loop.get("passes") or () if isinstance(entry, dict)]
+    generations = {}
+    filed = loop.get("filed") if isinstance(loop.get("filed"), dict) else {}
+    for record in filed.values():
+        generation = record.get("generation") if isinstance(record, dict) else None
+        key = str(generation) if isinstance(generation, int) else "unreadable"
+        generations[key] = generations.get(key, 0) + 1
+    return {"enabled": settings.enabled, "report_only": settings.report_only,
+            "rounds": loop.get("rounds", 0), "max_rounds": settings.max_rounds,
+            "started_at": started, "hours_used": hours, "max_hours": settings.max_hours,
+            "passes": passes, "cards_filed": len(filed), "generations": generations,
+            "stopped_areas": list(loop.get("stopped_areas") or ()),
+            "stop": loop.get("stop") or None, "sidecar_problem": problem}
+
+
 def status_report(paths, hostname=None, now=datetime.now):
     """What `feed --status --json` prints: the liveness answer beside what the state file holds
-    about the feeder, its last cycle, its last event, and the usage limit state: the marks, the
-    Tasks and cards the last Cycle held, the queued retries, and the row of usage limit waits.
-    Raises ConfigError on an unreadable state file."""
+    about the feeder, its last cycle, its last event, the usage limit state (the marks, the
+    Tasks and cards the last Cycle held, the queued retries, and the row of usage limit waits),
+    and the browser test loop, None when it is off. Raises ConfigError on an unreadable state
+    file."""
     state = read_state(paths)
-    marks = status_marks(state, paths, now())
+    current = now()
+    marks = status_marks(state, paths, current)
     report = {"manifest": paths.manifest, "state_path": paths.state, "events_path": paths.events,
               "process": state.get("process"), "cycles": state.get("cycles", 0),
               "last_cycle": state.get("last_cycle"), "last_event": state.get("last_event"),
               "hold": state.get("hold") or None, "marks": marks,
               "held": status_held(state, marks),
               "retry_blocked": sorted(state.get("retry_blocked") or {}, key=natural_key),
-              "limit_waits": state.get("limit_waits", 0)}
+              "limit_waits": state.get("limit_waits", 0),
+              "test_loop": status_loop(state, paths, current)}
     report.update(liveness(paths, state, hostname=hostname))
     return report
+
+
+def loop_lines(report):
+    """The browser test loop lines of `feed --status` (R26), none when the loop is off: on and
+    report only, the round and the clock against their caps, the cards filed per pass, the
+    filed cards by generation, the stopped areas, and the stop reason."""
+    loop = report.get("test_loop")
+    if not loop:
+        return []
+    lines = []
+    if loop.get("sidecar_problem"):
+        lines.append("test loop: the sidecar could not be read, so the caps below are the "
+                     "defaults: %s" % loop["sidecar_problem"])
+    hours = ("no pass yet" if loop.get("hours_used") is None
+             else "%s hours used since %s" % (loop["hours_used"], loop.get("started_at")))
+    lines.append("test loop: %s%s, round %s of %s, %s, of %s" % (
+        "on" if loop.get("enabled") else "state only",
+        ", report only" if loop.get("report_only") else "", loop.get("rounds"),
+        loop.get("max_rounds"), hours, loop.get("max_hours")))
+    passes = loop.get("passes") or ()
+    lines.append("test loop cards filed per pass: %s" % (", ".join(
+        "#%s %s %s %d" % (entry.get("pass"), entry.get("kind"), entry.get("status"),
+                          entry.get("filed", 0)) for entry in passes) or "no pass yet"))
+    generations = loop.get("generations") or {}
+    lines.append("test loop filed cards: %d%s" % (loop.get("cards_filed", 0), "".join(
+        ", generation %s: %d" % (key, generations[key]) for key in sorted(generations))))
+    lines.append("test loop stopped areas: %s" % _ids(loop.get("stopped_areas")))
+    stop = loop.get("stop")
+    if isinstance(stop, dict):
+        lines.append("test loop stopped at %s, %s: %s" % (stop.get("at"), stop.get("reason"),
+                                                           stop.get("message")))
+    else:
+        lines.append("test loop stop: none yet")
+    return lines
 
 
 def limit_lines(report):
@@ -2874,11 +3031,12 @@ def feeder_line(report, with_hold=True):
 
 def status_lines(report):
     """`feed --status` for a person: the feeder line, a set hold in full, the usage limit state,
-    then the last cycle and the last event."""
+    the browser test loop, then the last cycle and the last event."""
     lines = [feeder_line(report, with_hold=False), "manifest: %s" % report["manifest"]]
     if report.get("hold"):
         lines.append("hold: " + hold_sentence(report["manifest"], report["hold"]))
     lines += limit_lines(report)
+    lines += loop_lines(report)
     process = report.get("process") or {}
     if process.get("runner_tree"):
         lines.append("runner tree: %s" % process["runner_tree"])

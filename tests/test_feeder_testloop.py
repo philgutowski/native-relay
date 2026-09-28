@@ -253,7 +253,8 @@ class StopRules(LoopCase):
         self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
 
     def test_a_stopped_loop_starts_no_pass_while_the_feeder_builds_what_it_filed(self):
-        self.pass_script = [tour_filing(filed(10), filed(11))]
+        # Two cause files, so U7's same file rule does not split the batch.
+        self.pass_script = [tour_filing(filed(10), filed(11, cause="src/cart.py"))]
         self.plans = [{}, {}]
         self.feed_loop(max_cards_total=2)
         self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
