@@ -163,14 +163,24 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
     confirmed away at print time: an operator who moved the item by hand between the run that
     landed it and this call gets a clear summary without needing another run's own end of run
     audit to notice, which was the only caller that ever retired it before. `None` on every
-    caller that offers nothing, which keeps this a no-op and the old behaviour exact."""
+    caller that offers nothing, which keeps this a no-op and the old behaviour exact.
+
+    This one check is the one place this module's data can print cleaner than the state file
+    it was built from: a caller reading `store.records()` or `store.audit()` directly still
+    meets the finding this confirmed away, since nothing here is a Lease holder and neither may
+    write it. Only another run's own end of run audit retires it for good; this is the
+    presentation the operator reads between runs, not the record."""
     checks = []
-    # Issue #80: a lagging item can raise both from the record's own Closeout finding and from
-    # the run end audit's later read of the same board. The two are resolved together, after
-    # both loops below have gathered whichever each side has, rather than inline, because the
-    # audit's reading always wins when both exist and either survivor still gets one more,
-    # live, chance to clear before it is shown.
-    item_lag_from_record = {}
+    item_cache = {}
+    # Issue #80: keyed once, up front, so the per task loop below can look up the run end
+    # audit's own reading of a task's item as soon as it meets that task's own record finding,
+    # right where the record's line always printed, rather than moving the check to a new
+    # position after every other one.
+    audit_item_lag = {
+        finding.get("task"): finding for finding in (card_audit or {}).get("findings") or []
+        if finding.get("class") == contracts.AUDIT_ITEM_NOT_TERMINAL
+    }
+    resolved_item_lag_tasks = set()
     for entry in entries:
         task_id = entry["id"]
         if entry["status"] == contracts.STATUS_EXCLUDED:
@@ -241,32 +251,33 @@ def _pending_checks(entries, run_status, halt_task, halt_class, state_dir, card_
                 checks.append({"kind": "card_left_in_review", "task": task_id,
                                "text": "%s: %s" % (task_id, finding["line"])})
             elif finding["class"] == contracts.BOARD_ITEM_NOT_TERMINAL:
-                text = "%s: %s" % (task_id, finding["line"])
-                if finding.get("observed_at"):
-                    text += " (observed %s)" % finding["observed_at"]
-                item_lag_from_record[task_id] = {"kind": "board_item_not_terminal",
-                                                 "task": task_id, "text": text}
-    item_lag_from_audit = {}
+                resolved_item_lag_tasks.add(task_id)
+                audit_finding = audit_item_lag.get(task_id)
+                if audit_finding:
+                    # Issue #80: the later of the two readings, so it wins outright rather than
+                    # being dropped in favour of the record's, which used to happen here.
+                    check = {"kind": audit_finding.get("class"), "task": task_id,
+                             "text": audit_finding.get("text") or ""}
+                else:
+                    text = "%s: %s" % (task_id, finding["line"])
+                    if finding.get("observed_at"):
+                        text += " (observed %s)" % finding["observed_at"]
+                    check = {"kind": "board_item_not_terminal", "task": task_id, "text": text}
+                if not _item_confirmed_terminal_now(adapter, task_id, item_cache):
+                    checks.append(check)
     for finding in (card_audit or {}).get("findings") or []:
-        if finding.get("class") == contracts.AUDIT_ITEM_NOT_TERMINAL:
-            # Issue #80: the later of the two readings, so it wins outright rather than being
-            # dropped in favour of the record's, which used to happen here.
-            item_lag_from_audit[finding.get("task")] = {
-                "kind": finding.get("class"), "task": finding.get("task"),
-                "text": finding.get("text") or ""}
-            continue
-        checks.append({"kind": finding.get("class"), "task": finding.get("task"),
-                       "text": finding.get("text") or ""})
-    item_cache = {}
-    # Insertion order, record tasks first: a dict preserves it and a set would not, and the
-    # checks list stays reproducible run to run rather than shuffled by set iteration.
-    ordered_lag_tasks = list(item_lag_from_record) + [
-        task_id for task_id in item_lag_from_audit if task_id not in item_lag_from_record]
-    for task_id in ordered_lag_tasks:
-        check = item_lag_from_audit.get(task_id) or item_lag_from_record[task_id]
-        if _item_confirmed_terminal_now(adapter, task_id, item_cache):
-            continue
-        checks.append(check)
+        klass, task_id = finding.get("class"), finding.get("task")
+        if klass == contracts.AUDIT_ITEM_NOT_TERMINAL:
+            if task_id in resolved_item_lag_tasks:
+                # Already resolved above, in the record's own position, in favour of this same
+                # finding.
+                continue
+            # Issue #80: no record finding to prefer this over, since a Closeout that landed
+            # cleanly writes none; the item can still have lagged again since this reading, so
+            # the same live confirmation applies here too.
+            if _item_confirmed_terminal_now(adapter, task_id, item_cache):
+                continue
+        checks.append({"kind": klass, "task": task_id, "text": finding.get("text") or ""})
     if run_status == contracts.RUN_HALTED:
         checks.append({"kind": "halted", "task": halt_task,
                        "text": "the run halted on %s with class %s. Repair by hand, then run "
@@ -278,15 +289,13 @@ def _item_confirmed_terminal_now(adapter, task_id, cache):
     """Issue #80: the print time read `_pending_checks` uses to clear an item lag check an
     operator has since fixed by hand. `adapter` is None on every caller that offers none (every
     summary.build call before this issue, and every one since that has no tracker configured),
-    which makes this a plain "no later reading" the same as before. A raise or an adapter with
-    nothing to check (`item_confirmed_terminal`'s own contract) both read as not confirmed, so
-    a failed or irrelevant read leaves the existing line in place rather than losing it."""
+    which makes this a plain "no later reading" the same as before. `item_confirmed_terminal`
+    already answers `(False, reason)` rather than raising for a failed read or an adapter with
+    nothing to check, so a failed or irrelevant read leaves the existing line in place without
+    this needing a try of its own."""
     if adapter is None:
         return False
-    try:
-        confirmed, _ = adapters.item_confirmed_terminal(adapter, task_id, cache=cache)
-    except Exception:
-        return False
+    confirmed, _ = adapters.item_confirmed_terminal(adapter, task_id, cache=cache)
     return bool(confirmed)
 
 
