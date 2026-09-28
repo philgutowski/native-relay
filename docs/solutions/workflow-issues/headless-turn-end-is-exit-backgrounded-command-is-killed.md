@@ -3,7 +3,7 @@ title: In a headless task process ending the turn is exiting, so a backgrounded 
 date: 2026-08-27
 category: workflow-issues
 module: runner
-last_updated: 2026-09-11
+last_updated: 2026-09-28
 problem_type: workflow_issue
 component: runner
 severity: high
@@ -16,6 +16,7 @@ applies_when:
   - "that command edits source files in place and restores them only when it finishes"
   - "the harness offers to run the command in the background and wait for it later"
   - "an attended session is asked to reproduce a headless task by hand"
+  - "a foreground command runs longer than the Bash tool's ten minute cap and the harness moves it to the background itself"
 symptoms:
   - "the task process commits its code, launches a long driver in the background, and ends the turn saying it is waiting for it"
   - "the CLI treats the ended turn as completion and kills every background task with the process"
@@ -159,6 +160,21 @@ The standing takeaway: a brief rule stated once is necessary but not sufficient 
 failure the model can still fall into under a different disguise. Treat the brief as the first
 line of defense and the classifier finding as the second, and expect a third occurrence to look
 different again.
+
+The third occurrence did look different, and it needs no choice by the task at all. Task #92,
+2026-09-28, ran the full suite as a foreground Bash call with the tool's largest timeout,
+600000 ms, exactly as the brief asks. The suite had grown to 1849 tests and took 698 seconds.
+At 600 seconds the harness itself moved the running command to the background and returned a
+task id and an output file, so a task that obeyed every word of the rule was one turn end away
+from the killed command this document describes. The Bash timeout is capped at ten minutes, and
+the repository's gate now runs longer than that, so every future Task process meets this on its
+gate run. The same session recovered by staying in the turn: a second foreground Bash call that
+polls the output file once a second, with a Python one line sleep since a bare foreground
+`sleep` is refused, until a line starting `OK` or `FAILED` appears, then prints the tail. That
+call finishes inside its own ten minute cap because the first call already used most of the
+suite's time. A suite that grows past twenty minutes needs a second poll call the same way.
+Read a move to the background as a prompt to poll in the foreground, never as a reason to end
+the turn.
 
 ## Why This Matters
 
