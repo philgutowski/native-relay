@@ -37,6 +37,14 @@ CLOSEOUT_TERMINAL_LINES = (CLOSEOUT_COMPLETE_LINE, CLOSEOUT_SKIPPED_LINE)
 # the full final message in the transcript, never from the digest's 200 character tail.
 TEST_REPORT_FENCE_TAG = "relay-test-report"
 
+# The Filing process's contract (browser test loop plan, KTD5): its final message ends with one
+# fenced block under this tag holding one JSON array of `{finding, action, id}` entries, where
+# `finding` is the number the Filing brief gave the finding and `action` is `filing.ACTION_FILED`
+# or `filing.ACTION_COMMENTED`. Only the last such block counts, read through the same full
+# message reader as the Test report, and the pass code confirms every id back through the
+# adapter before it records a card.
+FILED_FENCE_TAG = "relay-filed"
+
 
 def fence_regex(tag):
     """The grammar of a fenced block Relay reads back from a process's final message: an

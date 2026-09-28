@@ -14,7 +14,7 @@ from unittest import mock
 
 import _paths
 import _repo
-from relay import adapters, brief, closeout, manifest as mf
+from relay import adapters, brief, closeout, filing, manifest as mf
 from relay.adapters import github as gh_adapter, jira as jira_adapter, markdown as md_adapter
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
@@ -159,10 +159,55 @@ class SharedContract(AdapterCase):
                 self.assertTrue(callable(getattr(adapter, method, None)), "%s lacks %s" % (name, method))
 
     def test_no_adapter_exposes_a_method_outside_the_read_side_interface(self):
+        """The interface plus the Filing pair of the browser test loop plan (U4, KTD5), which
+        produce instructions for a launched process the way `closeout_instructions` does and
+        write nothing themselves."""
+        expected = set(adapters.INTERFACE) | set(filing.ADAPTER_METHODS)
         for name, adapter in self.each():
             public = {attr for attr in dir(adapter)
                       if not attr.startswith("_") and callable(getattr(adapter, attr))}
-            self.assertEqual(public, set(adapters.INTERFACE), "%s exposes more than the interface" % name)
+            self.assertEqual(public, expected, "%s exposes more than the interface" % name)
+
+    def test_every_adapter_implements_the_filing_pair(self):
+        for name, adapter in self.each():
+            for method in filing.ADAPTER_METHODS:
+                self.assertTrue(callable(getattr(adapter, method, None)), "%s lacks %s" % (name, method))
+
+    def test_every_adapter_names_its_filing_tools_without_a_wildcard(self):
+        for name, adapter in self.each():
+            tools = adapter.filing_allowed_tools()
+            self.assertTrue(tools, name)
+            for tool in tools:
+                self.assertNotIn("*", tool, "%s filing tools carry a wildcard" % name)
+            # The Closeout's tools are the floor: a Filing process at least closes nothing
+            # the Closeout could not reach.
+            for tool in adapter.closeout_allowed_tools():
+                self.assertIn(tool, tools, "%s filing tools drop a closeout tool" % name)
+
+    def test_every_adapters_filing_instructions_name_its_own_write_path_and_never_the_runner(self):
+        write_path = {"jira": "createJiraIssue", "github": "gh issue create",
+                      "markdown": "tracker.md"}
+        for name, adapter in self.each():
+            text = adapter.filing_instructions(("loop",), "")
+            self.assertIn(write_path[name], text, name)
+            self.assertNotIn("runner", text.lower(), "%s filing instructions name the runner" % name)
+            for word in ("`commented`", "`filed`", "attended"):
+                self.assertIn(word, text, "%s filing instructions lack %s" % (name, word))
+            self.assertRegex(text, r"(?i)open (issue|line)", name)
+
+    def test_every_adapter_carries_the_labels_and_the_design_note_only_when_given(self):
+        for name, adapter in self.each():
+            labelled = adapter.filing_instructions(("loop", "needs-design"), "")
+            self.assertIn("loop", labelled, name)
+            self.assertIn("needs-design", labelled, name)
+            self.assertNotIn("design note", labelled, name)
+            noted = adapter.filing_instructions((), "Take the design route.")
+            self.assertIn("Take the design route.", noted, name)
+            self.assertNotIn("loop", noted, name)
+            self.assertNotEqual(labelled, noted, name)
+            # Deterministic, like every other brief input.
+            self.assertEqual(adapter.filing_instructions(("loop",), "note"),
+                             adapter.filing_instructions(("loop",), "note"), name)
 
     def test_every_adapter_returns_the_status_shape_verify_reads(self):
         ids = {"jira": "ABC-83", "github": "12", "markdown": "T-2"}
@@ -233,6 +278,10 @@ class ReturnTo(SharedContract):
         # Eight until the feeder plan of 2026-09-19 added `ready`, which reads and never writes.
         self.assertEqual(len(adapters.INTERFACE), 9)
         self.assertIn("ready", adapters.INTERFACE)
+        # The Filing pair (browser test loop plan, U4) sits beside the interface, named by the
+        # module that needs it, and neither method is a read or a write.
+        self.assertEqual(filing.ADAPTER_METHODS, ("filing_instructions", "filing_allowed_tools"))
+        self.assertFalse(set(filing.ADAPTER_METHODS) & set(adapters.INTERFACE))
 
 
 # The Task brief's start step names the status it moves the card to in this shape. A start step
@@ -595,6 +644,53 @@ class Jira(AdapterCase):
             self.assertIn("getAccessibleAtlassianResources", text, outcome)
             self.assertRegex(text, r"(?i)never call getAccessibleAtlassianResources")
 
+    def test_the_filing_tools_are_the_closeout_tools_plus_card_creation_and_search(self):
+        """Browser test loop plan, KTD5: a Filing process on Jira creates cards and looks for
+        open ones through Atlassian MCP, and nothing else is added."""
+        tools = self.jira(self.opener()).filing_allowed_tools()
+        self.assertEqual(tools, jira_adapter.CLOSEOUT_TOOLS + (
+            "mcp__atlassian__createJiraIssue",
+            "mcp__atlassian__searchJiraIssuesUsingJql",
+        ))
+        self.assertNotIn("mcp__atlassian__getAccessibleAtlassianResources", tools)
+        self.assertNotIn("mcp__atlassian__editJiraIssue", tools)
+        self.assertEqual(self.jira(self.opener()).filing_allowed_tools(backend="claude"), tools)
+
+    def test_grok_filing_tools_use_the_native_allow_form_and_gain_the_same_pair(self):
+        tools = self.jira(self.opener()).filing_allowed_tools(backend="grok")
+        self.assertEqual(tools, jira_adapter.GROK_CLOSEOUT_TOOLS + (
+            "MCPTool(atlassian__createJiraIssue)",
+            "MCPTool(atlassian__searchJiraIssuesUsingJql)",
+        ))
+        for tool in tools:
+            self.assertTrue(tool.startswith("MCPTool(atlassian__"), tool)
+            self.assertNotIn("*", tool)
+
+    def test_filing_instructions_search_the_project_create_in_it_and_name_the_cloud_id(self):
+        adapter = self.jira(self.opener())
+        text = adapter.filing_instructions(("loop", "web"), "Take the design route.")
+        self.assertIn("searchJiraIssuesUsingJql", text)
+        self.assertIn("project = EX", text)
+        self.assertIn("addCommentToJiraIssue", text)
+        self.assertIn("createJiraIssue", text)
+        self.assertIn("create one issue in project EX", text)
+        self.assertIn("`loop`, `web`", text)
+        self.assertIn("Take the design route.", text)
+        self.assertIn("label `attended`", text)
+        self.assertIn("example.atlassian.net", text)
+        self.assertIn("cloudId", text)
+        self.assertRegex(text, r"(?i)never call getAccessibleAtlassianResources")
+        self.assertNotIn("JIRA_API_TOKEN", text)
+        self.assertNotIn("transition", text.lower())
+
+    def test_grok_filing_instructions_name_the_grok_tool_spellings_including_the_pair(self):
+        text = self.jira(self.opener()).filing_instructions(("loop",), "", backend="grok")
+        self.assertIn("atlassian__createJiraIssue", text)
+        self.assertIn("atlassian__searchJiraIssuesUsingJql", text)
+        self.assertIn("not mcp__atlassian__ names", text)
+        self.assertIn("JIRA_API_TOKEN", text)
+        self.assertNotIn("JIRA_API_TOKEN", self.jira(self.opener()).filing_instructions(("loop",), ""))
+
     def test_triple_snapshot_uses_immutable_jira_issue_and_project_ids(self):
         adapter = self.jira(self.opener())
         def issue(key):
@@ -802,6 +898,44 @@ class GitHub(AdapterCase):
         self.assertFalse(result["terminal"])
         self.assertIsNone(result["skipped"])
 
+    def test_the_filing_tools_equal_the_closeout_tools(self):
+        adapter = self.github(self.run_for())
+        self.assertEqual(adapter.filing_allowed_tools(), adapter.closeout_allowed_tools())
+        self.assertEqual(adapter.filing_allowed_tools(backend="claude"), gh_adapter.CLOSEOUT_TOOLS)
+
+    def test_filing_instructions_search_comment_create_with_the_labels_and_add_to_the_project(self):
+        text = self.github(self.run_for()).filing_instructions(("loop", "needs design"),
+                                                               "Take the design route.")
+        self.assertIn("gh issue list --state open --search", text)
+        self.assertIn("gh issue comment <number>", text)
+        self.assertIn("gh issue create --title <title> --body-file <file> --label loop "
+                      "--label 'needs design'", text)
+        self.assertIn("`loop`, `needs design`", text)
+        self.assertIn("gh project item-add 4 --owner example-org", text)
+        self.assertIn("Take the design route.", text)
+        self.assertIn("label `attended`", text)
+        self.assertNotIn("gh issue close", text)
+        self.assertNotIn("item-edit", text)
+        # Code review: `gh issue create --label` fails outright on an undefined label, and the
+        # brief forbids a retry by another route, so the labels are checked first.
+        self.assertRegex(text, r"(?i)before the first create.*gh label list.*gh label create <name>")
+        self.assertLess(text.index("gh label list"), text.index("gh issue create"))
+
+    def test_filing_instructions_with_no_labels_create_without_a_label_flag(self):
+        text = self.github(self.run_for()).filing_instructions((), "")
+        self.assertIn("gh issue create --title <title> --body-file <file>`", text)
+        self.assertNotIn("--label", text)
+        self.assertNotIn("design note", text)
+
+    def test_the_filing_create_and_comment_commands_match_the_write_patterns(self):
+        """A denied `gh issue create` in a Filing process reads as a tracker write denial, the
+        way a denied `gh issue close` does in a Closeout."""
+        patterns = self.github(self.run_for()).write_tool_patterns()
+        for command in ("gh issue create --title x", "gh issue comment 12 --body-file f",
+                        "gh project item-add 4 --owner example-org --url u"):
+            self.assertTrue(any(command.startswith(prefix) for prefix in patterns["bash"]), command)
+        self.assertFalse(any("gh label create x".startswith(prefix) for prefix in patterns["bash"]))
+
     def test_a_pr_create_command_does_not_match_the_write_patterns(self):
         from relay import classify
 
@@ -976,6 +1110,42 @@ class Markdown(AdapterCase):
         other = {"name": "Edit", "input": {"file_path": os.path.join(self.repo, "src/x.py")}}
         self.assertTrue(classify.matches_write_pattern(edit, patterns))
         self.assertFalse(classify.matches_write_pattern(other, patterns))
+
+    def test_the_filing_tools_equal_the_closeout_tools(self):
+        adapter = self.markdown()
+        self.assertEqual(adapter.filing_allowed_tools(), adapter.closeout_allowed_tools())
+        self.assertEqual(adapter.filing_allowed_tools(backend="grok"), md_adapter.CLOSEOUT_TOOLS)
+
+    def test_the_filing_instructions_name_the_tracker_file_and_say_not_to_push(self):
+        text = self.markdown().filing_instructions(("loop",), "")
+        self.assertEqual(text.count("tracker.md"), 2)
+        self.assertRegex(text, r"(?i)commit tracker\.md alone, touching no other file, and\s+do not push")
+        self.assertNotIn("runner pushes", text)
+        self.assertNotIn("push it", text)
+
+    def test_the_filing_instructions_append_an_unchecked_line_with_the_next_free_id(self):
+        text = self.markdown().filing_instructions(("loop", "web"), "Take the design route.")
+        self.assertIn("`- [ ] <id> <title>`", text)
+        self.assertRegex(text, r"(?i)next free id")
+        self.assertRegex(text, r"(?i)highest existing number plus one")
+        self.assertIn("`[loop]` `[web]`", text)
+        self.assertIn("`[attended]`", text)
+        # Code review: `ready` returns every open line with no labels, so the sentence says the
+        # mark is for a reader rather than promising it keeps the line out of the open lines.
+        self.assertRegex(text, r"(?i)nothing else keeps it out of the open lines")
+        self.assertIn("`  - <date> <text>`", text)
+        self.assertIn("Take the design route.", text)
+        self.assertNotIn("`[x]`", text)
+        # Without labels the title carries no bracketed words.
+        self.assertNotIn("brackets", self.markdown().filing_instructions((), ""))
+
+    def test_the_filing_instructions_are_the_same_with_and_without_a_push(self):
+        """KTD13: the loop pairs only with a Manifest that does not push, and the sentence
+        never promises one either way."""
+        no_push = self.toml.replace('mode = "local_merge"', 'mode = "local_merge"\npush = false')
+        adapter = md_adapter.MarkdownAdapter(self.manifest(no_push, name="nopush.toml"))
+        self.assertEqual(adapter.filing_instructions(("loop",), ""),
+                         self.markdown().filing_instructions(("loop",), ""))
 
     def test_a_missing_tracker_file_is_skipped_rather_than_a_crash(self):
         _repo.git(self.repo, "rm", "-q", "tracker.md")
