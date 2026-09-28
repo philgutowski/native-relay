@@ -90,6 +90,7 @@ import fcntl
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -631,24 +632,34 @@ def scanned_ids(cards):
     return reasons
 
 
+def loop_filed(state):
+    """The browser test loop's filed map from a state dict, {} when it holds no loop or a
+    damaged one. Read whether the loop is on, stopped, or since switched off, since the cards it
+    filed are still built under its routing and batching rules (R20)."""
+    loop = state.get("test_loop") if isinstance(state, dict) else None
+    filed = loop.get("filed") if isinstance(loop, dict) else None
+    return filed if isinstance(filed, dict) else {}
+
+
 def cause_file(filed, card_id):
-    """The cause file the browser test loop recorded for a card it filed, or None for a card it
-    did not file or recorded no file for. `filed` is the state file's `test_loop.filed`."""
+    """The cause file the browser test loop recorded for a card it filed, normalized so `./a.py`
+    and `a.py` are one file, or None for a card it did not file or recorded no file for.
+    `filed` is the state file's `test_loop.filed`."""
     record = filed.get(str(card_id)) if isinstance(filed, dict) else None
     value = record.get("cause_file") if isinstance(record, dict) else None
-    return value if isinstance(value, str) and value else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return posixpath.normpath(value.strip())
 
 
 def design_ids(filed):
     """The ids of the cards the browser test loop filed as design cards (R14)."""
-    if not isinstance(filed, dict):
-        return frozenset()
     return frozenset(str(card_id) for card_id, record in filed.items()
                      if isinstance(record, dict) and record.get("design") is True)
 
 
 def select(cards, listed, config, rank, unsettled_count, scanned, held=(), filed=None,
-           unsettled=()):
+           unsettled=(), refused=()):
     """(fresh, batch, same_file). Fresh is every ready card a session may take that the manifest
     does not list yet, in order file order and then by id, including one the R41 scan would
     refuse. `scanned` is `scanned_ids`'s result, and the batch is the head of the ones outside
@@ -662,7 +673,8 @@ def select(cards, listed, config, rank, unsettled_count, scanned, held=(), filed
     will still launch, defer, or retry (R13, KTD11). `filed` is the loop's filed map. Two fixes
     to one file built in one batch would each merge over the other; held, the second is taken
     once the first settles. `same_file` is {held id: the id it waits on}. A card the loop did
-    not file neither holds nor is held."""
+    not file neither holds nor is held, and nor does a card in `refused`, one the cycle drops
+    from the batch after this for its model, since it never reaches the manifest to settle."""
     fresh = [card for card in cards
              if card["id"] not in listed and card["id"] not in config.denied_ids
              and not any(label in config.denied_labels for label in card.get("labels") or ())]
@@ -671,10 +683,10 @@ def select(cards, listed, config, rank, unsettled_count, scanned, held=(), filed
     eligible = [card for card in fresh if card["id"] not in scanned and card["id"] not in held]
     filed = filed or {}
     taken = {}
-    for task_id in unsettled:
+    for task_id in sorted((str(task_id) for task_id in unsettled), key=natural_key):
         path = cause_file(filed, task_id)
         if path is not None:
-            taken.setdefault(path, str(task_id))
+            taken.setdefault(path, task_id)
     batch, same_file = [], {}
     for card in eligible:
         if len(batch) >= room:
@@ -684,7 +696,7 @@ def select(cards, listed, config, rank, unsettled_count, scanned, held=(), filed
             same_file[card["id"]] = taken[path]
             continue
         batch.append(card)
-        if path is not None:
+        if path is not None and card["id"] not in refused:
             taken[path] = card["id"]
     return fresh, batch, same_file
 
@@ -1462,17 +1474,21 @@ class Feeder:
         cards, readable = self.ready_cards(manifest)
         scanned = scanned_ids(cards)
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
-        filed = self.loop_filed()
+        filed = loop_filed(self.state)
         design = design_ids(filed)
         # Routed once per cycle: the held set, the batch, and the dry run all read this.
         routes = {card["id"]: self.route(card, routing, marks, design) for card in cards
                   if card["id"] not in listed}
         held = {card_id for card_id, (model, _) in routes.items() if model is None}
-        # Everything the next run will still launch, defer, or retry, for the same file rule.
+        # Everything the next run will still launch, defer, or retry, for the same file rule,
+        # and the cards dropped below for their model, which hold no file for it.
         unsettled = set(launch.running) | set(launch.defer) | set(launch.queue)
+        refused = {card_id for card_id, (model, _) in routes.items()
+                   if model is not None and self.state["refused"].get(card_id) == model}
         fresh, batch, same_file = select(
             cards, set(listed), config, read_order(self._read(self.paths.order)),
-            len(launch.running), scanned, held, filed=filed, unsettled=unsettled)
+            len(launch.running), scanned, held, filed=filed, unsettled=unsettled,
+            refused=refused)
         held_fresh = [card["id"] for card in fresh
                       if card["id"] in held and card["id"] not in scanned]
         if not self.dry_run:
@@ -1983,14 +1999,6 @@ class Feeder:
     def loop_stopped(self):
         loop = self.state.get("test_loop")
         return isinstance(loop, dict) and bool(loop.get("stop"))
-
-    def loop_filed(self):
-        """The loop's filed map, {} for a Feeder whose state holds no loop. Read whether the loop
-        is on, stopped, or since switched off, since the cards it filed are still built under
-        its routing and batching rules (R20)."""
-        loop = self.state.get("test_loop")
-        filed = loop.get("filed") if isinstance(loop, dict) else None
-        return filed if isinstance(filed, dict) else {}
 
     def announce_same_file(self, same_file, filed):
         """Log each card newly held out of a batch by the same file rule, once (R13)."""
@@ -2577,8 +2585,7 @@ def ready_queue(manifest, env, deps=None):
     refused = state.get("refused") or {}
     if not isinstance(refused, dict):
         return None, "%s holds a refused set that is not a JSON object" % paths.state
-    loop = state.get("test_loop")
-    design = design_ids(loop.get("filed") if isinstance(loop, dict) else None)
+    design = design_ids(loop_filed(state))
     listed = {task.id for task in manifest.tasks}
     scanned = scanned_ids(cards)
     fresh, _, _ = select(cards, listed, config, {}, 0, scanned)
@@ -2899,29 +2906,40 @@ def status_loop(state, paths, now):
         settings, problem = TestLoop(), str(exc)
     if (problem is None and not settings.enabled) or (problem is not None and loop is None):
         return None
+    # A damaged state file is shown as far as it reads, never raised on: plain `status` reads
+    # this through `_feeder_line`, which catches only ConfigError.
     loop = loop or {}
-    hours = None
+    stop = loop.get("stop") if isinstance(loop.get("stop"), dict) else None
     started = loop.get("started_at")
-    if isinstance(started, str):
+    # Measured to the stop, so a stopped loop's hours do not grow against its clock cap.
+    hours = None
+    if started is not None:
         try:
-            hours = round((now - datetime.fromisoformat(started)).total_seconds() / 3600, 1)
+            until = datetime.fromisoformat(stop["at"]) if stop and stop.get("at") else now
+            hours = round((until - datetime.fromisoformat(started)).total_seconds() / 3600, 1)
         except (TypeError, ValueError):
-            pass
-    passes = [{"pass": entry.get("pass"), "kind": entry.get("kind"),
-               "status": entry.get("status"), "filed": len(entry.get("filed") or ())}
-              for entry in loop.get("passes") or () if isinstance(entry, dict)]
+            hours = "unreadable"
+    passes = []
+    for entry in loop.get("passes") if isinstance(loop.get("passes"), list) else ():
+        if isinstance(entry, dict):
+            cards = entry.get("filed")
+            passes.append({"pass": entry.get("pass"), "kind": entry.get("kind"),
+                           "status": entry.get("status"),
+                           "filed": len(cards) if isinstance(cards, list) else 0})
     generations = {}
-    filed = loop.get("filed") if isinstance(loop.get("filed"), dict) else {}
+    filed = loop_filed(state)
     for record in filed.values():
         generation = record.get("generation") if isinstance(record, dict) else None
-        key = str(generation) if isinstance(generation, int) else "unreadable"
+        key = (str(generation) if isinstance(generation, int)
+               and not isinstance(generation, bool) else "unreadable")
         generations[key] = generations.get(key, 0) + 1
+    areas = loop.get("stopped_areas")
     return {"enabled": settings.enabled, "report_only": settings.report_only,
             "rounds": loop.get("rounds", 0), "max_rounds": settings.max_rounds,
             "started_at": started, "hours_used": hours, "max_hours": settings.max_hours,
             "passes": passes, "cards_filed": len(filed), "generations": generations,
-            "stopped_areas": list(loop.get("stopped_areas") or ()),
-            "stop": loop.get("stop") or None, "sidecar_problem": problem}
+            "stopped_areas": [str(area) for area in areas] if isinstance(areas, list) else [],
+            "stop": stop, "sidecar_problem": problem}
 
 
 def status_report(paths, hostname=None, now=datetime.now):
@@ -2956,8 +2974,13 @@ def loop_lines(report):
     if loop.get("sidecar_problem"):
         lines.append("test loop: the sidecar could not be read, so the caps below are the "
                      "defaults: %s" % loop["sidecar_problem"])
-    hours = ("no pass yet" if loop.get("hours_used") is None
-             else "%s hours used since %s" % (loop["hours_used"], loop.get("started_at")))
+    used = loop.get("hours_used")
+    if used is None:
+        hours = "no pass yet"
+    elif used == "unreadable":
+        hours = "hours used unreadable, the start is %r" % (loop.get("started_at"),)
+    else:
+        hours = "%s hours used since %s" % (used, loop.get("started_at"))
     lines.append("test loop: %s%s, round %s of %s, %s, of %s" % (
         "on" if loop.get("enabled") else "state only",
         ", report only" if loop.get("report_only") else "", loop.get("rounds"),

@@ -116,6 +116,30 @@ class SameFileBatching(LoopCase):
         self.assertEqual(self.runs[0], ["1", "10"])
         self.assertNotIn("holding", self.log_text())
 
+    def test_a_refused_card_holds_no_cause_file(self):
+        # 10 is refused on the model it routes to and dropped from the batch, so it never
+        # settles; 11 shares its file and must not wait on it.
+        self.write(self.paths.state, json.dumps(dict(feeder.new_state(),
+                                                     refused={"10": "opus"})))
+        self.pass_script = [tour(filed(10, cause="src/a.py"), filed(11, cause="src/a.py"))]
+        self.plans = [{}]
+        self.feed_loop()
+        self.assertEqual(self.runs[0], ["11"])
+        self.assertNotIn("holding", self.log_text())
+
+    def test_one_file_spelled_two_ways_is_one_file(self):
+        self.pass_script = [tour(filed(10, cause="src/a.py"), filed(11, cause="./src//a.py "))]
+        self.plans = [{}, {}]
+        self.feed_loop()
+        self.assertEqual(self.runs, [["10"], ["10", "11"]])
+
+    def test_the_card_a_held_card_waits_on_is_the_first_in_natural_order(self):
+        filed_map = {task_id: {"cause_file": "src/a.py"} for task_id in ("9", "10", "11")}
+        for unsettled in ({"10", "9"}, {"9", "10"}, ["10", "9"]):
+            _, _, same_file = feeder.select([card(11)], {"9", "10"}, feeder.Config(), {}, 2, {},
+                                            filed=filed_map, unsettled=unsettled)
+            self.assertEqual(same_file, {"11": "9"})
+
     def test_cards_the_loop_did_not_file_batch_as_today(self):
         filed_map = {"10": {"cause_file": "src/a.py"}}
         cards = [card(1), card(2), card(3)]
@@ -174,7 +198,8 @@ class Status(LoopCase):
         self.seed_loop()
         code, text = self.call("--status")
         self.assertEqual(code, 0, text)
-        self.assertIn("test loop: on, report only, round 2 of 4, 3.0 hours used since "
+        # Measured to the stop at 08:40, not to the present, so a stopped loop's hours hold.
+        self.assertIn("test loop: on, report only, round 2 of 4, 2.8 hours used since "
                       "2026-09-19T05:50:00, of 12", text)
         self.assertIn("test loop cards filed per pass: #1 tour ran 2, #2 check ran 1, "
                       "#3 tour not_run 0", text)
@@ -186,8 +211,32 @@ class Status(LoopCase):
                           loop["max_rounds"], loop["hours_used"], loop["max_hours"],
                           loop["cards_filed"], loop["generations"], loop["stopped_areas"],
                           loop["stop"]["reason"]),
-                         (True, True, 2, 4, 3.0, 12, 3, {"1": 2, "2": 1}, ["Search"],
+                         (True, True, 2, 4, 2.8, 12, 3, {"1": 2, "2": 1}, ["Search"],
                           testloop.STOP_ROUNDS))
+
+    def test_a_running_loop_counts_its_hours_to_the_present(self):
+        self.write(self.paths.config, ON)
+        self.seed(started_at=(self.clock - timedelta(hours=3)).isoformat(timespec="seconds"))
+        self.assertIn("round 0 of 6, 3.0 hours used", self.call("--status")[1])
+
+    def test_a_damaged_loop_state_is_shown_and_never_raised_on(self):
+        self.write(self.paths.config, ON)
+        state = feeder.new_state()
+        state["test_loop"] = {"started_at": "yesterday", "rounds": 1,
+                              "passes": [{"pass": 1, "kind": "tour", "status": "ran",
+                                          "filed": 3}, "junk"],
+                              "filed": {"10": {"generation": "one"}, "11": 5},
+                              "stopped_areas": 5, "stop": "no"}
+        self.write(self.paths.state, json.dumps(state))
+        code, text = self.call("--status")
+        self.assertEqual(code, 0, text)
+        self.assertIn("hours used unreadable, the start is 'yesterday'", text)
+        self.assertIn("test loop cards filed per pass: #1 tour ran 0", text)
+        self.assertIn("test loop filed cards: 2, generation unreadable: 2", text)
+        self.assertIn("test loop stopped areas: []", text)
+        self.assertIn("test loop stop: none yet", text)
+        # Plain `status` reads the same report for its feeder line.
+        self.assertTrue(cli._feeder_line(self.manifest_path).startswith("feeder: "))
 
     def test_a_loop_on_with_no_pass_yet_says_so(self):
         self.write(self.paths.config, ON)
