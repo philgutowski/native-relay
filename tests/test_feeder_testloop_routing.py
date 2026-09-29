@@ -8,11 +8,13 @@ operator does. Nothing here launches a process or reads a network.
 """
 import io
 import json
+import os
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import _paths
-from relay import cli, feeder, testloop
+from relay import cli, feeder, manifest as mf, testloop
 from test_feeder import card
 from test_feeder_testloop import LoopCase, finding
 
@@ -157,6 +159,91 @@ class SameFileBatching(LoopCase):
         self.assertEqual([entry["id"] for entry in fresh], ["11", "12"])
         self.assertEqual([entry["id"] for entry in batch], ["12"])
         self.assertEqual(same_file, {"11": "10"})
+
+
+class QueueAgreement(LoopCase):
+    """Issue #119: `status --queue`, `feed --dry-run`, and the cycle give one answer about a card
+    the same file rule holds. The queue used to call `select` without the filed map, the
+    unsettled ids, or the refused set, so it listed the held card as simply queued."""
+
+    def queue_line(self):
+        # `status --queue`'s own path from `ready_queue` to the printed line, over this case's
+        # fake board and summary rather than a real tracker.
+        view = {"landed_by_model": {}, "landed_sample": 0}
+        with mock.patch.object(feeder, "build_deps", return_value=self.deps()):
+            return cli._queue_line(mf.load(self.manifest_path), view, self.base_env())
+
+    def dry_run(self):
+        if os.path.exists(self.paths.stop):
+            os.remove(self.paths.stop)
+        self.assertEqual(self.feed(self.loop_config(), dry_run=True), 0, self.out.getvalue())
+        return self.out.getvalue()
+
+    def test_status_queue_the_dry_run_and_the_cycle_agree_on_a_held_card(self):
+        # 10 halts, so it is listed and unsettled; 11 names the same cause file and waits on it.
+        self.pass_script = [tour(filed(10, cause="src/a.py"), filed(11, cause="src/a.py"),
+                                 filed(12, cause="src/b.py"))]
+        self.plans = [{"10": "halted"}]
+        self.feed_loop()
+        self.assertEqual(self.runs, [["10", "12"]])
+        self.assertIn("holding 11 out of this batch until 10 settles", self.log_text())
+
+        self.assertIn("would hold 11 until 10 settles, both fix src/a.py", self.dry_run())
+        manifest = mf.load(self.manifest_path)
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", "10")], None))
+        self.assertIn("1 held until the card it shares a cause file with settles: 11 waits on 10",
+                      self.queue_line())
+
+        # The cycle over the same state: 11 still out of the batch, 10 and 12 run again.
+        self.plans = [{}]
+        self.feed_loop()
+        self.assertEqual(self.runs[-1], ["10", "12"])
+        self.assertEqual(self.log_text().count("holding 11 out of this batch until 10 settles"),
+                         2)
+        # 10 landed, so all three now say 11 is free.
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", None)], None))
+        self.assertNotIn("held", self.queue_line())
+        self.assertIn("would offer 11 on opus", self.dry_run())
+
+    def test_the_queue_holds_behind_a_queued_retry_of_a_blocked_card(self):
+        # Blocked is settled, but a queued retry runs again, so the cycle still counts it.
+        self.pass_script = [tour(filed(10, cause="src/a.py"), filed(11, cause="src/a.py"))]
+        self.plans = [{"10": "blocked"}]
+        self.feed_loop()
+        manifest = mf.load(self.manifest_path)
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", None)], None))
+        saved = feeder.read_state(self.paths)
+        saved["retry_blocked"] = {"10": "2026-09-19T08:50:00"}
+        self.write(self.paths.state, json.dumps(saved))
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", "10")], None))
+        self.assertIn("would hold 11 until 10 settles", self.dry_run())
+
+    def seed_two_on_one_file(self, **state):
+        """Two filed cards on the board with one cause file, neither listed yet."""
+        self.adapter.ready_cards = [card(10), card(11)]
+        saved = dict(feeder.new_state(), **state)
+        saved["test_loop"] = dict(feeder.new_loop_state(self.clock), filed={
+            "10": {"generation": 1, "cause_file": "src/a.py"},
+            "11": {"generation": 1, "cause_file": "src/a.py"}})
+        self.write(self.paths.state, json.dumps(saved))
+        return mf.load(self.manifest_path, allow_no_tasks=True)
+
+    def test_the_queue_follows_the_order_file_for_which_card_holds_the_file(self):
+        self.write(self.paths.order, "11\n10\n")
+        manifest = self.seed_two_on_one_file()
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", None), ("10", "opus", "11")], None))
+        self.assertIn("would hold 10 until 11 settles", self.dry_run())
+
+    def test_a_refused_card_holds_no_file_in_the_queue_either(self):
+        manifest = self.seed_two_on_one_file(refused={"10": "opus"})
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", None)], None))
+        self.assertIn("would offer 11 on opus", self.dry_run())
 
 
 class Status(LoopCase):

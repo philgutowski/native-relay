@@ -190,22 +190,25 @@ def _estimate(entries, landed):
 
 
 def queue_estimate(data, cards):
-    """The ready queue behind a feeder's cycle, priced (issue #50). `cards` is [(id, model)] for
-    the ready cards the manifest does not list yet. Each is priced at the mean landed duration of
-    its model, or at the mean of every landed task when its model has none, so one card routed to
-    a model nothing has run on yet still counts rather than vanishing from the sum.
+    """The ready queue behind a feeder's cycle, priced (issue #50). `cards` is
+    [(id, model, waits_on)] for the ready cards the manifest does not list yet, `waits_on` the id
+    a card the same file rule holds is waiting on, else None. Each is priced at the mean landed
+    duration of its model, or at the mean of every landed task when its model has none, so one
+    card routed to a model nothing has run on yet still counts rather than vanishing from the
+    sum. A held card is priced too, since it runs once the card it waits on settles.
 
     The cycle estimate and this one are kept apart rather than added: the cycle is the run in
     flight and this is what the feeder will append after it, and an operator deciding whether to
     leave a machine on overnight needs to see both."""
     by_model = data["landed_by_model"]
     result = {"cards": len(cards), "seconds": None, "on_overall": 0,
-              "landed_sample": data["landed_sample"]}
+              "landed_sample": data["landed_sample"],
+              "same_file": [(card_id, waits_on) for card_id, _, waits_on in cards if waits_on]}
     if not data["landed_sample"]:
         return result
     overall = sum(sum(values) for values in by_model.values()) / data["landed_sample"]
     total = 0.0
-    for _, model in cards:
+    for _, model, _ in cards:
         values = by_model.get(model)
         if values:
             total += sum(values) / len(values)
@@ -233,17 +236,27 @@ def queue_line(queue=None, reason=None):
         return "queue: no estimate, %s" % reason
     if not queue["cards"]:
         return "queue: no ready card waits beyond this cycle; %s" % QUEUE_BLIND
+    held = _same_file_clause(queue.get("same_file"))
     if queue["seconds"] is None:
-        return ("queue: %d ready card(s), no estimate yet, no landed task carries a duration"
-                % queue["cards"])
+        return ("queue: %d ready card(s), no estimate yet, no landed task carries a duration%s"
+                % (queue["cards"], held))
     fallback = ""
     if queue["on_overall"]:
         fallback = (" (%d on the overall mean, their model has no landed task)"
                     % queue["on_overall"])
     return ("queue: roughly %s for %d ready card(s) beyond this cycle, from the mean landed "
-            "duration of each card's model over %d landed task(s)%s; %s"
+            "duration of each card's model over %d landed task(s)%s%s; %s"
             % (duration(queue["seconds"]), queue["cards"], queue["landed_sample"], fallback,
-               QUEUE_BLIND))
+               held, QUEUE_BLIND))
+
+
+def _same_file_clause(same_file):
+    """The clause naming the queued cards the same file rule holds, and the id each waits on
+    (issue #119), or nothing when none is held."""
+    if not same_file:
+        return ""
+    return ("; %d held until the card it shares a cause file with settles: %s"
+            % (len(same_file), ", ".join("%s waits on %s" % pair for pair in same_file)))
 
 
 def duration(seconds):

@@ -529,7 +529,7 @@ class Queue(unittest.TestCase):
             "T-2": record(contracts.STATUS_LANDED, NOW - 500, NOW - 200, model="fable"),
             "T-3": record(contracts.STATUS_LANDED, NOW - 500, NOW - 400, model="opus"),
         })
-        queue = progress.queue_estimate(data, [("9", "opus"), ("10", "fable"), ("11", "sonnet")])
+        queue = progress.queue_estimate(data, [("9", "opus", None), ("10", "fable", None), ("11", "sonnet", None)])
         # opus 100, fable 300, sonnet on the overall mean of 100, 300, 100.
         self.assertEqual(queue["seconds"], 100 + 300 + 500 / 3)
         self.assertEqual((queue["cards"], queue["on_overall"], queue["landed_sample"]), (3, 1, 3))
@@ -538,7 +538,7 @@ class Queue(unittest.TestCase):
         data = self.data({"T-1": record(contracts.STATUS_LANDED, NOW - 200, NOW - 100)},
                          models={"T-1": "fable"})
         self.assertEqual(data["landed_by_model"], {"fable": [100.0]})
-        self.assertEqual(progress.queue_estimate(data, [("9", "fable")])["on_overall"], 0)
+        self.assertEqual(progress.queue_estimate(data, [("9", "fable", None)])["on_overall"], 0)
 
     def test_only_landed_tasks_with_a_duration_are_drawn_from(self):
         data = self.data({
@@ -547,7 +547,7 @@ class Queue(unittest.TestCase):
             "T-3": record(contracts.STATUS_RUNNING, NOW - 50, model="opus"),
         })
         self.assertEqual(data["landed_by_model"], {})
-        queue = progress.queue_estimate(data, [("9", "opus")])
+        queue = progress.queue_estimate(data, [("9", "opus", None)])
         self.assertIsNone(queue["seconds"])
         self.assertEqual(progress.queue_line(queue),
                          "queue: 1 ready card(s), no estimate yet, no landed task carries a "
@@ -555,11 +555,24 @@ class Queue(unittest.TestCase):
 
     def test_the_line_names_the_count_the_sample_and_what_it_does_not_know(self):
         data = self.data({"T-1": record(contracts.STATUS_LANDED, NOW - 4000, NOW, model="opus")})
-        line = progress.queue_line(progress.queue_estimate(data, [("9", "opus"), ("10", "fable")]))
+        line = progress.queue_line(progress.queue_estimate(data, [("9", "opus", None), ("10", "fable", None)]))
         self.assertEqual(line, "queue: roughly 2h 13m for 2 ready card(s) beyond this cycle, from "
                                "the mean landed duration of each card's model over 1 landed "
                                "task(s) (1 on the overall mean, their model has no landed task); "
                                "it does not count cards not ready yet or residuals not yet filed")
+
+    def test_a_card_held_by_the_same_file_rule_is_priced_and_named_with_what_it_waits_on(self):
+        # Issue #119: held is not dropped, it runs once 10 settles.
+        data = self.data({"T-1": record(contracts.STATUS_LANDED, NOW - 100, NOW, model="opus")})
+        queue = progress.queue_estimate(data, [("11", "opus", "10"), ("12", "opus", None)])
+        self.assertEqual((queue["cards"], queue["seconds"], queue["same_file"]),
+                         (2, 200.0, [("11", "10")]))
+        self.assertIn("task(s); 1 held until the card it shares a cause file with settles: 11 "
+                      "waits on 10; it does not count", progress.queue_line(queue))
+        empty = progress.queue_estimate(self.data({}), [("11", "opus", "10")])
+        self.assertTrue(progress.queue_line(empty).endswith(
+            "no landed task carries a duration; 1 held until the card it shares a cause file "
+            "with settles: 11 waits on 10"))
 
     def test_an_empty_queue_says_so_rather_than_pricing_nothing(self):
         data = self.data({})
