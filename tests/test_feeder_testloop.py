@@ -10,6 +10,7 @@ created. Nothing here launches a process or reads a network.
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import timedelta
@@ -58,6 +59,9 @@ class LoopCase(FeederCase):
         self.adapter.ready_cards = []
         self.pass_script, self.passes, self.order = [], [], []
         self.before_run = lambda: self.order.append(("run", self.listed()))
+        # The ids a scripted pass filed off the board. With `derive_on_hook`, the pre cycle hook
+        # puts them on it, the way a board whose hook derives ready labels would.
+        self.off_board, self.derive_on_hook = [], False
 
     def _run_test_pass(self, manifest_path, kind, cards=(), stopped_areas=(), plan_areas=(),
                        budget=None, model=None):
@@ -78,13 +82,25 @@ class LoopCase(FeederCase):
                   "exit_code": 0, "record_path": "/t/pass-%d.json" % number}
         record.update(script)
         for entry in record["filed"]:
-            if not entry.pop("unready", False) and not entry.get("attended"):
+            if entry.pop("unready", False):
+                self.off_board.append(entry["id"])
+            elif not entry.get("attended"):
                 self.adapter.ready_cards.append(card(entry["id"]))
         return record
+
+    def _derive(self, args, cwd, timeout):
+        """The pre cycle hook of a board that derives ready labels: every card filed off the
+        board so far reaches the ready list."""
+        self.order.append(("pre_cycle", list(self.off_board)))
+        self.adapter.ready_cards += [card(card_id) for card_id in self.off_board]
+        self.off_board = []
+        return subprocess.CompletedProcess(list(args), 0, "", "")
 
     def deps(self):
         deps = super().deps()
         deps.run_test_pass = self._run_test_pass
+        if self.derive_on_hook:
+            deps.run_command = self._derive
         return deps
 
     def loop_config(self, **loop):
@@ -468,7 +484,9 @@ class Failures(LoopCase):
         self.pass_script = [tour_filing(filed(10)), failed, {}, failed]
         self.plans = [{}, {}, {}, {}]
         self.feed(self.loop_config(config={"batch": 1}))
-        self.assertEqual([call["cards"] for call in self.passes[1:4]], [["1"], ["2"], ["10"]])
+        # The failed check of 1 carries it to the next check (issue #116).
+        self.assertEqual([call["cards"] for call in self.passes[1:4]],
+                         [["1"], ["1", "2"], ["10"]])
         self.assertEqual(len([note for note in self.notes if "test pass failed" in note]), 2)
 
     def test_a_start_tour_that_did_not_run_is_not_repeated_before_leaving(self):
@@ -490,13 +508,34 @@ class Failures(LoopCase):
         self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["1", "2"]])
         self.assertEqual(self.loop()["unchecked"], [])
 
-    def test_a_check_that_failed_does_not_carry_its_cards(self):
+    def test_a_check_that_ran_and_failed_carries_its_cards_to_the_next_check(self):
+        """Issue #116: a check whose Test process timed out or lost the Lease left a record,
+        and its landed card is checked at the next pass point, not left to a later tour."""
         self.adapter.ready_cards = [card(1), card(2)]
         self.pass_script = [tour_filing(filed(10)),
-                            {"status": testloop.FAILED, "reason": "card 1 could not be read"}, {}]
+                            {"status": testloop.FAILED,
+                             "reason": "the test process timed out after 3600 seconds"}, {}]
         self.plans = [{}, {}, {}]
         self.feed(self.loop_config(config={"batch": 1}))
-        self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["2"]])
+        self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["1", "2"]])
+        self.assertEqual(self.loop()["unchecked"], [])
+        self.assertIn("the check of [1] failed and waits for the next check", self.log_text())
+        self.assertEqual(len([note for note in self.notes if "check test pass failed" in note]),
+                         1, self.notes)
+
+    def test_a_check_refused_with_no_record_drops_its_cards_with_one_notice(self):
+        # `relay test` refuses a card it cannot read before any pass starts, exit 1 and no
+        # record; carried, that card would refuse every check after it.
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        refused = {"status": testloop.FAILED, "exit_code": 1, "record_path": None,
+                   "reason": "relay test exited 1: card 1 could not be read: gone"}
+        self.pass_script = [tour_filing(filed(10)), refused, dict(refused), {}]
+        self.plans = [{}, {}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:4]], [["1"], ["2"], ["3"]])
+        self.assertIn("the check of [1] was refused before a pass started", self.log_text())
+        notices = [note for note in self.notes if "check test pass failed" in note]
+        self.assertEqual(len(notices), 1, self.notes)
 
     def test_a_held_post_cycle_hook_runs_no_check_and_the_cards_wait(self):
         self.adapter.ready_cards = [card(1)]
@@ -526,6 +565,53 @@ class Failures(LoopCase):
         self.feed_loop()
         self.assertEqual(self.loop()["passes"][0]["status"], testloop.FAILED)
         self.assertEqual(self.loop()["rounds"], 0)
+
+
+class DerivedReady(LoopCase):
+    """Issue #116: on a board whose `pre_cycle` hook derives ready labels, a filed card is
+    ready only after that hook, so the ready read that judges a pass's cards follows it."""
+
+    def setUp(self):
+        super().setUp()
+        self.derive_on_hook = True
+
+    def derived_config(self, **config):
+        return self.loop_config(config=dict(config, pre_cycle_command=("derive",)))
+
+    def test_a_start_tour_card_the_hook_makes_ready_is_built_in_the_first_batch(self):
+        self.adapter.ready_cards = [card(1)]
+        self.pass_script = [tour_filing(filed(10, unready=True))]
+        self.plans = [{}]
+        self.feed(self.derived_config())
+        self.assertEqual(self.order[:3], [("pass", testloop.TOUR), ("pre_cycle", ["10"]),
+                                          ("run", ["1", "10"])])
+        self.assertEqual([note for note in self.notes if "ready source does not return" in note],
+                         [])
+        self.assertEqual(self.loop()["awaiting_ready"], [])
+
+    def test_a_drain_tour_card_the_hook_makes_ready_is_built_instead_of_leaving(self):
+        self.seed(rounds=1)
+        self.pass_script = [tour_filing(filed(12, unready=True)), {}]
+        self.plans = [{}]
+        self.feed(self.derived_config())
+        self.assertEqual(self.runs, [["12"]])
+        self.assertEqual(self.kinds(), [(testloop.TOUR, []), (testloop.CHECK, ["12"])])
+        self.assertIn("the drain tour filed [12], going round", self.log_text())
+        self.assertEqual([note for note in self.notes if "ready source does not return" in note],
+                         [])
+
+    def test_a_drain_tour_card_the_hook_does_not_make_ready_is_notified_and_the_feeder_leaves(self):
+        # The hook runs and still leaves the card off the board: one notice, no second tour.
+        self.derive_on_hook = False
+        self.seed(rounds=1)
+        self.pass_script = [tour_filing(filed(12, unready=True))]
+        self.feed(self.loop_config(config={"pre_cycle_command": ("true",)}))
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertEqual(self.runs, [])
+        notices = [note for note in self.notes if "ready source does not return" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertIn("filed 12 ", notices[0])
+        self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
 
 
 class Untoured(LoopCase):
@@ -687,6 +773,39 @@ class Models(LoopCase):
         self.assertEqual(self.passes, [])
         self.assertIn("waits for the next pass point: opus is held", self.log_text())
         self.assertEqual(self.runs, [["1"]])
+
+    def test_a_drain_tour_withheld_for_a_held_loop_model_waits_for_it_under_model_held(self):
+        """Issue #116: the queue is empty and the loop model is held with no free fallback.
+        The feeder waits for the mark, not leave on the empty queue, then tours."""
+        self.clock_moves = True
+        self.seed(rounds=1)
+        state = self.state()
+        state["exhausted"] = self.marked(hours=0.25)
+        self.write(self.paths.state, json.dumps(state))
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual(self.sleeps, [900])
+        waits = self.events(feeder.EVENT_WAITING)
+        self.assertEqual([(event["reason"], event["seconds"]) for event in waits],
+                         [("model_held", 900)])
+        self.assertIn("the drain tour waits for the test pass model, waiting 900s",
+                      self.log_text())
+        # The mark expired during the wait, so the tour ran on the loop model, found nothing,
+        # stopped the loop clean, and only then did the feeder leave.
+        self.assertEqual([(call["kind"], call["model"]) for call in self.passes],
+                         [(testloop.TOUR, "opus")])
+        self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_CLEAN)
+        self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
+
+    def test_a_held_drain_tour_under_once_leaves_on_the_wait_not_the_empty_queue(self):
+        self.seed(rounds=1)
+        state = self.state()
+        state["exhausted"] = self.marked()
+        self.write(self.paths.state, json.dumps(state))
+        self.assertEqual(self.feed(self.loop_config(), once=True), 0)
+        self.assertEqual(self.passes, [])
+        leaving = self.events(feeder.EVENT_LEAVING)[-1]
+        self.assertEqual(leaving["reason"], "once")
+        self.assertIn("model_held", leaving["message"])
 
     def test_the_loop_model_is_passed_when_nothing_is_marked(self):
         self.adapter.ready_cards = [card(1)]
