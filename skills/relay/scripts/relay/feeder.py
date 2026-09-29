@@ -217,15 +217,14 @@ class CycleContext:
 
 @dataclass(frozen=True)
 class PassDone:
-    """What one browser test pass left the feeder: `new` the cards it confirmed filed and
-    recorded, `unattended` those of them that are not a person's planning card, for the drain
-    tour's choice between going round and leaving, `status` the pass record's own word, and
-    `recorded` whether the pass left a record at all, which a refusal before it started does
-    not (issue #116)."""
-    new: tuple = ()
+    """What one browser test pass left the feeder: `unattended` the cards it newly confirmed
+    filed that are not a person's planning card, for the drain tour's choice between going
+    round and leaving, `status` the pass record's own word, and `refused` whether `relay test`
+    refused before any pass started, exit 1 and no record, as against a pass that ran and
+    failed, or a verb killed or crashed, which leaves no record either (issue #116)."""
     unattended: tuple = ()
     status: str = ""
-    recorded: bool = False
+    refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -1189,12 +1188,13 @@ def new_loop_state(now):
     cause file} for each card the loop confirmed filed; `checks` {landed card id: the areas its
     check filed in}, which `testloop.area_patches` reads; `patches` its counts; `stopped_areas`
     the areas at the patch cap and `planned_areas` those a planning card was asked for;
-    `unchecked` the landed cards whose check has not run yet; `awaiting_ready` the unattended
-    cards a pass filed that no ready read since the `pre_cycle` hook has seen yet (issue #116);
+    `unchecked` the landed cards whose check has not run yet, and `retried` those of them a
+    failed check already carried once; `awaiting_ready` the unattended cards a pass filed that
+    no readable ready read after a `pre_cycle` hook that ran clean has judged yet (issue #116);
     `stop` None, or the record of why the loop ended."""
     return {"started_at": now.isoformat(timespec="seconds"), "rounds": 0, "passes": [],
             "filed": {}, "checks": {}, "patches": {}, "stopped_areas": [], "planned_areas": [],
-            "unchecked": [], "awaiting_ready": [], "stop": None}
+            "unchecked": [], "retried": [], "awaiting_ready": [], "stop": None}
 
 
 def loop_cards_filed(loop):
@@ -1480,12 +1480,13 @@ class Feeder:
             # The manifest is about to be rewritten, and a live runner read it at its start.
             self.log("a runner holds the lease on this manifest, not appending, waiting")
             return self.wait(config.lease_wait_seconds, "lease_held")
+        hook_ok = True
         if not self.dry_run:
             if self.loop_on():
                 # Before the pre cycle hook, so a board whose ready labels it derives derives
                 # them for what the tour filed too (KTD9).
                 self.start_tour(manifest)
-            self.pre_cycle(manifest)
+            hook_ok = self.pre_cycle(manifest)
 
         text = self._read(self.paths.manifest)
         listed = manifestedit.task_ids(text)
@@ -1501,8 +1502,8 @@ class Feeder:
         # The moves above rewrote the manifest, so the append reads it again.
         text = self._read(self.paths.manifest)
         cards, readable = self.ready_cards(manifest)
-        if self.loop_on():
-            self.check_awaiting(cards, readable)
+        if self.loop_on() and readable and hook_ok:
+            self.check_awaiting(cards)
         scanned = scanned_ids(cards)
         routing, notes = read_routing(self._read(self.paths.routing), config.allowed_models)
         filed = loop_filed(self.state)
@@ -1588,8 +1589,7 @@ class Feeder:
             models = {model for _, model in launch.held}
             models |= {choose_model(card, routing, config, design)[0] for card in fresh
                        if card["id"] in held_fresh}
-            seconds = limits.hold_wait(models, marks, config.model_fallback, deps.now(),
-                                       config.limit_wait_seconds) or config.limit_wait_seconds
+            seconds = self.held_wait(models, marks)
             self.log("nothing to run until a held model's mark expires, waiting %ds" % seconds)
             return self.wait(seconds, limits.WAIT_MODEL_HELD)
         elif not launch.running:
@@ -1691,8 +1691,9 @@ class Feeder:
             if isinstance(drained, Pending):
                 return self.wait(drained.seconds, drained.reason)
             if drained:
-                self.state["idle_waits"] = 0
-                self.save_state()
+                # The count stands until the next cycle appends the tour's cards, which resets
+                # it, so a card the ready source never returns costs no fresh round of idle
+                # waits before the drain guard lets the feeder leave (code review, #116).
                 return EXIT_OK if self.once else None
             return self.stop(EXIT_OK, "the queue is empty, leaving: nothing ready, nothing left "
                                       "to run, and no runner holds the lease. Everything left "
@@ -1900,6 +1901,13 @@ class Feeder:
             self.save_state()
         return active
 
+    def held_wait(self, models, marks):
+        """The R7 wait for work held on `models`: until the earliest mark along their chains
+        expires, capped at `limit_wait_seconds`, and that cap when no mark holds them."""
+        config = self.config
+        return (limits.hold_wait(models, marks, config.model_fallback, self.deps.now(),
+                                 config.limit_wait_seconds) or config.limit_wait_seconds)
+
     def write_marks(self, marks, notify, died):
         """Write each {model: limits.Mark} into `exhausted`, replacing any mark the model had
         (KTD5), and say so. `notify` is the models that were not marked before, the only ones
@@ -2079,12 +2087,13 @@ class Feeder:
     def check_landed(self, manifest, landed, run=True):
         """After a Cycle that landed cards, a check of the ones `testloop` selects (R4, R18),
         with the cards landed earlier whose check never ran. A check that was not started, by
-        `run` false or by a held model, that was not run, or that ran and failed, leaves its
-        cards in `unchecked` for the next check (code review, issue #116), so a landing is never
-        dropped unchecked for a reason that was the app's, the account's, or a Test process that
-        timed out or lost the Lease. Only a refusal drops its cards, a failed pass that left no
-        record: a card the verb refuses to read is refused before any pass starts, and carried
-        it would refuse every check after it. `record_pass` has already notified it once."""
+        `run` false or by a held model, or that was not run, leaves its cards in `unchecked` for
+        the next check (code review), so a landing is never dropped unchecked for a reason that
+        was the app's or the account's. A check that ran and failed, a Test process that timed
+        out or lost the Lease, carries its cards once (issue #116): `retried` names the cards a
+        failed check already carried, and a second failure drops them. A refusal drops its
+        cards at once: a card the verb refuses to read is refused before any pass starts, and
+        carried it would refuse every check after it. `record_pass` notifies each once."""
         loop = self.state.get("test_loop")
         if self.loop_stopped() or not (landed or (isinstance(loop, dict)
                                                   and loop.get("unchecked"))):
@@ -2100,18 +2109,26 @@ class Feeder:
             return
         done = self.test_pass(manifest, testloop.CHECK, cards) if run else None
         loop = self.loop_state()
-        refused = (done is not None and done.status == testloop.FAILED
-                   and not done.recorded)
-        if done is not None and (done.status == testloop.RAN or refused):
-            loop["unchecked"] = []
-            if refused:
+        if done is not None and (done.status == testloop.RAN or done.refused):
+            loop["unchecked"], loop["retried"] = [], []
+            if done.refused:
                 self.log("the check of %s was refused before a pass started, so its cards are "
                          "not checked" % _ids(cards))
-        elif not loop.get("stop"):
+        elif loop.get("stop"):
+            pass
+        elif done is not None and done.status == testloop.FAILED:
+            # One carry per card: a card whose check fails again, a hang in its own area say,
+            # would otherwise fail every check after it until the loop's clock ran out.
+            retried = [str(card) for card in loop["retried"]]
+            carried = [card for card in cards if card not in retried]
+            spent = [card for card in cards if card in retried]
+            loop["unchecked"], loop["retried"] = list(carried), list(carried)
+            self.log("the check of %s failed%s%s" % (
+                _ids(cards), ", %s waits for the next check" % _ids(carried) if carried else "",
+                ", %s failed a check twice and is not checked" % _ids(spent) if spent else ""))
+        else:
             loop["unchecked"] = list(cards)
-            self.log("the check of %s %s and waits for the next check" % (
-                _ids(cards), "failed" if done is not None and done.status == testloop.FAILED
-                else "did not run"))
+            self.log("the check of %s did not run and waits for the next check" % _ids(cards))
         self.save_state()
 
     def drain_tour(self, manifest):
@@ -2138,11 +2155,9 @@ class Feeder:
         if done is None and not self.loop_stopped():
             # `test_pass` starts no pass for three reasons, and the clock and the budget both
             # stop the loop first, so a loop still running here was withheld for its model.
-            config = self.config
-            seconds = limits.hold_wait({config.test_model}, self.exhausted_models(),
-                                       config.model_fallback, self.deps.now(),
-                                       config.limit_wait_seconds) or config.limit_wait_seconds
-            self.log("the drain tour waits for the test pass model, waiting %ds" % seconds)
+            seconds = self.held_wait({self.config.test_model}, self.exhausted_models())
+            self.log("the drain tour waits %ds for a mark along the test pass model's chain to "
+                     "expire" % seconds)
             return Pending(seconds=seconds, reason=limits.WAIT_MODEL_HELD)
         if done is None or not done.unattended:
             return False
@@ -2324,8 +2339,9 @@ class Feeder:
         if stop:
             self.stop_loop(stop, record)
         self.save_state()
-        return PassDone(new=tuple(new), unattended=tuple(unattended), status=status,
-                        recorded=bool(record.get("record_path")))
+        return PassDone(unattended=tuple(unattended), status=status,
+                        refused=(status == testloop.FAILED and not record.get("record_path")
+                                 and record.get("exit_code") == EXIT_CONFIG))
 
     def tour_headings(self, manifest):
         """The tour document's headings as the checkout holds it, or None when it cannot be
@@ -2337,27 +2353,27 @@ class Feeder:
         except (OSError, UnicodeDecodeError):
             return None
 
-    def check_awaiting(self, cards, readable):
-        """Read the cards passes filed since the last ready read against this Cycle's read,
-        `cards`, which comes after the `pre_cycle` hook, and clear the list (issue #116). Each
-        one the read does not return is notified once, naming them (step 10): a configuration
-        problem for the operator, not a reason for another tour. An attended planning card is
-        never on the list, since it is a person's and a ready source is right not to return it.
-        A read that failed is no evidence, and the cards are not held for a later one, by which
-        time a card appended and started may rightly have left the ready set."""
+    def check_awaiting(self, cards):
+        """Judge the cards passes filed since the last judged read against this Cycle's ready
+        read, `cards`, which comes after the `pre_cycle` hook, and clear the list (issue #116).
+        Each one the read does not return is notified once, naming them (step 10): a
+        configuration problem for the operator, not a reason for another tour. An attended
+        planning card is never on the list, since it is a person's and a ready source is right
+        not to return it. The caller judges only a readable read after a hook that ran clean;
+        any other read is no evidence, and nothing is appended without a readable one, so the
+        list simply waits for the next."""
         loop = self.state.get("test_loop")
         awaiting = loop.get("awaiting_ready") if isinstance(loop, dict) else None
         if not isinstance(awaiting, list) or not awaiting:
             return
         loop["awaiting_ready"] = []
-        if readable:
-            offered = {str(card["id"]) for card in cards}
-            missing = [str(card_id) for card_id in awaiting if str(card_id) not in offered]
-            if missing:
-                self.report_once("test_unready", "the test loop filed %s and the tracker "
-                                 "confirmed them, but the ready source does not return them, so "
-                                 "the feeder will not build them; check that the ready source "
-                                 "admits a card carrying the loop's labels" % ", ".join(missing))
+        offered = {str(card["id"]) for card in cards}
+        missing = [str(card_id) for card_id in awaiting if str(card_id) not in offered]
+        if missing:
+            self.report_once("test_unready", "the test loop filed %s and the tracker confirmed "
+                             "them, but the ready source does not return them, so the feeder "
+                             "will not build them; check that the ready source admits a card "
+                             "carrying the loop's labels" % ", ".join(missing))
         self.save_state()
 
     def stop_loop(self, reason, record=None):
@@ -2559,18 +2575,22 @@ class Feeder:
 
     # The steps.
     def pre_cycle(self, manifest):
+        """Run the pre cycle hook, if the sidecar names one. False when it could not run or
+        exited nonzero, so a ready read after it is no evidence about derived labels."""
         if not self.config.pre_cycle_command:
-            return
+            return True
         try:
             done = self.deps.run_command(self.config.pre_cycle_command, manifest.project.repo,
                                          COMMAND_TIMEOUT_SECONDS)
         except (OSError, subprocess.SubprocessError) as exc:
             self.log("the pre cycle command could not run: %s" % exc)
-            return
+            return False
         if done.returncode != 0:
             self.log("the pre cycle command exited %d: %s %s" % (
                 done.returncode, (done.stdout or "").strip()[-200:],
                 (done.stderr or "").strip()[-200:]))
+            return False
+        return True
 
     def ready_cards(self, manifest):
         """(cards, readable). An unreadable tracker is not a crash: it offers no cards, the

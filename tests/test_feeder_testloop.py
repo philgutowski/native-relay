@@ -519,9 +519,34 @@ class Failures(LoopCase):
         self.feed(self.loop_config(config={"batch": 1}))
         self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["1", "2"]])
         self.assertEqual(self.loop()["unchecked"], [])
-        self.assertIn("the check of [1] failed and waits for the next check", self.log_text())
+        self.assertIn("the check of [1] failed, [1] waits for the next check", self.log_text())
         self.assertEqual(len([note for note in self.notes if "check test pass failed" in note]),
                          1, self.notes)
+        self.assertEqual(self.loop()["retried"], [])
+
+    def test_a_card_whose_check_fails_twice_is_carried_once_then_dropped(self):
+        # Code review on #116: a card whose area hangs the app would otherwise be carried into
+        # every check after it, and every one of them would time out.
+        self.adapter.ready_cards = [card(1), card(2), card(3)]
+        timed_out = {"status": testloop.FAILED,
+                     "reason": "the test process timed out after 3600 seconds"}
+        self.pass_script = [tour_filing(filed(10)), dict(timed_out), dict(timed_out), {}]
+        self.plans = [{}, {}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:4]],
+                         [["1"], ["1", "2"], ["2", "3"]])
+        self.assertIn("[1] failed a check twice and is not checked", self.log_text())
+        self.assertEqual(self.loop()["retried"], [])
+
+    def test_a_killed_verb_with_no_record_is_carried_not_dropped(self):
+        # A signal leaves no record either, and says nothing about the cards.
+        self.adapter.ready_cards = [card(1), card(2)]
+        killed = {"status": testloop.FAILED, "exit_code": -15, "record_path": None,
+                  "reason": "relay test exited -15: no output"}
+        self.pass_script = [tour_filing(filed(10)), killed, {}]
+        self.plans = [{}, {}, {}]
+        self.feed(self.loop_config(config={"batch": 1}))
+        self.assertEqual([call["cards"] for call in self.passes[1:3]], [["1"], ["1", "2"]])
 
     def test_a_check_refused_with_no_record_drops_its_cards_with_one_notice(self):
         # `relay test` refuses a card it cannot read before any pass starts, exit 1 and no
@@ -612,6 +637,37 @@ class DerivedReady(LoopCase):
         self.assertEqual(len(notices), 1, self.notes)
         self.assertIn("filed 12 ", notices[0])
         self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
+
+    def test_an_unready_drain_tour_card_costs_no_fresh_idle_waits(self):
+        # Code review on #116: going round must not reset the idle count, or a card the ready
+        # source never returns would buy every idle wait again before the feeder leaves.
+        self.derive_on_hook = False
+        self.seed(rounds=1)
+        self.pass_script = [tour_filing(filed(12, unready=True))]
+        self.feed(self.loop_config(config={"idle_waits_max": 2}))
+        self.assertEqual(self.sleeps, [1800, 1800])
+        self.assertEqual(self.kinds(), [(testloop.TOUR, [])])
+        self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
+
+    def test_a_failed_hook_judges_nothing_and_keeps_the_cards_for_a_clean_read(self):
+        # Code review on #116: a read after a failed hook is no evidence about derived labels,
+        # so no notice, and the card waits for a read that is.
+        self.derive_on_hook = False
+        self.adapter.ready_cards = [card(1)]
+        self.pass_script = [tour_filing(filed(10, unready=True))]
+        self.plans = [{}]
+        self.feed(self.loop_config(config={"pre_cycle_command": ("false",)}))
+        self.assertEqual(self.runs, [["1"]])
+        self.assertEqual([note for note in self.notes if "ready source does not return" in note],
+                         [])
+        self.assertEqual(self.loop()["awaiting_ready"], ["10"])
+        loop = feeder.Feeder(self.paths, self.loop_config(), self.deps(), self.base_env(),
+                             io.StringIO())
+        loop.state = loop._load_state()
+        loop.check_awaiting([card(1), card(10)])
+        self.assertEqual(loop.state["test_loop"]["awaiting_ready"], [])
+        self.assertEqual([note for note in self.notes if "ready source does not return" in note],
+                         [])
 
 
 class Untoured(LoopCase):
@@ -787,7 +843,7 @@ class Models(LoopCase):
         waits = self.events(feeder.EVENT_WAITING)
         self.assertEqual([(event["reason"], event["seconds"]) for event in waits],
                          [("model_held", 900)])
-        self.assertIn("the drain tour waits for the test pass model, waiting 900s",
+        self.assertIn("the drain tour waits 900s for a mark along the test pass model's chain",
                       self.log_text())
         # The mark expired during the wait, so the tour ran on the loop model, found nothing,
         # stopped the loop clean, and only then did the feeder leave.
