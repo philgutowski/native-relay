@@ -681,11 +681,14 @@ loop model is held with no free model along its fallback chain, the feeder waits
 under `model_held`, as it does for a held card, rather than leave. A pass's filed cards are
 judged against the ready source by the next cycle's ready read, which comes after that cycle's
 `pre_cycle` hook, so a board whose hook derives ready labels sees them ready; a card that read
-does not return is notified once, and the feeder leaves without a second tour. A check that is
-`not_run` or `failed`, or that never started because the loop model was held, the post cycle
-hook held, or the cycle's own rules stopped the feeder, keeps its cards for the next check.
-Only a check `relay test` refused before any pass started, with no pass record, drops its
-cards, since a card the verb refuses to read would otherwise refuse every check after it. A
+does not return is notified once, and the feeder leaves without a second tour. A read after a
+hook that failed, or a read that failed, judges nothing, and the cards wait for the next one.
+A check that is `not_run`, or that never started because the loop model was held, the post
+cycle hook held, or the cycle's own rules stopped the feeder, keeps its cards for the next
+check. A check that `failed` carries its cards once; a card whose check fails a second time is
+dropped, so one card that hangs the app cannot fail every check after it. A check `relay test`
+refused before any pass started, exit 1 with no pass record, drops its cards at once, since a
+card the verb refuses to read would otherwise refuse every check after it. A
 pass that is `not_run` or `failed` counts as no round, is logged, and is notified once per kind
 and status until a pass of that kind runs.
 
