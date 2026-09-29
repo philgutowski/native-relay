@@ -64,8 +64,11 @@ tests override `deps` with a sleep that advances `self.clock` by its seconds.
 - The code review asked whether a single 429 on a model with the fallback off should hold that
   model for `fallback_hours`. It does, unless a task landed on that model in the same cycle.
   That is the decision #52 asked for, and a 429 `result` line is the CLI's own limit signal.
-- `ready_queue`, behind `feed --status`, still prices a held card as queued work. Its docstring
-  already says it ignores marks, because reading them needs the expiry logic that writes state.
+- `ready_queue`, behind `status --queue`, still prices a held card as queued work, on the model
+  it routes to once the mark expires. Since issue #119 it reads the marks without pruning them,
+  but only for the held and refused cards the same file rule needs, which
+  `ready-queue-calls-select-without-the-same-file-lists-so-status-queue-and-the-real-batch-disagree.md`
+  describes.
 
 ## Related
 

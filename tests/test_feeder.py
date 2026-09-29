@@ -3180,7 +3180,7 @@ class ReadyQueue(FeederCase):
         cards, reason = feeder.ready_queue(manifest, self.base_env(), deps=self.deps())
         self.assertIsNone(reason)
         # 7 was refused on opus and now routes to fable, which is the change that releases it.
-        self.assertEqual(cards, [("5", "fable"), ("7", "fable"), ("8", "sonnet")])
+        self.assertEqual(cards, [("5", "fable", None), ("7", "fable", None), ("8", "sonnet", None)])
 
     def test_an_unreadable_ready_source_is_a_sentence(self):
         manifest = self.listed_after_one_cycle()
