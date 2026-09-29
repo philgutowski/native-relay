@@ -268,6 +268,43 @@ class FenceReader(unittest.TestCase):
         self.assertEqual(self.read("- ```relay-test-report\n  {\"a\": 1}\n  ```\n"),
                          "  {\"a\": 1}\n")
 
+    def test_an_ordered_list_number_before_the_opener_is_accepted(self):
+        for marker in ("1.", "12)", "*", "+"):
+            with self.subTest(marker=marker):
+                self.assertEqual(self.read("%s ```relay-test-report\n   {\"a\": 1}\n   ```\n" % marker),
+                                 "   {\"a\": 1}\n")
+
+    def test_a_body_line_ending_with_the_tag_does_not_open_a_block(self):
+        """Issue #124: the #118 opener had no line start anchor, and the reader pairs from the
+        last opener, so a body line that merely ended with the tagged fence became the last
+        opener and the real block above it was not read. This holds for every tag the reader
+        serves, because a Task's learnings line and a Test report's finding text can both
+        quote the fence that ends their own message."""
+        for tag in (contracts.ENVELOPE_FENCE_TAG, contracts.TEST_REPORT_FENCE_TAG,
+                    contracts.FILED_FENCE_TAG):
+            with self.subTest(tag=tag):
+                body = "line one\n- end the final message with ```%s\n" % tag
+                self.assertEqual(contracts.last_fenced_block("```%s\n%s```\n" % (tag, body), tag),
+                                 body)
+
+    def test_trailing_prose_ending_with_the_tag_does_not_open_a_block(self):
+        """Issue #124: prose after a closed block that ends with the tagged fence is not an
+        opener either, so the closed block is read and not the prose."""
+        for tag in (contracts.ENVELOPE_FENCE_TAG, contracts.TEST_REPORT_FENCE_TAG,
+                    contracts.FILED_FENCE_TAG):
+            with self.subTest(tag=tag):
+                text = "```%s\nbody\n```\n\nThe message ends with ```%s\n" % (tag, tag)
+                self.assertEqual(contracts.last_fenced_block(text, tag), "body\n")
+
+    def test_a_tag_after_other_text_on_the_line_is_never_an_opener(self):
+        """Only a line that is the fence, after optional indentation and one list marker,
+        opens a block. The mid line shapes here were openers under the #118 grammar."""
+        for line in ("prose ```relay-test-report", "> ```relay-test-report",
+                     "1. 2. ```relay-test-report", "-```relay-test-report",
+                     "`` ```relay-test-report"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.read("%s\n{\"a\": 1}\n```\n" % line))
+
     def test_carriage_returns_and_trailing_spaces_are_allowed_on_both_fences(self):
         self.assertEqual(self.read("```relay-test-report \r\n{\"a\": 1}\r\n```  \r\n"),
                          "{\"a\": 1}\r\n")

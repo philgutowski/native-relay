@@ -505,6 +505,25 @@ class ParseText(unittest.TestCase):
         self.assertEqual(report.status, testloop.RAN)
         self.assertEqual(len(report.findings), 1)
 
+    def test_a_finding_ending_with_the_report_tag_does_not_hide_the_report(self):
+        """Issue #124: a finding whose text ended with the tagged fence was the last opener
+        under the #118 grammar, so a valid report read as no block at all."""
+        item = finding()
+        item["observed"] = "the page's final line reads ```%s" % contracts.TEST_REPORT_FENCE_TAG
+        report = testbrief.parse_text(block({"status": "ran", "reason": "", "findings": [item]}))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(len(report.findings), 1)
+        self.assertEqual(report.findings[0]["observed"], item["observed"])
+
+    def test_trailing_prose_ending_with_the_report_tag_does_not_hide_the_report(self):
+        """Issue #124: prose after the closed report that ended with the tagged fence was the
+        last opener under the #118 grammar, and it had no closer, so the report was not read."""
+        text = (block({"status": "ran", "reason": "", "findings": [finding()]})
+                + "\nThe message ends with ```%s\n" % contracts.TEST_REPORT_FENCE_TAG)
+        report = testbrief.parse_text(text)
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(len(report.findings), 1)
+
     def test_a_closer_indented_three_spaces_closes_the_last_block(self):
         text = "```%s\n%s\n   ```\n" % (contracts.TEST_REPORT_FENCE_TAG,
                                         json.dumps({"status": "ran", "findings": []}))
