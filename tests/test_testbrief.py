@@ -597,5 +597,89 @@ class FinalMessage(unittest.TestCase):
         self.assertIsNone(testbrief.read_final_message(path + ".missing").text)
 
 
+class Untoured(unittest.TestCase):
+    """Issue #121: the report names the areas the process could not reach, and the brief tells
+    it to. The live tour that found this reached 3 of 10 areas behind a sign in and reported
+    `ran` with nothing to say which areas it never saw."""
+
+    def test_untoured_areas_parse_as_given_and_stripped(self):
+        # Flattening and keeping each once is `check_areas`, the pass's step, as it is for a
+        # stopped area at render: the parser carries the names the way it carries a step.
+        report = testbrief.parse_text(block({
+            "status": "ran", "reason": "the sign in wall hid two areas",
+            "findings": [finding(severity="low")],
+            "untoured": ["Invoices", "  Invoices ", "Settings\tpage"]}))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.untoured, ("Invoices", "Invoices", "Settings\tpage"))
+        self.assertEqual(report.reason, "the sign in wall hid two areas")
+        self.assertEqual(len(report.findings), 1)
+
+    def test_check_areas_is_the_one_rule_for_a_stopped_and_an_untoured_name(self):
+        headings = testbrief.headings(TOUR)
+        self.assertEqual(testbrief.check_areas(["  Search ", "Search", "Invoices"], headings),
+                         (["Search", "Invoices"], None))
+        checked, problem = testbrief.check_areas(["Search", "Cart"], headings)
+        self.assertIsNone(checked)
+        self.assertEqual(problem, "area 'Cart' is not a heading of the tour document")
+        # The render path reads the same answer, with its own word in front.
+        with self.assertRaises(ValueError) as caught:
+            render(stopped_areas=("Cart",))
+        self.assertEqual(str(caught.exception),
+                         "stopped area 'Cart' is not a heading of the tour document")
+
+    def test_a_report_without_the_key_or_with_null_names_no_untoured_area(self):
+        self.assertEqual(testbrief.parse_text(block({"status": "ran", "findings": []})).untoured,
+                         ())
+        self.assertEqual(testbrief.parse_text(block({"status": "ran", "findings": [],
+                                                     "untoured": None})).untoured, ())
+        self.assertEqual(testbrief.parse_text(block({"status": "ran", "findings": [],
+                                                     "untoured": []})).untoured, ())
+
+    def test_untoured_of_the_wrong_shape_is_a_parse_error(self):
+        for value in ("Invoices", [""], [1], [{"area": "Invoices"}], ["Invoices", "  "]):
+            with self.subTest(value=value):
+                report = testbrief.parse_text(block({"status": "ran", "findings": [],
+                                                     "untoured": value}))
+                self.assertFalse(report.ok)
+                self.assertIn("untoured must be an array of non empty strings", report.error)
+
+    def test_whether_an_untoured_name_is_a_heading_is_the_pass_check_not_the_parsers(self):
+        # Like a finding's area: the parser has no tour document, so the pass checks the name.
+        report = testbrief.parse_text(block({"status": "ran", "findings": [],
+                                             "untoured": ["Nowhere"]}))
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.untoured, ("Nowhere",))
+
+    def test_the_brief_tells_the_process_to_list_every_area_it_could_not_reach(self):
+        text = render()
+        self.assertRegex(text, r"(?i)list every area you could not reach under `untoured`")
+        self.assertRegex(text, r"(?i)say why in `reason`")
+        self.assertRegex(text, r"(?i)an area you did not\s+reach is not a clean area")
+        # `not_run` is kept for the case where no area can be reached, not every sign in.
+        self.assertRegex(text, r"(?i)no area can be reached without it,\s+stop and report `not_run`")
+        self.assertRegex(text, r"(?i)a report that lists every area there is recorded as `not_run`")
+
+    def test_areas_are_the_headings_less_a_title(self):
+        # The fixture opens with a title over two areas, so the title is a heading a name may
+        # use and not an area a report has to cover.
+        self.assertEqual(testbrief.headings(TOUR), ("Tour", "Search", "Invoices"))
+        self.assertEqual(testbrief.areas(TOUR), ("Search", "Invoices"))
+        # No title: every heading is an area, at whatever level the document uses.
+        self.assertEqual(testbrief.areas("## Search\n\n## Invoices\n"), ("Search", "Invoices"))
+        self.assertEqual(testbrief.areas("# Search\n\n# Invoices\n"), ("Search", "Invoices"))
+        # A title whose level recurs later is an area like the rest.
+        self.assertEqual(testbrief.areas("# Tour\n\n## Search\n\n# Appendix\n"),
+                         ("Tour", "Search", "Appendix"))
+        self.assertEqual(testbrief.areas("# Tour\n"), ())
+        self.assertEqual(testbrief.areas(""), ())
+
+    def test_the_templates_example_carries_an_empty_untoured_list_and_parses(self):
+        text = render()
+        self.assertIn('"untoured": []', text)
+        report = testbrief.parse_text(text)
+        self.assertTrue(report.ok, report.error)
+        self.assertEqual(report.untoured, ())
+
+
 if __name__ == "__main__":
     unittest.main()

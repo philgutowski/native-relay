@@ -311,11 +311,20 @@ class PassResult:
     FAILED; `findings` every finding the report gave, of any outcome, and the planning finding
     the pass synthesized, which `should_stop` sets aside by its mark; `new_cards` the count of
     new cards the pass confirmed filed, a comment on an open card and an attended planning card
-    both not among them."""
+    both not among them; `untoured` the areas of the tour document the pass could not reach
+    (issue #121), so a tour that saw only part of the app is never read as a clean one."""
     kind: str
     status: str
     findings: tuple = ()
     new_cards: int = 0
+    untoured: tuple = ()
+
+
+def is_partial(result):
+    """True for a pass that ran and names at least one area it could not reach (issue #121).
+    Such a tour found nothing in those areas because it never looked, so what it found is no
+    account of the app, and no stop that reads a tour's findings as complete applies to it."""
+    return result.status == RAN and bool(result.untoured)
 
 
 def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
@@ -333,8 +342,14 @@ def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
     whose high and medium findings produced no new card, all commented onto open cards or
     dropped for stopped areas, stops on open findings rather than clean, and a planning card
     filed beside them is no new card; the round cap stops a tour that ran at `max_rounds`; and
-    the clock stops any pass. A check pass never stops on what it found. A pass kind or status
-    outside the known words raises ValueError rather than reading as a pass that did not run."""
+    the clock stops any pass. A check pass never stops on what it found.
+
+    A tour that could not reach every area (issue #121) is never clean, however few findings
+    it carries: the areas it did not reach were not found clean, they were not looked at. Nor
+    does it stop on open findings when it had none: with nothing serious and nothing filed it
+    goes on, and the Feeder's notice names the areas for the operator. The caps still apply.
+    A pass kind or status outside the known words raises ValueError rather than reading as a
+    pass that did not run."""
     if result.kind not in _KINDS:
         raise ValueError("pass kind must be one of %s, not %r"
                          % (", ".join(_KINDS), result.kind))
@@ -342,14 +357,15 @@ def should_stop(result, rounds, started_at, now, cards_filed, report_only=False,
         raise ValueError("pass status must be one of %s, not %r"
                          % (", ".join(_STATUSES), result.status))
     toured = result.status == RAN and result.kind == TOUR
+    serious = any(is_serious(finding) and not is_attended(finding)
+                  for finding in result.findings)
     if toured and report_only:
         return STOP_REPORT_ONLY
-    if toured and not any(is_serious(finding) and not is_attended(finding)
-                          for finding in result.findings):
+    if toured and not serious and not is_partial(result):
         return STOP_CLEAN
     if cards_filed >= settings.max_cards_total:
         return STOP_BUDGET
-    if toured and result.new_cards == 0:
+    if toured and serious and result.new_cards == 0:
         return STOP_OPEN_FINDINGS
     if toured and rounds >= settings.max_rounds:
         return STOP_ROUNDS

@@ -528,6 +528,140 @@ class Failures(LoopCase):
         self.assertEqual(self.loop()["rounds"], 0)
 
 
+class Untoured(LoopCase):
+    """Issue #121: a tour that could not reach every area is never read as clean, and the
+    feeder notifies once naming the areas."""
+
+    PARTIAL = {"findings": [finding("low"), finding("low", area="Cart")],
+               "untoured": ["Invoices", "Settings"],
+               "reason": "Invoices and Settings sit behind a sign in"}
+
+    def test_a_drain_tour_that_missed_areas_does_not_stop_the_loop_clean_and_notifies_once(self):
+        # The live shape: a drain tour with only lows that saw three of ten areas. Without the
+        # key it stopped the loop on the clean reason.
+        self.pass_script = [tour_filing(filed(10)), {}, dict(self.PARTIAL)]
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual([kind for kind, _ in self.kinds()],
+                         [testloop.TOUR, testloop.CHECK, testloop.TOUR])
+        loop = self.loop()
+        self.assertIsNone(loop["stop"])
+        self.assertEqual(self.events(feeder.EVENT_TEST_LOOP_STOPPED), [])
+        self.assertEqual(loop["rounds"], 2)
+        self.assertEqual(loop["passes"][-1]["untoured"], ["Invoices", "Settings"])
+        self.assertEqual(self.events(feeder.EVENT_TEST_PASS)[-1]["untoured"],
+                         ["Invoices", "Settings"])
+        self.assertEqual(self.events(feeder.EVENT_LEAVING)[-1]["reason"], "empty_queue")
+        notices = [note for note in self.notes if "could not reach" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertIn("Invoices, Settings", notices[0])
+        self.assertIn("never read as clean", notices[0])
+        self.assertIn("untoured [Invoices, Settings]", self.log_text())
+        self.assertIn("sit behind a sign in", self.log_text())
+
+    def tours(self, *scripts):
+        """Script the tours in order and answer every check with a pass that found nothing,
+        whatever order the feeder interleaves them in."""
+        queue = list(scripts)
+        self.pass_script = [lambda call: (dict(queue.pop(0)) if queue else {})
+                            if call["kind"] == testloop.TOUR else {}] * 20
+
+    def test_the_same_missed_areas_on_two_tours_notify_once(self):
+        # The start tour and the drain tour both miss the same areas: one notice, not two.
+        self.adapter.ready_cards = [card(1)]
+        self.tours(self.PARTIAL, self.PARTIAL)
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual([kind for kind, _ in self.kinds()],
+                         [testloop.TOUR, testloop.CHECK, testloop.TOUR])
+        notices = [note for note in self.notes if "could not reach" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertIsNone(self.loop()["stop"])
+        self.assertIn("test_pass:tour:untoured", self.state()["reported"])
+
+    def test_a_full_tour_between_makes_the_same_missed_areas_news_again(self):
+        # The start tour misses them, the drain tour reaches every area and files a card, and
+        # the drain tour after that misses them again: two notices.
+        self.adapter.ready_cards = [card(1)]
+        self.tours(self.PARTIAL, tour_filing(filed(10)), self.PARTIAL)
+        self.plans = [{}, {}, {}]
+        self.assertEqual(self.feed_loop(), 0)
+        self.assertEqual([kind for kind, _ in self.kinds()],
+                         [testloop.TOUR, testloop.CHECK, testloop.TOUR, testloop.CHECK,
+                          testloop.TOUR])
+        notices = [note for note in self.notes if "could not reach" in note]
+        self.assertEqual(len(notices), 2, self.notes)
+
+    def test_a_partial_tour_with_a_serious_finding_that_made_no_card_stops_on_open_findings(self):
+        partial = dict(self.PARTIAL, findings=[finding()], commented=[{"id": "7", "finding": 1}])
+        self.pass_script = [tour_filing(filed(10)), {}, partial]
+        self.plans = [{}, {}]
+        self.feed_loop()
+        self.assertEqual(self.loop()["stop"]["reason"], testloop.STOP_OPEN_FINDINGS)
+
+    def test_a_not_run_tour_that_reached_no_area_is_notified_as_not_run_and_no_round(self):
+        # `relay test` records a report that lists every area as `not_run`; the feeder reads
+        # that record the way it reads any pass that did not run.
+        not_run = {"status": testloop.NOT_RUN, "untoured": ["Search", "Invoices"],
+                   "reason": "the test process could reach no area of the tour document: "
+                             "every page was the sign in form"}
+        self.pass_script = [not_run]
+        self.plans = [{}]
+        self.adapter.ready_cards = [card(1)]
+        self.feed_loop()
+        self.assertEqual(self.loop()["rounds"], 0)
+        self.assertIsNone(self.loop()["stop"])
+        self.assertEqual(len([note for note in self.notes if "was not run" in note]), 1)
+        self.assertEqual([note for note in self.notes if "could not reach" in note], [])
+
+    def unreadable(self, value):
+        """Code review: the pass checked every name before writing the list, so any other
+        shape is a record the loop cannot read, and it fails closed like an unknown status,
+        counting no round and never stopping the loop clean."""
+        self.pass_script = [tour_filing(filed(10)), {}, {"untoured": value}]
+        self.plans = [{}, {}]
+        self.feed_loop()
+        entry = self.loop()["passes"][-1]
+        self.assertEqual(entry["status"], testloop.FAILED)
+        self.assertIn("untoured list is unreadable", entry["reason"])
+        self.assertEqual(entry["untoured"], [])
+        self.assertIsNone(self.loop()["stop"])
+        self.assertEqual(self.loop()["rounds"], 1)
+
+    def test_a_record_whose_untoured_is_a_string_reads_as_failed_never_as_clean(self):
+        self.unreadable("Invoices")
+
+    def test_a_record_whose_untoured_holds_a_null_reads_as_failed(self):
+        self.unreadable(["Invoices", None])
+
+    def test_a_record_whose_untoured_holds_a_number_reads_as_failed(self):
+        self.unreadable([1])
+
+    def test_the_same_missed_areas_with_a_reworded_reason_notify_once(self):
+        # Code review: a process words its reason anew each pass, so the notice carries the
+        # areas alone and the log keeps each reason.
+        self.adapter.ready_cards = [card(1)]
+        reworded = dict(self.PARTIAL, reason="the sign in wall still hides two areas")
+        self.tours(self.PARTIAL, reworded)
+        self.plans = [{}, {}]
+        self.assertEqual(self.feed_loop(), 0)
+        notices = [note for note in self.notes if "could not reach" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+        self.assertNotIn("sign in", notices[0])
+        self.assertIn("the log has the reason", notices[0])
+        self.assertIn("still hides two areas", self.log_text())
+
+    def test_a_partial_check_goes_on_and_is_notified_once_by_its_own_kind(self):
+        self.pass_script = [tour_filing(filed(10)),
+                            {"untoured": ["Search"], "reason": "Search never loaded"}]
+        self.plans = [{}, {}]
+        self.feed_loop()
+        self.assertEqual(self.kinds()[1], (testloop.CHECK, ["10"]))
+        self.assertEqual(self.loop()["unchecked"], [])
+        notices = [note for note in self.notes if "check test pass could not reach" in note]
+        self.assertEqual(len(notices), 1, self.notes)
+
+
 class Models(LoopCase):
     def marked(self, model="opus", hours=3):
         return {model: {"since": self.clock.isoformat(timespec="seconds"),

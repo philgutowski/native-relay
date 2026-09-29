@@ -594,7 +594,9 @@ issue_type = ""               # empty: the tracker's default card type (Jira: Ta
   same switch for one hand run.
 - **`tour`** is the tour document, a path inside the target repository. Every markdown heading
   in it is an area, and a finding names its area exactly as the heading spells it; a finding
-  naming anything else is recorded as invalid and never filed. So keep the opening text free of
+  naming anything else is recorded as invalid and never filed. Open it with one title heading
+  over the areas, which is the one heading a report is not asked to cover, as the paragraph on
+  areas a pass could not reach says below; then keep the rest of the opening text free of
   headings, and name there the driver, the signed in session's storage state file, and how to
   tell the sign in page. List each area's approval steps under its heading.
 - **`url`** is where the app under test is served. The Test process is told the app is there
@@ -696,8 +698,11 @@ that holds is the stop, with its own reason word, written to the state file's st
 `max_rounds` and brings the loop to `max_cards_total` stops on `budget`, not `round_cap`.
 
 - `report_only`: a report only loop ran its one full tour.
-- `clean`: a full tour found nothing above low, an attended planning card not counted. A check
-  pass with only lows never stops the loop.
+- `clean`: a full tour found nothing above low, an attended planning card not counted, and
+  reached every area. A tour that names areas it could not reach is never clean, however few
+  findings it carries, since those areas were not looked at: with nothing serious and nothing
+  filed it stops nothing, the feeder notifies once naming the areas, and the loop goes on. A
+  check pass with only lows never stops the loop.
 - `budget`: the loop has filed `max_cards_total` cards, attended planning cards not counted.
   This is also asked before a pass starts.
 - `open_findings`: a full tour's high and medium findings produced no new card, each going to an
@@ -717,15 +722,27 @@ in a headed browser the driver opens, and the driver writes a browser storage st
 every headless visit loads. Keep that file outside the repository: the Test process runs in a
 fresh detached worktree that would not carry an ignored file, and a session never belongs in
 git. The tour document names its path. A missing file, or a visit that lands on the sign in
-page, is a `not_run` report, and signing in again is the operator's step.
+page in front of every area, is a `not_run` report, and signing in again is the operator's step.
+
+**Areas a pass could not reach.** When some areas answer and others do not, for a sign in, an
+error page, or a feature that never loads, the Test process tests what it can reach and lists
+the rest in the report's `untoured` key, each by its heading, with the why in `reason`. The pass
+checks each name against the tour document's headings, as it checks a finding's area, and a
+name that is not a heading fails the pass rather than being dropped, since dropping it would
+read the tour as more complete than the process said. A stopped area is skipped, not
+unreached, and is left off the list. The pass record and, in report only mode, the findings
+file carry the list. A report that names every area there is to reach is recorded `not_run`
+with its reason, and files nothing. The document's title, the first heading when it is the
+only heading of its level, is not an area a report has to cover, and neither is a stopped
+area.
 
 **What a pass writes**, all beside the manifest:
 
 | File | What it is |
 |---|---|
-| `<stem>.test/pass-<n>.json` | the pass record: kind, commit, cards checked, status and reason, every finding with its outcome, the confirmed filed and commented ids with each one's area, design flag, and cause file, the over cap, over budget, dropped, low, invalid, and planning findings, the approval steps reached, notes, both transcript paths, and timings |
+| `<stem>.test/pass-<n>.json` | the pass record: kind, commit, cards checked, status and reason, every finding with its outcome, the confirmed filed and commented ids with each one's area, design flag, and cause file, the over cap, over budget, dropped, low, invalid, and planning findings, the approval steps reached, the areas the process could not reach, notes, both transcript paths, and timings |
 | `<stem>.lows.md` | every low finding, appended per pass; lows never reach the tracker |
-| `<stem>.findings.md` | report only mode's findings, appended per pass |
+| `<stem>.findings.md` | report only mode's findings, appended per pass, with the areas the pass could not reach named first |
 
 A pass also writes its briefs and logs under the state directory, and the feeder records the loop
 under one state file key, `test_loop`: the start time, the rounds, one entry per pass, the filed

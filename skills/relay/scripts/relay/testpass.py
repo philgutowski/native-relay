@@ -28,7 +28,10 @@ A pass takes both Leases for its whole length and renews them on the heartbeat, 
 `contracts.py` is untouched (KTD12). `ran` means the Test process reported and, when there was
 something to file, the Filing process ended with a readable `relay-filed` block in bounds; a
 Filing step that did not complete fails the pass with its own sentence (`filing_failures`), so
-the Feeder never reads a filing failure as findings that produced no card.
+the Feeder never reads a filing failure as findings that produced no card. A report that names
+areas it could not reach is `ran` with those areas in the record's `untoured` list, which the
+Feeder reads as a tour that is not clean, and one that could reach no area at all is `not_run`
+(issue #121).
 """
 import json
 import os
@@ -372,6 +375,23 @@ def check_findings(findings, headings, kind, sent):
     return valid, invalid
 
 
+def check_untoured(names, headings, stopped_areas=()):
+    """The areas a report says it could not reach, checked against the tour document through
+    the rule a stopped area is checked by (issue #121): each flattened and once, in report
+    order, or None with the sentence naming the first that is not a heading. A name that is
+    not a heading fails the pass rather than being dropped like an invalid finding, because
+    the two errors point opposite ways: a dropped finding files nothing, which is safe, while
+    a dropped untoured area would read the tour as more complete than the process said it was,
+    which is the very misreading this key exists to prevent. A stopped area is left out after
+    the check: the brief tells the process to skip it, so a process that lists it has skipped
+    it, not failed to reach it, and a loop with a stopped area could otherwise never stop
+    clean (code review)."""
+    checked, problem = testbrief.check_areas(names, headings)
+    if problem:
+        return None, "untoured " + problem
+    return [name for name in checked if name not in stopped_areas], None
+
+
 def _finding_entry(finding, outcome, problem=None):
     entry = {"title": finding.get("title"), "severity": finding.get("severity"),
              "kind": finding.get("kind"), "area": finding.get("area"),
@@ -396,8 +416,12 @@ def _lows_text(number, kind, commit, lows):
     return "\n".join(lines) + "\n\n"
 
 
-def _findings_text(number, kind, commit, entries):
+def _findings_text(number, kind, commit, entries, untoured=()):
     lines = ["## Pass %d, %s of %s, report only" % (number, kind, commit[:12]), ""]
+    if untoured:
+        # Named before the findings, so a reader sees what the pass did not look at before
+        # reading what it found (issue #121).
+        lines += ["- untoured: %s" % ", ".join(untoured), ""]
     for finding, outcome in entries:
         cause = finding.get("cause") or {}
         lines.append("- [%s] %s: %s (%s, %s line %s, %s)"
@@ -536,6 +560,9 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
         "plan_areas": list(request.plan_areas), "budget": request.budget,
         "findings": [], "filed": [], "commented": [], "over_cap": [], "over_budget": [],
         "dropped": [], "lows": [], "invalid": [], "planning": [], "approval_steps": [],
+        # The areas the Test process could not reach, each a heading of the tour document
+        # (issue #121). The Feeder reads it: a tour with any is never a clean one.
+        "untoured": [],
         "notes": [], "transcripts": {"test": None, "filing": None},
         # The file each process's block was actually read from: its transcript, or its stdout
         # log when the transcript was not at the predicted path (issue #113). `transcripts`
@@ -679,8 +706,21 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     if not report.ok:
         return finish(FAILED, report.error)
     record["approval_steps"] = list(report.approval_steps)
+    # KTD4's check on the areas the process could not reach (issue #121), before the findings
+    # are read and before a not_run report returns, so every record carries the list in one
+    # shape. A report that names every area there was to reach, the stopped ones set aside
+    # since the process was told to skip them, has reached nothing: it is a pass that did not
+    # run whatever it found on the way, so nothing of it is filed.
+    untoured, sentence = check_untoured(report.untoured, headings, request.stopped_areas)
+    if sentence:
+        return finish(FAILED, sentence)
+    record["untoured"] = untoured
     if report.status == NOT_RUN:
         return finish(NOT_RUN, report.reason)
+    to_reach = [area for area in testbrief.areas(tour) if area not in request.stopped_areas]
+    if untoured and all(area in untoured for area in to_reach):
+        return finish(NOT_RUN, "the test process could reach no area of the tour document%s"
+                      % (": " + report.reason if report.reason else ""))
 
     # KTD4's checks, then the rules (KTD1, KTD3).
     valid, invalid = check_findings(report.findings, headings, request.kind, sent)
@@ -707,7 +747,8 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     if request.report_only:
         entries = ([(finding, outcome) for finding, outcome in zip(valid, selection.outcomes)]
                    + [(finding, testloop.FILE) for finding in planning])
-        _append(paths.findings, _findings_text(number, request.kind, commit, entries))
+        _append(paths.findings, _findings_text(number, request.kind, commit, entries,
+                                               untoured=untoured))
         return finish(RAN)
     if not to_file:
         return finish(RAN)

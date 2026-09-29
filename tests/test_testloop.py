@@ -408,5 +408,61 @@ class ShouldStop(unittest.TestCase):
                          (6, 24, 10, 3, 30))
 
 
+def partial(findings=(), new_cards=0, untoured=("Invoices", "Settings"), status=testloop.RAN,
+            kind=testloop.TOUR):
+    return testloop.PassResult(kind=kind, status=status, findings=tuple(findings),
+                               new_cards=new_cards, untoured=tuple(untoured))
+
+
+class PartialTour(ShouldStop):
+    """Issue #121: a tour that could not reach every area is never read as clean. The live
+    tour that found this reached 3 of 10 areas behind a sign in, reported `ran` with two lows,
+    and would have stopped the loop on the clean reason."""
+
+    def test_a_partial_tour_with_only_lows_is_not_clean_and_goes_on(self):
+        self.assertIsNone(self.stop(partial(numbered(["low", "low"])), rounds=3))
+        self.assertIsNone(self.stop(partial()))
+        self.assertTrue(testloop.is_partial(partial()))
+        self.assertFalse(testloop.is_partial(tour()))
+
+    def test_a_partial_tour_with_nothing_serious_does_not_stop_on_open_findings_either(self):
+        # With no high or medium finding there is no open finding to stop on: the tour found
+        # nothing in the areas it saw, and the rest were never looked at.
+        self.assertIsNone(self.stop(partial(numbered(["low"]), new_cards=0)))
+        planning = finding("high", area="Billing", **{testloop.ATTENDED_KEY: True})
+        self.assertIsNone(self.stop(partial([planning], new_cards=0)))
+
+    def test_a_partial_tour_whose_serious_findings_made_no_card_still_stops_on_open_findings(self):
+        self.assertEqual(self.stop(partial(numbered(["high"]), new_cards=0)),
+                         testloop.STOP_OPEN_FINDINGS)
+
+    def test_a_partial_tour_that_filed_a_card_goes_on(self):
+        self.assertIsNone(self.stop(partial(numbered(["high"]), new_cards=1), cards=1))
+
+    def test_the_caps_and_report_only_still_stop_a_partial_tour(self):
+        self.assertEqual(self.stop(partial(numbered(["low"])), report_only=True),
+                         testloop.STOP_REPORT_ONLY)
+        self.assertEqual(self.stop(partial(), cards=30), testloop.STOP_BUDGET)
+        self.assertEqual(self.stop(partial(numbered(["high"]), new_cards=1), rounds=6, cards=6),
+                         testloop.STOP_ROUNDS)
+        self.assertEqual(self.stop(partial(), hours=24), testloop.STOP_CLOCK)
+
+    def test_a_partial_check_goes_on_like_any_check(self):
+        self.assertIsNone(self.stop(partial(kind=testloop.CHECK)))
+        self.assertIsNone(self.stop(partial(numbered(["high"]), kind=testloop.CHECK)))
+
+    def test_untoured_on_a_pass_that_did_not_run_changes_nothing(self):
+        for status in (testloop.NOT_RUN, testloop.FAILED):
+            with self.subTest(status=status):
+                self.assertFalse(testloop.is_partial(partial(status=status)))
+                self.assertIsNone(self.stop(partial(status=status), rounds=6))
+                self.assertEqual(self.stop(partial(status=status), hours=25),
+                                 testloop.STOP_CLOCK)
+
+    def test_a_pass_result_names_no_untoured_area_by_default(self):
+        self.assertEqual(tour().untoured, ())
+        self.assertEqual(self.stop(tour(numbered(["low"]))), testloop.STOP_CLEAN)
+
+
 if __name__ == "__main__":
     unittest.main()

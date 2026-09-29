@@ -2164,13 +2164,27 @@ class Feeder:
         the cap (R19); the round, for a tour that ran; one `test_pass` event. A pass that did not
         run or failed is notified once per reason and counts as no round. An attended planning
         card is recorded in the filed map so the loop knows it, and is not a new card to the
-        stop rule nor a card against the budget (issue #115)."""
+        stop rule nor a card against the budget (issue #115). The areas the pass could not
+        reach ride to the stop rule, which never reads such a tour as clean, and are notified
+        once (issue #121)."""
         loop, settings, now = self.loop_state(), self.config.test_loop, self.deps.now()
         status = record.get("status")
         reason = str(record.get("reason") or "")
         if status not in (testloop.RAN, testloop.NOT_RUN, testloop.FAILED):
             reason = "the pass record carries no status the loop knows: %r" % (status,)
             status = testloop.FAILED
+        # The areas the pass could not reach (issue #121), as the record lists them. The pass
+        # checked each against the tour document before writing it, so a list of any other
+        # shape is a record the loop cannot read, and it reads as a failed pass the way an
+        # unknown status does, before the round is counted, rather than as a tour that reached
+        # every area (code review).
+        untoured = record.get("untoured")
+        if untoured is None:
+            untoured = []
+        if not isinstance(untoured, list) or not all(isinstance(area, str) and area.strip()
+                                                     for area in untoured):
+            reason = "the pass record's untoured list is unreadable: %r" % (untoured,)
+            status, untoured = testloop.FAILED, []
         new, attended = [], set()
         for entry in record.get("filed") or ():
             if not isinstance(entry, dict) or entry.get("id") in (None, ""):
@@ -2219,11 +2233,24 @@ class Feeder:
         loop["passes"].append({
             "pass": record.get("pass"), "kind": kind, "status": status, "reason": reason,
             "at": now.isoformat(timespec="seconds"), "cycle": self.state["cycles"], "cards": list(sent), "filed": new,
-            "commented": commented, "planned": planned,
+            "commented": commented, "planned": planned, "untoured": untoured,
             "record_path": record.get("record_path")})
-        self.log("test pass %s, a %s, %s%s: filed %s, commented %s" % (
+        self.log("test pass %s, a %s, %s%s: filed %s, commented %s%s" % (
             record.get("pass"), kind, status, ": " + reason if reason else "", _ids(new),
-            _ids(commented)))
+            _ids(commented), ", untoured %s" % _ids(untoured) if untoured else ""))
+        # A pass that ran without reaching every area is notified once per kind, naming the
+        # areas, until a pass of that kind reaches them all (issue #121): the tour is not clean
+        # and the loop does not stop on it, so the operator is the one who can act, by signing
+        # the app in again or fixing what the areas need. The notice carries the areas and not
+        # the reason, which a process words anew each pass and the log line above keeps, so
+        # the same missed areas are one notice however the reason is phrased (code review).
+        untoured_key = "test_pass:%s:untoured" % kind
+        if status == testloop.RAN and untoured:
+            self.report_once(untoured_key, "the %s test pass could not reach %s; a tour that "
+                             "misses an area is never read as clean, and the log has the "
+                             "reason" % (kind, ", ".join(untoured)))
+        elif status == testloop.RAN:
+            self.state["reported"].pop(untoured_key, None)
         # One notice per kind and status until a pass of that kind runs (step 7): a reason
         # often carries a changing line, so keying by the sentence would notify every pass and
         # grow the state file (code review). The log has every one.
@@ -2240,7 +2267,7 @@ class Feeder:
                 self.notify(message)
         self.emit(EVENT_TEST_PASS, kind=kind, status=status, reason=reason,
                   pass_number=record.get("pass"), cards=list(sent), filed=new,
-                  commented=commented, planned=planned,
+                  commented=commented, planned=planned, untoured=untoured,
                   record_path=record.get("record_path"),
                   transcripts=record.get("transcripts") or {},
                   read_from=record.get("read_from") or {})
@@ -2249,7 +2276,8 @@ class Feeder:
         result = testloop.PassResult(
             kind=kind, status=status, new_cards=len(unattended),
             findings=tuple(finding for finding in record.get("findings") or ()
-                           if isinstance(finding, dict)))
+                           if isinstance(finding, dict)),
+            untoured=tuple(untoured))
         stop = testloop.should_stop(result, loop["rounds"], self.loop_started_at(loop), now,
                                     loop_cards_filed(loop), report_only=settings.report_only,
                                     settings=settings)
