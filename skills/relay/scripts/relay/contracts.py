@@ -49,18 +49,31 @@ FILED_FENCE_TAG = "relay-filed"
 
 @functools.lru_cache(maxsize=None)
 def fence_opener_regex(tag):
-    """The opening fence of a block Relay reads back: three or more backticks carrying exactly
-    `tag`, ending the line. Nothing before the backticks is checked, the acceptance the grammar
-    before issue #118 had: a process that writes the block inside a list item indents the
-    opener or puts it after the list marker, and Markdown lets a process open with four
-    backticks when the body carries three. Compiled once per tag."""
-    return re.compile(r"```+%s[ \t]*\r?$" % re.escape(tag), re.M)
+    """The opening fence of a block Relay reads back: a line that is three or more backticks
+    carrying exactly `tag`, after nothing but optional indentation and at most one list marker
+    (`-`, `*`, `+`, or an ordered `1.` or `1)`) followed by whitespace. That is the whole rule,
+    not Markdown parity: a blockquote prefix, a second list marker, and any other text before
+    the backticks are not openers, and indentation is unbounded. A process that writes the
+    block inside a list item indents the opener or puts it after the marker, and Markdown lets
+    a process open with four backticks when the body carries three, so both stay accepted. A
+    body line that is only the tagged opener still opens a block, which pairing from the last
+    opener cannot avoid; the Task brief tells the process to quote a fence inline.
+
+    The line start anchor is issue #124. The grammar #118 shipped checked nothing ahead of the
+    backticks, and because `last_fenced_block` pairs from the last opener, a line of prose that
+    merely ended with the tagged fence, such as a learning about ending the final message with
+    it, became the last opener: a valid envelope above it read as no envelope at all, and a
+    valid Test report above it was not read. Compiled once per tag."""
+    return re.compile(
+        r"^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?```+%s[ \t]*\r?$" % re.escape(tag), re.M)
 
 
 # The closing fence: a line that is only backticks, three or more, with any indentation and
 # trailing whitespace. Markdown lets a closer match a longer opener and allows three spaces of
 # indentation; a list item indents further and is accepted too. A line that is only whitespace
-# and backticks is never body text.
+# and backticks is never body text. A list marker before the closer is refused on purpose, unlike
+# the opener: Markdown reads `- ```` as a new list item rather than a closer, and the opener's
+# marker is where a process is told to put it, while a closer carries nothing.
 FENCE_CLOSER_RE = re.compile(r"^[ \t]*```+[ \t]*\r?$", re.M)
 
 

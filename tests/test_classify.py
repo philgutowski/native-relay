@@ -428,6 +428,31 @@ class EnvelopeParsing(unittest.TestCase):
         self.assertEqual(env["status"], "complete")
         self.assertTrue(env["fenced"])
 
+    def test_a_learning_ending_with_the_envelope_tag_does_not_hide_the_envelope(self):
+        """Issue #124: since #118 a learnings line that ended with the tagged fence was the
+        last opener, so a valid envelope read as a fragment with no status and the Task halted
+        no_envelope. Task processes in this repository write learnings about the envelope
+        grammar, so the shape is reachable."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: complete\nblockers:\nchanged_files:\n- a.py\n"
+            "learnings:\n- end the final message with ```relay-envelope\n```\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["blockers"], [])
+        self.assertEqual(env["changed_files"], ["a.py"])
+        self.assertEqual(env["learnings"], ["end the final message with ```relay-envelope"])
+
+    def test_trailing_prose_ending_with_the_envelope_tag_is_not_read_as_a_blocker(self):
+        """Issue #124: prose after the closed envelope that ended with the tagged fence made
+        the reader drop to the whole message scan, which read the prose as a blocker on a
+        complete status."""
+        env = classify.parse_envelope(
+            "```relay-envelope\nstatus: complete\nblockers:\n```\n\n"
+            "Every message ends with ```relay-envelope\n")
+        self.assertEqual(env["status"], "complete")
+        self.assertTrue(env["fenced"])
+        self.assertEqual(env["blockers"], [])
+
     def test_a_triple_backtick_inside_a_blocker_does_not_end_the_block(self):
         """Issue #111: a blocker that quotes a code fence used to close the envelope at that
         point, and the parser read a partial block with the blocker cut short."""
