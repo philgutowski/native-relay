@@ -19,8 +19,8 @@ from unittest import mock
 
 import _paths
 import _repo
-from relay import (cli, contracts, feeder, filing, gitread, launch, manifest as mf, state,
-                   testbrief, testloop, testpass)
+from relay import (adapters, cli, contracts, feeder, filing, gitread, launch, manifest as mf,
+                   state, testbrief, testloop, testpass)
 
 FIXTURE = os.path.join(_paths.FIXTURES_DIR, "manifests", "complete.toml")
 TRANSCRIPTS = os.path.join(_paths.FIXTURES_DIR, "transcripts")
@@ -536,6 +536,78 @@ class TourAndFiling(PassCase):
         self.assertEqual(outcome.record["reason"], "")
         self.assertIsNotNone(outcome.record["read_from"]["filing"])
         self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2"])
+
+    def adapter_whose_read_fails(self, card_id, fail):
+        """The markdown adapter over this repo, with `read` answering `fail(card_id)` for the
+        one id, the way a `gh` or Jira read that timed out answers after a filing that did file
+        (issue #125). Every other id reads as the tracker holds it."""
+        adapter = adapters.build(self.manifest, env=self.base_env())
+        real_read = adapter.read
+
+        def read(task_id):
+            return fail(task_id) if str(task_id) == card_id else real_read(task_id)
+
+        adapter.read = read
+        return adapter
+
+    def test_a_filed_claim_the_tracker_read_skips_fails_the_pass_naming_the_count(self):
+        """Issue #125: the process filed the card and printed its block, and the read back was
+        skipped. The pass is failed rather than ran with no card, so the loop does not stop on
+        open findings the card answered."""
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"}],
+                            ["- [ ] T-2 Finding 1 [loop]"])
+        adapter = self.adapter_whose_read_fails(
+            "T-2", lambda task_id: {"id": task_id, "skipped": "gh timed out"})
+        outcome, _ = self.run_pass(adapter=adapter)
+        self.assertEqual(outcome.exit_code, testpass.EXIT_HALTED)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"],
+                         "1 of the 1 claim the filing block names could not be read back from "
+                         "the tracker, so no card it filed or commented is confirmed")
+        self.assertEqual(outcome.record["filed"], [])
+        self.assertIn("card T-2 claimed filed could not be read: gh timed out",
+                      "\n".join(outcome.record["notes"]))
+        with open(outcome.path) as handle:
+            self.assertEqual(json.load(handle)["status"], testloop.FAILED)
+
+    def test_a_commented_claim_whose_read_raises_fails_the_pass(self):
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "commented", "id": "T-1"}],
+                            ["  - 2026-09-28 seen again on Search"])
+
+        def raise_error(task_id):
+            raise OSError("rate limited")
+
+        outcome, _ = self.run_pass(adapter=self.adapter_whose_read_fails("T-1", raise_error))
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertIn("1 of the 1 claim", outcome.record["reason"])
+        self.assertEqual(outcome.record["commented"], [])
+
+    def test_an_unread_claim_is_a_note_beside_a_lost_lease_as_the_reason(self):
+        """The lost Lease still headlines, and the unread claims are on the record beside it."""
+        self.test_process([finding(1)])
+        launched = launch.LaunchResult(session_id="filing", lease_lost=True)
+        answer = filing.FilingResult(
+            filing.Filed(entries=({"finding": 1, "action": "filed", "id": "T-9"},)),
+            launch_result=launched)
+        adapter = self.adapter_whose_read_fails(
+            "T-9", lambda task_id: {"id": task_id, "skipped": "gh timed out"})
+        with mock.patch.object(filing, "run", return_value=answer):
+            outcome, _ = self.run_pass(adapter=adapter)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
+        self.assertIn("1 of the 1 claim the filing block names could not be read back",
+                      "\n".join(outcome.record["notes"]))
+
+    def test_a_claim_read_back_as_existing_before_the_pass_leaves_the_pass_ran(self):
+        """A read that answered is not a failed read: the pre existing card is a note and the
+        pass stays ran, as it did before issue #125."""
+        self.test_process([finding(1)])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-1"}],
+                            ["  - 2026-09-28 a comment instead"])
+        outcome, _ = self.run_pass()
+        self.assertEqual(outcome.record["status"], testloop.RAN)
 
 
 class ReadFromTheLog(PassCase):

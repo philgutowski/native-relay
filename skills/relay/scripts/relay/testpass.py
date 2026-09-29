@@ -480,6 +480,21 @@ def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
     return sentences
 
 
+def confirmation_failure(entries, confirmation):
+    """The sentence for a block that named claims none of which could be confirmed because the
+    tracker reads failed, or None (issue #125). A `gh` or Jira read that times out or is rate
+    limited after a Filing process that did file is not a pass whose findings went unanswered:
+    recorded `ran` with no card, it would stop the loop on open findings and leave the cards it
+    did create out of the filed map. So it is `failed`, which the Feeder notifies once and
+    counts as no round, as `filing_failures` reasons are."""
+    if not entries or confirmation.filed or confirmation.commented or not confirmation.unread:
+        return None
+    count = len(confirmation.unread)
+    return ("%d of the %d %s the filing block names could not be read back from the tracker, "
+            "so no card it filed or commented is confirmed"
+            % (count, len(entries), "claim" if len(entries) == 1 else "claims"))
+
+
 def run(manifest, config, request, env, out=None, home=None, adapter=None, now=time.time,
         launch_kwargs=None, prepare_kwargs=None, timeout_overrides=None):
     """One pass. Returns an `Outcome`; never raises for anything the pass record can say.
@@ -793,6 +808,11 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     # them again.
     confirmation = filing.confirm(result.filed.entries, adapter, known=known)
     record["notes"].extend(confirmation.notes)
+    unconfirmed = confirmation_failure(result.filed.entries, confirmation)
+    if unconfirmed and failures:
+        record["notes"].append(unconfirmed)
+    elif unconfirmed:
+        failures = [unconfirmed]
     by_number = {index: finding for index, finding in enumerate(to_file, 1)}
     for entry in confirmation.filed:
         finding = by_number.get(entry["finding"], {})
