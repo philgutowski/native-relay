@@ -675,13 +675,22 @@ https with a host.
 **When a pass runs.** At the first cycle of a loop with no tour that ran, a full tour before the
 ready read. After a cycle that landed cards, once it has settled and its `post_cycle` hook has
 run, a check of the landed cards that are not the last generation. In an idle cycle, before
-leaving on a true empty queue, a full tour; when it filed a card the ready source returns, the
-feeder goes round to build it instead of leaving. A check that is `not_run`, or that never
-started because the loop model was held, the post cycle hook held, or the cycle's own rules
-stopped the feeder, keeps its cards for the next check. A check that `failed` does not: its
-cards are never checked, since a card the pass refuses to read would otherwise fail every check
-after it. A pass that is `not_run` or `failed` counts as no round, is logged, and is notified
-once per kind and status until a pass of that kind runs.
+leaving on a true empty queue, a full tour; when it filed a card that is not an attended
+planning card, the feeder goes round instead of leaving. When that tour is withheld because the
+loop model is held with no free model along its fallback chain, the feeder waits for the mark
+under `model_held`, as it does for a held card, rather than leave. A pass's filed cards are
+judged against the ready source by the next cycle's ready read, which comes after that cycle's
+`pre_cycle` hook, so a board whose hook derives ready labels sees them ready; a card that read
+does not return is notified once, and the feeder leaves without a second tour. A read after a
+hook that failed, or a read that failed, judges nothing, and the cards wait for the next one.
+A check that is `not_run`, or that never started because the loop model was held, the post
+cycle hook held, or the cycle's own rules stopped the feeder, keeps its cards for the next
+check. A check that `failed` carries its cards once; a card whose check fails a second time is
+dropped, so one card that hangs the app cannot fail every check after it. A check `relay test`
+refused before any pass started, exit 1 with no pass record, drops its cards at once, since a
+card the verb refuses to read would otherwise refuse every check after it. A
+pass that is `not_run` or `failed` counts as no round, is logged, and is notified once per kind
+and status until a pass of that kind runs.
 
 **Generations.** A card filed by a tour, or by checking a card the loop did not file, is
 generation 1. A card filed by checking a generation 1 card is generation 2, the last: its fix
