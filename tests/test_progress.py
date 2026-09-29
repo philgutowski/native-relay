@@ -573,6 +573,10 @@ class Queue(unittest.TestCase):
         self.assertTrue(progress.queue_line(empty).endswith(
             "no landed task carries a duration; 1 held until the card it shares a cause file "
             "with settles: 11 waits on 10"))
+        many = progress.queue_estimate(self.data({}), [(str(n), "opus", "1") for n in range(2, 10)])
+        self.assertTrue(progress.queue_line(many).endswith(
+            "8 held until the card it shares a cause file with settles: 2 waits on 1, 3 waits on "
+            "1, 4 waits on 1, 5 waits on 1, 6 waits on 1, and 3 more"))
 
     def test_an_empty_queue_says_so_rather_than_pricing_nothing(self):
         data = self.data({})

@@ -14,7 +14,7 @@ from datetime import timedelta
 from unittest import mock
 
 import _paths
-from relay import cli, feeder, manifest as mf, testloop
+from relay import cli, feeder, limits, manifest as mf, testloop
 from test_feeder import card
 from test_feeder_testloop import LoopCase, finding
 
@@ -176,7 +176,9 @@ class QueueAgreement(LoopCase):
     def dry_run(self):
         if os.path.exists(self.paths.stop):
             os.remove(self.paths.stop)
-        self.assertEqual(self.feed(self.loop_config(), dry_run=True), 0, self.out.getvalue())
+        # The sidecar `ready_queue` reads, so both answer from one config.
+        config = feeder.load_config(self.paths.config)
+        self.assertEqual(self.feed(config, dry_run=True), 0, self.out.getvalue())
         return self.out.getvalue()
 
     def test_status_queue_the_dry_run_and_the_cycle_agree_on_a_held_card(self):
@@ -238,6 +240,32 @@ class QueueAgreement(LoopCase):
         self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
                          ([("11", "opus", None), ("10", "opus", "11")], None))
         self.assertIn("would hold 10 until 11 settles", self.dry_run())
+
+    def mark(self):
+        return feeder.mark_record(limits.Mark(since=self.clock, until=self.clock
+                                              + timedelta(hours=5), source=limits.MARK_CLI))
+
+    def test_a_card_held_on_a_mark_holds_no_file_in_the_queue(self):
+        # 10 routes to opus, marked with no fallback, so the cycle leaves it out and batches 11.
+        self.write(self.paths.routing, "11 sonnet\n")
+        manifest = self.seed_two_on_one_file(exhausted={"opus": self.mark()})
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("10", "opus", None), ("11", "sonnet", None)], None))
+        text = self.dry_run()
+        self.assertIn("would hold 10 on opus until its mark expires", text)
+        self.assertIn("would offer 11 on sonnet", text)
+
+    def test_a_card_refused_on_its_fallback_holds_no_file_in_the_queue(self):
+        # The cycle routes 10 round opus's mark to sonnet, where it was refused, so 10 is dropped
+        # and holds nothing. 11 is priced on opus, the model it routes to once the mark expires.
+        self.write(self.paths.config, '[models]\nfallback = { opus = "sonnet" }\n')
+        manifest = self.seed_two_on_one_file(exhausted={"opus": self.mark()},
+                                             refused={"10": "sonnet"})
+        self.assertEqual(feeder.ready_queue(manifest, self.base_env(), deps=self.deps()),
+                         ([("11", "opus", None)], None))
+        text = self.dry_run()
+        self.assertIn("would offer 11 on sonnet", text)
+        self.assertNotIn("would hold", text)
 
     def test_a_refused_card_holds_no_file_in_the_queue_either(self):
         manifest = self.seed_two_on_one_file(refused={"10": "opus"})

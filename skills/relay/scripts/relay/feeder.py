@@ -673,6 +673,43 @@ def design_ids(filed):
                      if isinstance(record, dict) and record.get("design") is True)
 
 
+def route_card(card, routing, config, marks, now, design=frozenset()):
+    """(model, [notes]): `choose_model`, then its fallback while that model is marked. The
+    model is None for a card routed to a held model, one `select` leaves out rather than
+    append onto a model that would refuse it in seconds. `design` is `design_ids` of the
+    loop's filed map, so a filed design card is routed to the design model (KTD11)."""
+    model, note = choose_model(card, routing, config, design)
+    notes = [note] if note else []
+    # One reading of the marks, so a mark that expires between two checks is not held by
+    # one and routed round by the other.
+    table = config.model_fallback
+    active = limits.active_marks(marks, now)
+    if limits.is_held(model, active, table, now):
+        return None, notes
+    if model in active:
+        target = limits.resolve_fallback(model, table, set(active))
+        notes.append("card %s is routed to %s, marked until %s, appending it on %s" % (
+            card["id"], model, active[model].until.isoformat(timespec="seconds"), target))
+        model = target
+    return model, notes
+
+
+def same_file_inputs(listed, excluded, records, retries, routes, refused):
+    """(unsettled, held, refused ids): what the cycle and `status --queue` both hand `select`
+    for its held set and the same file rule (R13, KTD11, issue #119), worked out one way for
+    both. `retries` is the kept retry queue, `routes` {id: `route_card`'s answer} for the
+    unlisted cards, and `refused` the state's {id: model}.
+
+    Unsettled is every id the next run will still launch, defer, or retry: each listed Task not
+    excluded or settled, and each queued retry. Held is a card routed to a held model, and a
+    refused card one refused on the model it routes to, the cards the cycle drops."""
+    unsettled = set(unsettled_listed(listed, excluded, records)) | set(retries)
+    held = {card_id for card_id, (model, _) in routes.items() if model is None}
+    refused_ids = {card_id for card_id, (model, _) in routes.items()
+                   if model is not None and refused.get(card_id) == model}
+    return unsettled, held, refused_ids
+
+
 def unsettled_listed(listed, excluded, records):
     """The listed Task ids the next run will still launch or defer, in manifest order: not
     excluded, and not settled by their record."""
@@ -1530,12 +1567,10 @@ class Feeder:
         # Routed once per cycle: the held set, the batch, and the dry run all read this.
         routes = {card["id"]: self.route(card, routing, marks, design) for card in cards
                   if card["id"] not in listed}
-        held = {card_id for card_id, (model, _) in routes.items() if model is None}
-        # Everything the next run will still launch, defer, or retry, for the same file rule,
-        # and the cards dropped below for their model, which hold no file for it.
-        unsettled = set(launch.running) | set(launch.defer) | set(launch.queue)
-        refused = {card_id for card_id, (model, _) in routes.items()
-                   if model is not None and self.state["refused"].get(card_id) == model}
+        # Shared with `ready_queue`, so `status --queue` holds the same cards (issue #119). The
+        # unsettled set is `launch.running`, `defer`, and `queue` together, read from the records.
+        unsettled, held, refused = same_file_inputs(listed, excluded, records, launch.queue,
+                                                    routes, self.state["refused"])
         fresh, batch, same_file = select(
             cards, set(listed), config, read_order(self._read(self.paths.order)),
             len(launch.running), scanned, held, filed=filed, unsettled=unsettled,
@@ -2023,24 +2058,8 @@ class Feeder:
         return Launch(running=running, retry=retry, defer=defer, held=tuple(held), queue=queue)
 
     def route(self, card, routing, marks, design=frozenset()):
-        """(model, [notes]): `choose_model`, then its fallback while that model is marked. The
-        model is None for a card routed to a held model, one `select` leaves out rather than
-        append onto a model that would refuse it in seconds. `design` is `design_ids` of the
-        loop's filed map, so a filed design card is routed to the design model (KTD11)."""
-        model, note = choose_model(card, routing, self.config, design)
-        notes = [note] if note else []
-        # One reading of the marks, so a mark that expires between two checks is not held by
-        # one and routed round by the other.
-        table, now = self.config.model_fallback, self.deps.now()
-        active = limits.active_marks(marks, now)
-        if limits.is_held(model, active, table, now):
-            return None, notes
-        if model in active:
-            target = limits.resolve_fallback(model, table, set(active))
-            notes.append("card %s is routed to %s, marked until %s, appending it on %s" % (
-                card["id"], model, active[model].until.isoformat(timespec="seconds"), target))
-            model = target
-        return model, notes
+        """`route_card` on this feeder's config and clock."""
+        return route_card(card, routing, self.config, marks, self.deps.now(), design)
 
     # The browser test loop (browser test loop plan, U6, KTD9, KTD10). Every decision is asked
     # of `testloop`; this only gathers the facts, starts the pass, and records the answer.
@@ -2701,15 +2720,17 @@ def ready_queue(manifest, env, deps=None):
 
     The filter is the loop's `select` and `scanned_ids`: not listed in the manifest (the cycle
     estimate prices those), not denied by id or label, not refused by the R41 scan. Then a card
-    already refused with the model it is routed to is dropped, as the loop drops it. The model is
-    `choose_model`'s, without the exhausted fallback, because that mark lasts hours and the queue
-    it prices lasts longer; the refused check uses the same model, so while a fallback is active
-    it can disagree with the loop about a card refused on one side of it.
+    already refused with the model it is routed to is dropped, as the loop drops it.
 
-    `select` gets what the cycle gives it for the same file rule (R13, KTD11, issue #119): the
-    loop's filed map, the ids the next run will still launch, defer, or retry, and the refused
-    cards, which hold no file. `waits_on` is the id a card is held behind, else None. A held card
-    stays in the queue, since it runs once that id settles."""
+    `select` gets what the cycle gives it (R13, KTD11, issue #119), from `same_file_inputs`: the
+    loop's filed map, the ids the next run will still launch, defer, or retry, the cards held on
+    a model's mark, and the refused cards, routed the way the cycle routes them, a mark's
+    fallback included, so both answer one way about which card waits on which. `waits_on` is the
+    id a card the same file rule holds is waiting on, else None. A held card stays in the queue,
+    since it runs once that id settles or that mark expires.
+
+    The model each card is priced at is `choose_model`'s, without the fallback, because a mark
+    lasts hours and the queue it prices lasts longer."""
     paths = paths_for(manifest.path)
     try:
         config = load_config(paths.config)
@@ -2737,22 +2758,33 @@ def ready_queue(manifest, env, deps=None):
     if not isinstance(refused, dict):
         return None, "%s holds a refused set that is not a JSON object" % paths.state
     retry_blocked = state.get("retry_blocked") or {}
-    if not isinstance(retry_blocked, dict):
-        return None, "%s holds a retry queue that is not a JSON object" % paths.state
+    exhausted = state.get("exhausted") or {}
+    if not isinstance(retry_blocked, dict) or not isinstance(exhausted, dict):
+        return None, ("%s holds a retry queue or a set of marks that is not a JSON object"
+                      % paths.state)
     filed = loop_filed(state)
     design = design_ids(filed)
-    listed = [task.id for task in manifest.tasks]
-    excluded = {task.id for task in manifest.tasks if task.excluded}
+    # Read the way the cycle reads them, from the manifest's text, so a task counts as excluded
+    # in exactly the cases it does there.
+    text = Feeder._read(manifest.path)
+    listed, excluded = manifestedit.task_ids(text), manifestedit.excluded_ids(text)
+    listed_set = set(listed)
     records = {task["id"]: task for task in deps.read_summary(manifest).get("tasks", [])}
-    unsettled = (set(unsettled_listed(listed, excluded, records))
-                 | set(kept_retries(retry_blocked, listed, excluded, records)))
+    # Every readable mark; `route_card` passes over an expired one as `exhausted_models` would.
+    marks = {model: mark for model, mark in ((model, read_mark(value, config.fallback_hours))
+                                             for model, value in exhausted.items())
+             if mark is not None}
+    now = deps.now()
+    routes = {card["id"]: route_card(card, routing, config, marks, now, design)
+              for card in cards if card["id"] not in listed_set}
+    unsettled, held, refused_ids = same_file_inputs(
+        listed, excluded, records, kept_retries(retry_blocked, listed_set, excluded, records),
+        routes, refused)
     scanned = scanned_ids(cards)
-    models = {card["id"]: choose_model(card, routing, config, design)[0] for card in cards
-              if card["id"] not in listed}
-    refused_ids = {card_id for card_id, model in models.items() if refused.get(card_id) == model}
-    fresh, _, same_file = select(cards, set(listed), config, rank, 0, scanned, filed=filed,
+    fresh, _, same_file = select(cards, listed_set, config, rank, 0, scanned, held, filed=filed,
                                  unsettled=unsettled, refused=refused_ids, room=len(cards))
-    queue = [(card["id"], models[card["id"]], same_file.get(card["id"])) for card in fresh
+    queue = [(card["id"], choose_model(card, routing, config, design)[0],
+              same_file.get(card["id"])) for card in fresh
              if card["id"] not in scanned and card["id"] not in refused_ids]
     return queue, None
 

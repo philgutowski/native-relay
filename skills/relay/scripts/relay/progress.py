@@ -250,13 +250,21 @@ def queue_line(queue=None, reason=None):
                held, QUEUE_BLIND))
 
 
+# How many held cards the queue line names before it counts the rest, so a tour that filed many
+# cards on a few files does not bury the estimate.
+QUEUE_HELD_NAMED = 5
+
+
 def _same_file_clause(same_file):
     """The clause naming the queued cards the same file rule holds, and the id each waits on
     (issue #119), or nothing when none is held."""
     if not same_file:
         return ""
+    named = ["%s waits on %s" % pair for pair in same_file[:QUEUE_HELD_NAMED]]
+    if len(same_file) > QUEUE_HELD_NAMED:
+        named.append("and %d more" % (len(same_file) - QUEUE_HELD_NAMED))
     return ("; %d held until the card it shares a cause file with settles: %s"
-            % (len(same_file), ", ".join("%s waits on %s" % pair for pair in same_file)))
+            % (len(same_file), ", ".join(named)))
 
 
 def duration(seconds):
