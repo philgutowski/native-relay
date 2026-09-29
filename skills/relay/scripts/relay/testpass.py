@@ -480,6 +480,25 @@ def filing_failures(result, scope, allowed, pre_head, timeout_seconds):
     return sentences
 
 
+def confirmation_failure(entries, confirmation):
+    """The sentence for a block whose claims the tracker reads could not confirm, or None
+    (issue #125). Two shapes: a `filed` claim went unread, or no claim at all was read back. A
+    `gh` or Jira read that times out or is rate limited after a Filing process that did file is
+    not a pass whose findings went unanswered: recorded `ran`, a tour whose only confirmed
+    claims were comments or an attended planning card would stop the loop on open findings
+    that the unread card answered (code review). So it is `failed`, which the Feeder notifies
+    once and counts as no round, as `filing_failures` reasons are. The confirmed cards stay in
+    the record, which the Feeder enters in its filed map on a failed pass too."""
+    unread = confirmation.unread
+    unread_filed = [entry for entry in unread if entry.get("action") == filing.ACTION_FILED]
+    if not unread or not (unread_filed or len(unread) == len(entries)):
+        return None
+    return ("%d of the %d %s the filing block names could not be read back from the tracker, "
+            "%d of them claimed filed"
+            % (len(unread), len(entries), "claim" if len(entries) == 1 else "claims",
+               len(unread_filed)))
+
+
 def run(manifest, config, request, env, out=None, home=None, adapter=None, now=time.time,
         launch_kwargs=None, prepare_kwargs=None, timeout_overrides=None):
     """One pass. Returns an `Outcome`; never raises for anything the pass record can say.
@@ -793,6 +812,12 @@ def _pass(manifest, config, request, env, stream, home, adapter, store, tour, he
     # them again.
     confirmation = filing.confirm(result.filed.entries, adapter, known=known)
     record["notes"].extend(confirmation.notes)
+    # Only when the Filing step otherwise completed (code review): beside a filing failure the
+    # per claim notes already say what went unread, and after a scope reset the claims are
+    # unread because the reset removed them, not because the tracker could not be reached.
+    unconfirmed = confirmation_failure(result.filed.entries, confirmation)
+    if unconfirmed and not failures:
+        failures = [unconfirmed]
     by_number = {index: finding for index, finding in enumerate(to_file, 1)}
     for entry in confirmation.filed:
         finding = by_number.get(entry["finding"], {})
