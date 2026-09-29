@@ -274,6 +274,13 @@ class FenceReader(unittest.TestCase):
                 self.assertEqual(self.read("%s ```relay-test-report\n   {\"a\": 1}\n   ```\n" % marker),
                                  "   {\"a\": 1}\n")
 
+    def test_a_list_marker_before_the_closer_is_refused_on_purpose(self):
+        """Code review on #124: the opener accepts a marker and the closer does not. Markdown
+        reads `- ```` as a new list item, not a closer, so a block closed that way has no
+        closer and is no block."""
+        self.assertIsNone(self.read("- ```relay-test-report\n  {\"a\": 1}\n- ```\n"))
+        self.assertIsNone(self.read("1. ```relay-test-report\n   {\"a\": 1}\n1. ```\n"))
+
     def test_a_body_line_ending_with_the_tag_does_not_open_a_block(self):
         """Issue #124: the #118 opener had no line start anchor, and the reader pairs from the
         last opener, so a body line that merely ended with the tagged fence became the last

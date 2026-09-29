@@ -54,10 +54,13 @@ Landed on `relay/118`. `contracts.last_fenced_block(text, tag)` replaces the reg
 every opener for the tag, takes the last, and then searches for the first closer line after it.
 The three readers call it with their own tag and hold no regex of their own. Pairing from the
 last opener means an earlier block, however it is broken, is never inside the body that is
-read. The opener grammar checks nothing before the backticks and accepts three or more, which
-the old grammar also did, so an opener written after a list marker or with a four backtick
-fence still opens the block. The closer grammar stays the #111 one: any indentation, three or
-more backticks, trailing whitespace and carriage return allowed.
+read. The opener grammar as landed here checked nothing before the backticks and accepted three
+or more, which the old grammar also did, so an opener written after a list marker or with a four
+backtick fence still opens the block. Issue #124 then anchored the opener at a line start, after
+optional indentation and at most one list marker, because pairing from the last opener made a
+prose line that merely ended with the tag the last opener; the list item and four backtick
+forms still read. The closer grammar stays the #111 one: any indentation, three or more
+backticks, trailing whitespace and carriage return allowed.
 
 `testloop.validate_finding` accepts a card id written as a JSON integer and still refuses a
 boolean, and `testloop.with_string_card` is the one place the id becomes a string;
