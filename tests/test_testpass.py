@@ -564,7 +564,7 @@ class TourAndFiling(PassCase):
         self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(outcome.record["reason"],
                          "1 of the 1 claim the filing block names could not be read back from "
-                         "the tracker, so no card it filed or commented is confirmed")
+                         "the tracker, 1 of them claimed filed")
         self.assertEqual(outcome.record["filed"], [])
         self.assertIn("card T-2 claimed filed could not be read: gh timed out",
                       "\n".join(outcome.record["notes"]))
@@ -584,8 +584,39 @@ class TourAndFiling(PassCase):
         self.assertIn("1 of the 1 claim", outcome.record["reason"])
         self.assertEqual(outcome.record["commented"], [])
 
-    def test_an_unread_claim_is_a_note_beside_a_lost_lease_as_the_reason(self):
-        """The lost Lease still headlines, and the unread claims are on the record beside it."""
+    def test_an_unread_filed_claim_beside_a_confirmed_comment_fails_the_pass(self):
+        """Code review: the confirmed comment is no new card, so recorded `ran` the tour would
+        stop on open findings that the unread card answered."""
+        self.test_process([finding(1), finding(2, area="Invoices")])
+        self.filing_process([{"finding": 1, "action": "commented", "id": "T-1"},
+                             {"finding": 2, "action": "filed", "id": "T-2"}],
+                            ["  - 2026-09-28 seen again on Search", "- [ ] T-2 Finding 2 [loop]"])
+        adapter = self.adapter_whose_read_fails(
+            "T-2", lambda task_id: {"id": task_id, "skipped": "gh timed out"})
+        outcome, _ = self.run_pass(adapter=adapter)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertEqual(outcome.record["reason"],
+                         "1 of the 2 claims the filing block names could not be read back from "
+                         "the tracker, 1 of them claimed filed")
+        self.assertEqual(outcome.record["commented"], [{"id": "T-1", "finding": 1}])
+
+    def test_an_unread_filed_claim_beside_a_confirmed_card_fails_and_keeps_the_confirmed(self):
+        """The confirmed card stays in the record, which the Feeder enters in its filed map on a
+        failed pass too, so the next tour does not file it again."""
+        self.test_process([finding(1), finding(2, area="Invoices")])
+        self.filing_process([{"finding": 1, "action": "filed", "id": "T-2"},
+                             {"finding": 2, "action": "filed", "id": "T-3"}],
+                            ["- [ ] T-2 Finding 1 [loop]", "- [ ] T-3 Finding 2 [loop]"])
+        adapter = self.adapter_whose_read_fails(
+            "T-3", lambda task_id: {"id": task_id, "skipped": "gh timed out"})
+        outcome, _ = self.run_pass(adapter=adapter)
+        self.assertEqual(outcome.record["status"], testloop.FAILED)
+        self.assertIn("1 of the 2 claims", outcome.record["reason"])
+        self.assertEqual([entry["id"] for entry in outcome.record["filed"]], ["T-2"])
+
+    def test_an_unread_claim_after_a_lost_lease_leaves_the_lease_as_the_reason(self):
+        """The lost Lease headlines, the per claim note says what went unread, and no count
+        sentence is added beside a filing failure."""
         self.test_process([finding(1)])
         launched = launch.LaunchResult(session_id="filing", lease_lost=True)
         answer = filing.FilingResult(
@@ -597,8 +628,9 @@ class TourAndFiling(PassCase):
             outcome, _ = self.run_pass(adapter=adapter)
         self.assertEqual(outcome.record["status"], testloop.FAILED)
         self.assertEqual(outcome.record["reason"], "the lease was lost while the filing process ran")
-        self.assertIn("1 of the 1 claim the filing block names could not be read back",
-                      "\n".join(outcome.record["notes"]))
+        notes = "\n".join(outcome.record["notes"])
+        self.assertIn("card T-9 claimed filed could not be read: gh timed out", notes)
+        self.assertNotIn("the filing block names could not be read back", notes)
 
     def test_a_claim_read_back_as_existing_before_the_pass_leaves_the_pass_ran(self):
         """A read that answered is not a failed read: the pre existing card is a note and the

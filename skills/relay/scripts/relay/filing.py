@@ -99,8 +99,9 @@ class Confirmation:
     """What `confirm` could read back. `filed` and `commented` are the entries whose card the
     adapter read, in block order; `notes` one sentence per entry it could not, and per entry
     the pass may not count. Only `filed` are new cards (R15). `unread` are the entries whose
-    read raised or was skipped, the subset of `notes` that says nothing about the card itself
-    (issue #125)."""
+    read raised or was skipped (issue #125). The adapters answer a card that does not exist
+    with a skipped read too, so an unread entry is a card the pass cannot vouch for either way,
+    not proof of a tracker outage."""
     filed: tuple = ()
     commented: tuple = ()
     notes: tuple = ()
@@ -383,14 +384,12 @@ def confirm(entries, adapter, known=()):
         label = "finding %s" % entry.get("finding")
         try:
             card = adapter.read(card_id) or {}
+            problem = card.get("skipped")
         except Exception as exc:
+            problem = exc
+        if problem:
             notes.append("%s: card %s claimed %s could not be read: %s"
-                         % (label, card_id, entry.get("action"), exc))
-            unread.append(dict(entry))
-            continue
-        if card.get("skipped"):
-            notes.append("%s: card %s claimed %s could not be read: %s"
-                         % (label, card_id, entry.get("action"), card["skipped"]))
+                         % (label, card_id, entry.get("action"), problem))
             unread.append(dict(entry))
             continue
         if entry.get("action") == ACTION_COMMENTED:
