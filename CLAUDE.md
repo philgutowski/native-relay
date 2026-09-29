@@ -54,7 +54,7 @@ overrides Phillip's global backlog convention for this repo. Concretely:
 ## Working here
 
 - Run the suite from the repo root: `python3 -m unittest discover -s tests`. It takes about
-  fourteen minutes (2352 tests as of 2026-09-28), so give it a timeout of fifteen or more and do not
+  fourteen minutes (2359 tests as of 2026-09-28), so give it a timeout of fifteen or more and do not
   read a long silence as a hang; single modules run from `tests/` with
   `python3 -m unittest test_<name>`.
 - Halt classes are a closed set in `contracts.py` (KTD6). A new outcome is a finding attached to
