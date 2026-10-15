@@ -85,11 +85,26 @@ class DispatchRun:
         if self.failure is not None:
             code, err = self.failure
             return _Proc(code, "", err)
-        if "project" in args:
+        if args[:3] == ["gh", "repo", "view"]:
+            return _Proc(0, json.dumps({"id": "R_fixture", "nameWithOwner": "example-org/relay"}), "")
+        if "project" in args or args[:3] == ["gh", "api", "graphql"]:
             if self.items_failure is not None:
                 code, err = self.items_failure
                 return _Proc(code, "", err)
-            return _Proc(0, fixture(self.items), "")
+            if "project" in args:
+                return _Proc(0, fixture(self.items), "")
+            # One issue's project memberships, the per card read, answered from the same board
+            # fixture the listing answers from, so the two reads agree by construction.
+            number = next(value.split("=", 1)[1] for value in args if value.startswith("number="))
+            nodes = []
+            for item in json.loads(fixture(self.items))["items"]:
+                if str(item["content"]["number"]) != number:
+                    continue
+                nodes.append({"id": item["id"], "project": {"id": "PVT_fixture", "number": 4},
+                              "fieldValueByName": ({"name": item["status"]}
+                                                   if item.get("status") else None)})
+            return _Proc(0, json.dumps({"data": {"repository": {"issue": {"projectItems": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}), "")
         number = args[args.index("view") + 1]
         name = self.issues.get(str(number))
         if name is None:
@@ -423,14 +438,17 @@ class StartStepAgreesWithCloseout(AdapterCase):
         Closeout was told to move the item back to `OPEN`, a column the board did not have. The
         real adapter reads a board holding the item with no Status, and its answer goes through
         the same record and renderer the run loop uses."""
-        board = {"items": [{"id": "PVTI_1", "content": {"type": "Issue", "number": 1,
-                                                        "title": "t", "body": "d"}}],
-                 "totalCount": 1}
+        membership = {"data": {"repository": {"issue": {"projectItems": {
+            "nodes": [{"id": "PVTI_1", "project": {"id": "PVT_1", "number": 4},
+                       "fieldValueByName": None}],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}
         issue = {"id": "I_1", "title": "t", "body": "d", "state": "OPEN", "comments": []}
 
         def run(args, timeout=None):
-            if "project" in args:
-                return _Proc(0, json.dumps(board), "")
+            if args[:3] == ["gh", "repo", "view"]:
+                return _Proc(0, json.dumps({"id": "R_1", "nameWithOwner": "example-org/relay"}), "")
+            if args[:3] == ["gh", "api", "graphql"]:
+                return _Proc(0, json.dumps(membership), "")
             return _Proc(0, json.dumps(issue), "")
 
         manifest = self.github_manifest(status_field="Done")
@@ -832,6 +850,19 @@ class GitHub(AdapterCase):
                         "the project status field named in the manifest was not consulted")
         self.assertEqual(adapter.status("13")["status"], "Done")
 
+    def test_a_status_read_asks_the_issue_for_its_item_and_never_lists_the_board(self):
+        """2026-10-14: a 313 card board made every `gh project item-list` a 405 point call
+        against the account's 5,000 point hour, and `status()` listed the board for one card.
+        The per card read is one point whatever the board holds."""
+        run = self.run_for()
+        adapter = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"), run=run)
+        adapter.status("13")
+        self.assertFalse(any(call[:3] == ["gh", "project", "item-list"] for call in run.calls),
+                         "a single card's status listed the whole board")
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 1)
+        query = next(value for value in run.calls[-1] if value.startswith("query="))
+        self.assertIn("projectItems", query)
+
     def test_a_landed_closeout_closes_the_issue_and_moves_the_item_to_the_status_field(self):
         text = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"),
                                         run=self.run_for()).closeout_instructions("landed")
@@ -855,12 +886,14 @@ class GitHub(AdapterCase):
         self.assertIn("project number `4`", text)
         self.assertIn("gh project view 4 --owner example-org --format json", text,
                       "the project id must come from project view, not field-list or item-list")
-        self.assertIn("gh project field-list 4 --owner example-org --format json --limit %d"
-                      % gh_adapter.PROJECT_ITEM_LIMIT, text,
-                      "field-list defaults to a 30 row page too, so it needs the same limit")
-        self.assertIn("gh project item-list 4 --owner example-org --format json --limit %d"
-                      % gh_adapter.PROJECT_ITEM_LIMIT, text,
-                      "item-list must carry the same limit the adapter's own reads use")
+        self.assertIn("ProjectV2SingleSelectField { id options { id name } }", text,
+                      "the Status field and its options come from one query on the project node")
+        self.assertIn("projectItems(first: 50) { nodes { id project { number } } }", text,
+                      "the item id comes from the issue's own memberships")
+        self.assertIn("project number is 4", text)
+        self.assertNotIn("gh project item-list 4", text,
+                         "a board listing is hundreds of points of the hourly GraphQL budget")
+        self.assertNotIn("gh project field-list 4", text)
 
     def test_a_landed_closeout_states_the_fallback_for_an_issue_off_the_project(self):
         text = gh_adapter.GitHubAdapter(self.github_manifest(status_field="Done"),
@@ -877,10 +910,10 @@ class GitHub(AdapterCase):
             self.assertIn("owner `example-org`", text, outcome)
             self.assertIn("project number `4`", text, outcome)
             self.assertIn("gh project view 4 --owner example-org --format json", text, outcome)
-            self.assertIn("gh project field-list 4 --owner example-org --format json --limit %d"
-                          % gh_adapter.PROJECT_ITEM_LIMIT, text, outcome)
-            self.assertIn("gh project item-list 4 --owner example-org --format json --limit %d"
-                          % gh_adapter.PROJECT_ITEM_LIMIT, text, outcome)
+            self.assertIn("ProjectV2SingleSelectField { id options { id name } }", text, outcome)
+            self.assertIn("projectItems(first: 50) { nodes { id project { number } } }", text, outcome)
+            self.assertNotIn("gh project item-list 4", text, outcome)
+            self.assertNotIn("gh project field-list 4", text, outcome)
 
     def test_a_return_to_move_states_the_fallback_for_an_issue_off_the_project(self):
         for outcome in ("blocked", "halted"):
