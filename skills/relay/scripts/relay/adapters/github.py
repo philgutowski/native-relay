@@ -18,6 +18,14 @@ from . import (NETWORK_TIMEOUT_SECONDS, OUTCOME_HALTED, OUTCOME_LANDED, referenc
 
 # gh project item-list stops at 30 items unless told otherwise; a board past 30 made every
 # later card read as absent from the board (2026-08-29).
+#
+# GitHub meters GraphQL by the node, 5,000 points an hour for the whole account, every token
+# and every process together, and item-list asks for every field of every card: about 101
+# points per page of 100. A 313 card board cost 405 points a listing on 2026-10-14 and the
+# account ran dry twice in one evening between the runner, the closeout and the seats around
+# it. So the listing serves `candidates()` alone, the one read whose answer is the whole board.
+# Every single card read below starts from the issue's own project memberships, one point
+# whatever the board holds, the way the triple reader always has.
 PROJECT_ITEM_LIMIT = 500
 
 # `gh project item-list` itself has a 500 item ceiling.  That is fine for the serial
@@ -96,6 +104,7 @@ class GitHubAdapter:
         self._in_review = manifest.tracker.in_review_status
         self._run = run or make_run(manifest.project.repo)
         self._repository = None
+        self._coordinates = None
 
     # Transport.
     def _gh(self, args):
@@ -112,15 +121,10 @@ class GitHubAdapter:
             return None, "gh returned output that is not JSON: %s" % exc
 
     def _board(self, cache=None):
-        """`cache`, when given, is a dict this read may reuse across a batch of calls (issue
-        #61): the run end audit checks many landed cards in one pass, and each call used to make
-        its own `gh project item-list`, bounding the pass at 30 seconds times the landed count
-        rather than once. A single-card caller passes nothing and reads fresh every time, same
-        as before.
-
-        Only a successful read is cached. One transient failure, a rate limit or a flaky
-        network, must cost the one card whose turn it was, the way it always did, not read as
-        an unreadable board for every other card sharing this pass's cache."""
+        """The whole board, for `candidates()` alone: about one GraphQL point per card (the
+        constants above), so no single card read comes here. `cache`, when given, is a dict
+        this read may reuse across a batch of calls (issue #61); only a successful read is
+        cached, so one transient failure costs the one caller whose turn it was."""
         if cache is not None and "board" in cache:
             return cache["board"]
         payload, reason = self._gh([
@@ -149,48 +153,58 @@ class GitHubAdapter:
     def _project_status(self, task_id, cache=None):
         """Returns (status, reason). The reason is what separates a board this adapter could not
         read from a board that genuinely does not carry the item: both used to come back as
-        None, and None reads as `not terminal`, so an unreadable board looked exactly like a card
-        that had not moved."""
-        items, reason = self._items(cache=cache)
+        None, and None reads as `not terminal`, so an unreadable board looked exactly like a
+        card that had not moved."""
+        on_board, item, reason = self._membership(task_id, cache=cache)
         if reason:
             return None, reason
-        for item in items:
-            content = item.get("content") or {}
-            if str(content.get("number")) == str(task_id):
-                return item.get("status"), None
-        return None, None
+        return (item or {}).get("status"), None
 
     def _project_item(self, task_id, cache=None):
         """Returns (on_board, status, reason) for this repository's issue on the declared project.
 
-        Stricter than `_project_status` in two ways, because its answer is reported rather than
-        acted on and a wrong "not on the board" is silent. A project can carry issues from more
-        than one repository, so an item matches on the repository as well as the number. And a
-        board past PROJECT_ITEM_LIMIT is a reason rather than an absence, since the item may sit
-        in the part item-list did not return. `on_board` separates an issue the project does not
-        carry from an item on it with no status set; both read as a None status."""
-        repository, reason = self._repository_name()
+        Stricter than `_project_status` in one way, because its answer is reported rather than
+        acted on and a wrong "not on the board" is silent: `on_board` separates an issue the
+        project does not carry from an item on it with no status set; both read as a None
+        status. The read starts from the issue, so it matches this repository's issue by
+        construction and has no board ceiling to fall off the end of."""
+        on_board, item, reason = self._membership(task_id, cache=cache)
         if reason:
             return False, None, reason
-        payload, reason = self._board(cache=cache)
+        return on_board, (item or {}).get("status"), None
+
+    def _membership(self, task_id, cache=None):
+        """Returns (on_board, item, reason) for one issue's item on the declared project, at one
+        GraphQL point: the issue's own `projectItems`, matched on the project number.
+
+        `cache`, when given, is a dict this read may reuse across a batch of calls (issue #61):
+        the run end audit checks many landed cards in one pass, and `status()` and the lag read
+        each ask after the same card, so a card's answer is read once per pass rather than once
+        per question. Only a successful read is cached. One transient failure, a rate limit or
+        a flaky network, must cost the one card whose turn it was, not read as an unreadable
+        board for every other card sharing this pass's cache."""
+        key = "item:%s" % task_id
+        if cache is not None and key in cache:
+            return cache[key]
+        coordinates, reason = self._repository_coordinates()
+        if coordinates is None:
+            return False, None, reason
+        item, reason = self._memberships(coordinates, task_id)
         if reason:
             return False, None, reason
-        items = payload.get("items") or []
-        for item in items:
-            content = item.get("content") or {}
-            if str(content.get("number")) != str(task_id):
-                continue
-            # gh names the repository on every issue item; an item without one is taken as this
-            # repository's, which is how every read before this one matched.
-            owner = content.get("repository")
-            if owner and str(owner).lower() != repository.lower():
-                continue
-            return True, item.get("status"), None
-        total = payload.get("totalCount")
-        if isinstance(total, int) and total > len(items):
-            return False, None, ("the board holds %d items and item-list returned %d, so #%s may "
-                                 "be past the end" % (total, len(items), task_id))
-        return False, None, None
+        answer = (item is not None, item, None)
+        if cache is not None:
+            cache[key] = answer
+        return answer
+
+    def _repository_coordinates(self):
+        """`{"owner", "repository"}` of the repository this adapter reads, read once."""
+        if self._coordinates is None:
+            identity, reason = self._repository_identity()
+            if identity is None:
+                return None, reason
+            self._coordinates = {"owner": identity["owner"], "repository": identity["repository"]}
+        return self._coordinates, None
 
     def _repository_name(self):
         """`owner/name` of the repository this adapter reads, from `gh repo view`, read once."""
@@ -301,7 +315,19 @@ class GitHubAdapter:
             self._project_number, self._owner)
 
     def _project_item_for_issue(self, repository, project_id, task_id):
-        """Read one declared issue's membership, rather than truncating the whole board."""
+        """Read one declared issue's membership, rather than truncating the whole board. For the
+        triple reader, which fences on the project's node id, an issue off the project is a
+        reason: a partial snapshot is never an eligible allocation."""
+        item, reason = self._memberships(repository, task_id, project_id=project_id)
+        if item is None and reason is None:
+            return None, "GitHub issue #%s is not on the declared project" % task_id
+        return item, reason
+
+    def _memberships(self, repository, task_id, project_id=None):
+        """Returns (item, reason): `item` is `{"id", "status"}` for this issue's item on the
+        declared project, matched on the project's node id when `project_id` is given and on
+        the manifest's project number otherwise. An issue the project does not carry is
+        (None, None); a read that failed is (None, reason)."""
         query = """
 query($owner: String!, $repository: String!, $number: Int!, $cursor: String, $statusField: String!) {
   repository(owner: $owner, name: $repository) {
@@ -325,7 +351,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String, $st
         while True:
             data, reason = self._graphql(query, {
                 "owner": repository["owner"], "repository": repository["repository"],
-                "number": task_id, "cursor": cursor, "statusField": self._status_field,
+                "number": task_id, "cursor": cursor, "statusField": self._status_field or "Status",
             })
             if data is None:
                 return None, reason
@@ -336,7 +362,11 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String, $st
             for item in items.get("nodes") or []:
                 seen += 1
                 project = item.get("project") or {}
-                if str(project.get("id") or "") == project_id:
+                if project_id is not None:
+                    hit = str(project.get("id") or "") == str(project_id)
+                else:
+                    hit = str(project.get("number")) == str(self._project_number)
+                if hit:
                     status = (item.get("fieldValueByName") or {}).get("name")
                     item_id = str(item.get("id") or "").strip()
                     if not item_id:
@@ -346,7 +376,7 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String, $st
                     return None, "GitHub issue #%s has too many project memberships to read safely" % task_id
             page = items.get("pageInfo") or {}
             if not page.get("hasNextPage"):
-                return None, "GitHub issue #%s is not on the declared project" % task_id
+                return None, None
             cursor = page.get("endCursor")
             if not cursor:
                 return None, "GitHub project membership pagination lost its cursor"
@@ -530,17 +560,25 @@ query($owner: String!, $repository: String!, $number: Int!, $cursor: String) {
         the return every blocked or halted card sits in progress with nobody on it.
         `baseline_unknown` (issue #51) is an item with no `return_to` because its status was
         never read, where "do not move its project item" alone would leave it stranded."""
-        # `gh project item-edit` needs the project's node id, which neither field-list nor
-        # item-list returns; `gh project view` does. Both list commands default to a 30 row
-        # page (2026-08-29, PROJECT_ITEM_LIMIT above), so both carry the same explicit limit.
+        # `gh project item-edit` needs the project's node id, which `gh project view` gives at
+        # one point. The field, its options and the item come from two one point queries: a
+        # `gh project field-list` or `item-list` of a big board costs hundreds of points of the
+        # account's hourly GraphQL budget (2026-10-14, the constants above), and a closeout
+        # that retries one into a spent hour empties the next hour too.
         ids = (
-            "Read the project id from `gh project view %s --owner %s --format json`, the "
-            "field and option ids from `gh project field-list %s --owner %s --format json "
-            "--limit %d`, and the item id from `gh project item-list %s --owner %s --format "
-            "json --limit %d`."
-            % (self._project_number, self._owner,
-               self._project_number, self._owner, PROJECT_ITEM_LIMIT,
-               self._project_number, self._owner, PROJECT_ITEM_LIMIT)
+            "Read the project id from `gh project view %s --owner %s --format json`; the "
+            "Status field id and its option ids with `gh api graphql -F id=<project id> -f "
+            "query='query($id: ID!) { node(id: $id) { ... on ProjectV2 { field(name: \"Status\") "
+            "{ ... on ProjectV2SingleSelectField { id options { id name } } } } } }'`; and the "
+            "item id from the issue itself, with `gh repo view --json owner,name` for the "
+            "repository and `gh api graphql -F owner=<owner> -F name=<name> -F number=<issue "
+            "number> -f query='query($owner: String!, $name: String!, $number: Int!) { "
+            "repository(owner: $owner, name: $name) { issue(number: $number) { "
+            "projectItems(first: 50) { nodes { id project { number } } } } } }'`, keeping the "
+            "node whose project number is %s. Never list the whole board with `gh project "
+            "item-list` or `gh project field-list`; each costs a share of the account's hourly "
+            "GraphQL budget on a big board."
+            % (self._project_number, self._owner, self._project_number)
         )
         if outcome == OUTCOME_LANDED:
             close = ("Close the issue with `gh issue close <number>` and add one comment naming "

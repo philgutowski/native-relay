@@ -33,20 +33,25 @@ REPO = "example-org/relay-target"
 class TwoTruths:
     """A `run(args, timeout=None)` for `gh`. `issues` maps an issue number to its state, and
     `board` maps an issue number to its item's status on the declared project; a number absent
-    from `board` is an issue the project does not carry. `foreign` is the same for another
-    repository's issues on the same project, listed first. `board_failure` fails the board read
-    alone, the shape that matters: `gh issue view` needs no project scope and item-list does.
-    `total` overrides the board's totalCount, to model a board past item-list's limit."""
+    from `board` is an issue the project does not carry. `foreign` is the same for the issue's
+    item on another project (number 9), listed first in the issue's memberships. `board_failure`
+    fails the board read alone, the shape that matters: `gh issue view` needs no project scope
+    and the membership query does. The per card read is the issue's own `projectItems`, one
+    GraphQL point (2026-10-14); `item-list` stays answered for `candidates()` only."""
 
-    def __init__(self, issues, board, board_failure=None, foreign=None, total=None,
-                 repo_failure=None):
+    def __init__(self, issues, board, board_failure=None, foreign=None, repo_failure=None):
         self.issues = dict(issues)
         self.board = dict(board)
         self.board_failure = board_failure
         self.foreign = dict(foreign or {})
-        self.total = total
         self.repo_failure = repo_failure
         self.calls = []
+
+    @staticmethod
+    def _membership(number, status, project_number):
+        return {"id": "PVTI_%s_%s" % (project_number, number),
+                "project": {"id": "PVT_%s" % project_number, "number": project_number},
+                "fieldValueByName": {"name": status} if status is not None else None}
 
     @staticmethod
     def _item(number, status, repository):
@@ -66,10 +71,19 @@ class TwoTruths:
         if args[:3] == ["gh", "project", "item-list"]:
             if self.board_failure:
                 return _Proc(1, "", self.board_failure)
-            items = ([self._item(n, s, "example-org/elsewhere") for n, s in self.foreign.items()]
-                     + [self._item(n, s, REPO) for n, s in self.board.items()])
-            total = len(items) if self.total is None else self.total
-            return _Proc(0, json.dumps({"items": items, "totalCount": total}))
+            items = [self._item(n, s, REPO) for n, s in self.board.items()]
+            return _Proc(0, json.dumps({"items": items, "totalCount": len(items)}))
+        if args[:3] == ["gh", "api", "graphql"]:
+            if self.board_failure:
+                return _Proc(1, "", self.board_failure)
+            number = next(value.split("=", 1)[1] for value in args if value.startswith("number="))
+            nodes = []
+            if number in self.foreign:
+                nodes.append(self._membership(number, self.foreign[number], 9))
+            if number in self.board:
+                nodes.append(self._membership(number, self.board[number], 6))
+            return _Proc(0, json.dumps({"data": {"repository": {"issue": {"projectItems": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}))
         if args[:3] == ["gh", "issue", "view"]:
             number = args[3]
             if number not in self.issues:
@@ -126,20 +140,26 @@ class BoardLag(unittest.TestCase):
         self.assertIsNone(lag)
         self.assertIn("missing project scope", reason)
 
-    def test_another_repositorys_item_with_the_same_number_is_not_this_issues_item(self):
-        """A project can carry more than one repository, so a number alone matches the wrong
-        issue: listed first, the foreign item would hide this one's lag or invent one."""
+    def test_another_projects_item_for_the_same_issue_is_not_the_declared_projects_item(self):
+        """An issue can sit on more than one project, so its first membership is not
+        necessarily the declared one: listed first, the other project's item would hide this
+        one's lag or invent one."""
         run = TwoTruths({"12": "CLOSED"}, {"12": "In review"}, foreign={"12": "Done"})
         lag, _ = adapters.board_lag(_adapter(run), "12")
         self.assertEqual(lag["card_status"], "In review")
         run = TwoTruths({"12": "CLOSED"}, {"12": "Done"}, foreign={"12": "In review"})
         self.assertEqual(adapters.board_lag(_adapter(run), "12"), (None, None))
 
-    def test_a_board_past_the_item_limit_is_a_reason_rather_than_an_absence(self):
-        run = TwoTruths({"12": "CLOSED"}, {"13": "Done"}, total=600)
+    def test_the_read_starts_from_the_issue_and_never_lists_the_board(self):
+        """2026-10-14: a 313 card board made every `gh project item-list` a 405 point call
+        against the account's 5,000 point hour. The issue's own memberships are one point and
+        have no board ceiling to fall off the end of."""
+        run = TwoTruths({"12": "CLOSED"}, {"12": "In review"})
         lag, reason = adapters.board_lag(_adapter(run), "12")
-        self.assertIsNone(lag)
-        self.assertIn("600", reason)
+        self.assertIsNone(reason)
+        self.assertEqual(lag["card_status"], "In review")
+        self.assertFalse(any(call[:3] == ["gh", "project", "item-list"] for call in run.calls))
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 1)
 
     def test_a_repository_that_cannot_be_named_is_a_reason(self):
         run = TwoTruths({"12": "CLOSED"}, {"12": "In review"}, repo_failure="not a repo")
@@ -154,18 +174,20 @@ class BoardLag(unittest.TestCase):
         adapters.board_lag(adapter, "13")
         self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "repo", "view"]), 1)
 
-    def test_a_shared_cache_makes_one_board_read_for_many_cards(self):
+    def test_a_shared_cache_reads_each_card_once_for_many_questions(self):
         """Issue #61: a caller checking several landed cards in one pass, the run end audit's
-        own shape, used to make one full `gh project item-list` per card. A shared cache dict
-        makes the second call reuse the first's read."""
+        own shape, asks after the same card more than once. A shared cache dict makes the
+        second question about a card reuse the first's read; a different card is its own one
+        point read, since the read is per card now (2026-10-14)."""
         run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "In review", "13": "Done"})
         adapter = _adapter(run)
         cache = {}
         lag_12, _ = adapters.board_lag(adapter, "12", cache=cache)
         lag_13, _ = adapters.board_lag(adapter, "13", cache=cache)
+        adapters.board_lag(adapter, "12", cache=cache)
         self.assertEqual(lag_12["card_status"], "In review")
         self.assertIsNone(lag_13)
-        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 2)
 
     def test_a_failed_read_is_not_cached_so_a_later_call_can_retry(self):
         """Issue #61's own review of the cache fix: caching a failure the same way a success is
@@ -179,18 +201,18 @@ class BoardLag(unittest.TestCase):
         self.assertIsNone(lag)
         self.assertIn("rate limited", reason)
         run.board_failure = None
-        lag, reason = adapters.board_lag(adapter, "13", cache=cache)
+        lag, reason = adapters.board_lag(adapter, "12", cache=cache)
         self.assertIsNone(reason)
         self.assertIsNone(lag)
         self.assertEqual(
-            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 2)
+            sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 2)
 
-    def test_no_cache_reads_the_board_fresh_every_call_as_before(self):
-        run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "Done", "13": "Done"})
+    def test_no_cache_reads_the_card_fresh_every_call_as_before(self):
+        run = TwoTruths({"12": "CLOSED"}, {"12": "Done"})
         adapter = _adapter(run)
         adapters.board_lag(adapter, "12")
-        adapters.board_lag(adapter, "13")
-        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 2)
+        adapters.board_lag(adapter, "12")
+        self.assertEqual(sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 2)
 
     def test_an_adapter_with_one_status_per_card_has_nothing_to_check(self):
         self.assertEqual(adapters.board_lag(FakeAdapter(), "T-1"), (None, None))
@@ -228,7 +250,8 @@ class OpenIssueStatus(unittest.TestCase):
     def test_no_status_field_keeps_the_issue_state_and_reads_no_board(self):
         run = TwoTruths({"12": "OPEN"}, {"12": None})
         self.assertEqual(_adapter(run, status_field=None).status("12")["status"], "OPEN")
-        self.assertFalse(any(call[:3] == ["gh", "project", "item-list"] for call in run.calls))
+        self.assertFalse(any(call[:3] in (["gh", "project", "item-list"], ["gh", "api", "graphql"])
+                             for call in run.calls))
 
     def test_a_closed_issue_still_reads_closed_and_terminal(self):
         result = _adapter(TwoTruths({"12": "CLOSED"}, {"12": None})).status("12")
@@ -396,28 +419,31 @@ class Audit(unittest.TestCase):
         findings = self.build(TwoTruths({"12": "CLOSED"}, {"12": "In review"}))
         self.assertNotIn(contracts.AUDIT_ITEM_NOT_TERMINAL, [f["class"] for f in findings])
 
-    def test_two_landed_records_share_one_board_read(self):
+    def test_two_landed_records_read_each_card_once_and_never_list_the_board(self):
         """Issue #61: before the fix, each landed task's check made its own full
         `gh project item-list`, so a run end audit over many landed cards bounded its pass at
-        30 seconds times the landed count rather than once."""
+        30 seconds times the landed count rather than once. Since 2026-10-14 the read is per
+        card, one point each, and the pass's cache keeps it to one read per card."""
         self.store.upsert("13", status=contracts.STATUS_LANDED, landing_ref="3d79e18" + "0" * 33)
         manifest = _manifest(repo=self.repo, task_ids=("12", "13"))
         run = TwoTruths({"12": "CLOSED", "13": "CLOSED"}, {"12": "In review", "13": "Done"})
         audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
+        self.assertFalse(any(call[:3] == ["gh", "project", "item-list"] for call in run.calls))
         self.assertEqual(
-            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+            sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 2)
 
-    def test_an_open_cards_status_read_shares_the_same_board_cache_as_a_landed_items_lag(self):
+    def test_an_open_cards_status_read_shares_the_same_cache_as_a_landed_items_lag(self):
         """Issue #61's own review of the fix above: `status()` itself reads the project board
         for any open, non closed card once `status_field` is declared, and the audit's per task
         loop calls `status()` for every task up front, landed or not. Sharing the cache with
-        `_item_lag` alone left that call making its own board read per non landed card."""
+        `_item_lag` alone left that call making its own board read per non landed card. Per
+        card now: one read for the landed card's lag, one for the open card's status."""
         self.store.upsert("13", status=contracts.STATUS_BLOCKED)
         manifest = _manifest(repo=self.repo, task_ids=("12", "13"))
         run = TwoTruths({"12": "CLOSED", "13": "OPEN"}, {"12": "In review", "13": "Todo"})
         audit.build(manifest, self.store, gh_adapter.GitHubAdapter(manifest, run=run))
         self.assertEqual(
-            sum(1 for call in run.calls if call[:3] == ["gh", "project", "item-list"]), 1)
+            sum(1 for call in run.calls if call[:3] == ["gh", "api", "graphql"]), 2)
 
     def test_a_reopened_landed_card_with_an_empty_item_says_no_status(self):
         """Issue #78: an open issue's empty item now reads None rather than `OPEN`, and the
